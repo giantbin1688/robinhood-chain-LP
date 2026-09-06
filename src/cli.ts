@@ -291,7 +291,7 @@ const refTick = correction ? v4.tickFromPrice(v4.priceFromSqrtX96(correction.sqr
 const estSwap = swapShare(usdgBudget, 0n, refTick, rate)
 log(`计划: ${estSwap > 0n ? `换币 ≈${fmtU(estSwap)} USDG -> ≈${fmtT(BigInt(Math.floor(Number(estSwap) * rate)))} ${symbol}` : '无需换币'}，LP ≈${fmtU(usdgBudget - estSwap)} USDG + 全部拿到的 ${symbol}${correction ? '（校正开销另计）' : ''}`)
 log(`计划: 区间 ${rangeText(rangeFor(refTick))}，滑点 换币 ${swapSlippage}% / LP ${lpSlippage}%`)
-if (dryRun) { log('演练模式，到此为止'); process.exit(0) }
+if (dryRun) { log('演练模式，到此为止'); await new Promise((r) => setTimeout(r, 100)); process.exit(0) } // 稍等让批量请求的句柄关闭，避免 Windows 上退出时的 libuv 断言
 if (!opt.yes) {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   const ans = await rl.question('确认执行? (y/N) ')
