@@ -199,6 +199,40 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
   return { send, sendEstimated, ensureErc20Approval, permitFor, stats }
 }
 
+// ---- 换币：Uniswap 和 OKX 同时报价，按结果排序（精确输入看产出多少，精确输出看投入多少）----
+export type SwapOffer = {
+  via: 'uniswap' | 'okx'; amountIn: bigint; amountInMax: bigint; out: bigint; text: string; at: number
+  uni?: Awaited<ReturnType<ReturnType<typeof uniswapApi>['quote']>>; okx?: Awaited<ReturnType<NonNullable<ReturnType<typeof okxDex>>['swap']>>
+}
+export type SwapDeps = { uni: ReturnType<typeof uniswapApi>; okx: ReturnType<typeof okxDex>; via: string; fmtOut: (x: bigint) => string; outSym: string }
+export async function swapOffers(d: SwapDeps, tokenIn: Address, tokenOut: Address, type: 'EXACT_INPUT' | 'EXACT_OUTPUT', amount: bigint): Promise<SwapOffer[]> {
+  const quiet = (e: any) => (log(`报价失败: ${String(e?.message).slice(0, 100)}`), null)
+  const all = await Promise.all([
+    d.via !== 'okx' ? d.uni.quote(tokenIn, tokenOut, type, amount).then((q): SwapOffer => ({ via: 'uniswap', amountIn: q.amountIn, amountInMax: q.amountInMax, out: q.out, text: `Uniswap ≈${d.fmtOut(q.out)} ${d.outSym}`, uni: q, at: q.at })).catch(quiet) : null,
+    d.via !== 'uniswap' && d.okx && type === 'EXACT_INPUT' // OKX 在 RHC 上只支持精确输入
+      ? d.okx.swap(tokenIn, tokenOut, amount).then((s): SwapOffer => ({ via: 'okx', amountIn: amount, amountInMax: amount, out: s.out, text: `OKX ≈${d.fmtOut(s.out)} ${d.outSym} (${s.route})${s.honeypot ? ' 警告: OKX 标记为貔貅币' : ''}`, okx: s, at: Date.now() })).catch(quiet)
+      : null,
+  ])
+  const ok = all.filter((x): x is SwapOffer => !!x)
+  return type === 'EXACT_INPUT' ? ok.sort((a, b) => (a.out > b.out ? -1 : 1)) : ok.sort((a, b) => (a.amountIn < b.amountIn ? -1 : 1))
+}
+// 执行一个报价：授权（Uniswap 走 Permit2 签名，OKX 走它的授权合约）-> 发交易。返回收到的 tokenOut 数量
+export async function executeSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typeof txKit>, c: Clients, tokenIn: Address, tokenOut: Address, label: string) {
+  const balance = () => c.pub.readContract({ address: tokenOut, abi: erc20Abi, functionName: 'balanceOf', args: [c.wallet] })
+  const before = await balance()
+  if (o.via === 'okx') {
+    await kit.ensureErc20Approval(tokenIn, o.amountIn, await d.okx!.approver(), 'OKX DEX')
+    await kit.sendEstimated(`${label} (OKX)`, o.okx!.tx, o.okx!.tx.gasLimit)
+  } else {
+    await kit.ensureErc20Approval(tokenIn, o.amountInMax)
+    const tx = await d.uni.swapTx(o.uni!, c.wc!)
+    await kit.sendEstimated(`${label} (Uniswap)`, tx, tx.gasLimit)
+  }
+  const got = (await balance()) - before
+  if (got <= 0n) die(`${label}交易成功但没有收到代币?`)
+  return got
+}
+
 // ---- 本地仓位记录 positions.json（进场时追加，撤退时读取）----
 export type PositionRecord = { id: string; token: Address; symbol: string; poolId: Hex; kind: 'lp' | 'bridge'; at: string }
 const POSITIONS_FILE = 'positions.json'

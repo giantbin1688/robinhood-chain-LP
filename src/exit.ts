@@ -7,7 +7,7 @@ import { createPublicClient, encodeFunctionData, formatEther, getAddress, http, 
 import * as v4 from './v4.ts'
 import {
   POSM, PUBLIC_RPC, STATE_VIEW, USDG, chain, die, env, erc20Abi, ethPriceUsd, loadPositions, log, makeClients, now, okxDex, posmAbi,
-  sleep, stateViewAbi, tokenMeta, trim, txKit, uniswapApi, type Clients,
+  sleep, stateViewAbi, tokenMeta, trim, txKit, uniswapApi, swapOffers, executeSwap, type Clients,
 } from './common.ts'
 
 export const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase() // 合约返回的是校验和大小写地址，比较时忽略大小写
@@ -44,10 +44,11 @@ export type WithdrawOptions = {
   token?: Address; position?: bigint; via: string; slippage: number; lpSlippage: number; keepTokens: boolean; yes: boolean; dryRun: boolean; clients: Clients
 }
 export async function withdraw(o: WithdrawOptions) {
-  const { wallet, pub, wc } = o.clients
+  const { wallet, pub } = o.clients
   const balanceOf = (t: Address) => pub.readContract({ address: t, abi: erc20Abi, functionName: 'balanceOf', args: [wallet] })
   const token: Address = o.token ?? await (async () => {
     const [k] = await pub.readContract({ address: POSM, abi: posmAbi, functionName: 'getPoolAndPositionInfo', args: [o.position!] })
+    if (BigInt(k.currency1) === 0n) die(`仓位 ${o.position} 不存在或已被撤销`)
     return same(k.currency0, USDG) ? k.currency1 : k.currency0
   })()
   const [{ symbol, decimals }, ethPrice, usdgStart, tokenStart, positions] = await Promise.all([tokenMeta(pub, token), ethPriceUsd(pub), balanceOf(USDG), balanceOf(token), findPositions(o.clients, token, o.position)])
@@ -69,22 +70,14 @@ export async function withdraw(o: WithdrawOptions) {
   const sellAmount = tokenStart + expectToken
   log(`计划: 撤 ${positions.length} 个仓位（${groups.size} 笔交易），拿回 ≈${fmtU(expectUsdg)} USDG + ${fmtT(expectToken)} ${symbol}`)
 
-  // 卖币报价：Uniswap 和 OKX 同时报价，按能换回的 USDG 排序，最好的排前面
-  const uni = uniswapApi(wallet, o.slippage)
-  const okx = okxDex(wallet, o.slippage)
-  if (o.via === 'okx' && !okx) die('--via okx 需要在 .env 里配置 OKX_API_KEY / OKX_SECRET_KEY / OKX_API_PASSPHRASE')
-  type Offer = { via: 'okx' | 'uniswap'; out: bigint; text: string; okx?: Awaited<ReturnType<NonNullable<typeof okx>['swap']>>; uni?: Awaited<ReturnType<typeof uni.quote>> }
-  async function offers(amount: bigint): Promise<Offer[]> {
-    const all = await Promise.all([
-      o.via !== 'okx' ? uni.quote(token, USDG, 'EXACT_INPUT', amount).then((q): Offer => ({ via: 'uniswap', out: q.out, text: `Uniswap ≈${fmtU(q.out)} USDG`, uni: q })).catch((e) => (log(`Uniswap 报价失败: ${String(e.message).slice(0, 120)}`), null)) : null,
-      o.via !== 'uniswap' && okx ? okx.swap(token, USDG, amount).then((s): Offer => ({ via: 'okx', out: s.out, text: `OKX ≈${fmtU(s.out)} USDG (${s.route})${s.honeypot ? ' 警告: OKX 标记为貔貅币' : ''}`, okx: s })).catch((e) => (log(`OKX 报价失败: ${String(e.message).slice(0, 120)}`), null)) : null,
-    ])
-    return all.filter((x): x is Offer => !!x).sort((a, b) => (a.out > b.out ? -1 : 1))
-  }
+  // 卖币报价：Uniswap 和 OKX 同时报价，能换回更多 USDG 的排前面
+  const deps = { uni: uniswapApi(wallet, o.slippage), okx: okxDex(wallet, o.slippage), via: o.via, fmtOut: fmtU, outSym: 'USDG' }
+  if (o.via === 'okx' && !deps.okx) die('--via okx 需要在 .env 里配置 OKX_API_KEY / OKX_SECRET_KEY / OKX_API_PASSPHRASE')
+  const offers = (amount: bigint) => swapOffers(deps, token, USDG, 'EXACT_INPUT', amount)
   if (!o.keepTokens && sellAmount > 0n) {
     const os = await offers(sellAmount)
     if (os.length === 0) die('拿不到卖币报价，放弃')
-    log(`计划: 卖出 ≈${fmtT(sellAmount)} ${symbol}：${os.map((x) => x.text).join('；')}${os.length > 1 ? `，走 ${os[0].via}` : ''}${!okx && o.via !== 'uniswap' ? '（未配置 OKX_API_KEY，只有 Uniswap）' : ''}`)
+    log(`计划: 卖出 ≈${fmtT(sellAmount)} ${symbol}：${os.map((x) => x.text).join('；')}${os.length > 1 ? `，走 ${os[0].via}` : ''}${!deps.okx && o.via !== 'uniswap' ? '（未配置 OKX_API_KEY，只有 Uniswap）' : ''}`)
   }
   // 撤仓交易：BURN_POSITION ×n + TAKE_PAIR，最少拿回量 = 预估 × (1 - LP_SLIPPAGE)
   const floor = (x: bigint) => (x * BigInt(Math.round((100 - o.lpSlippage) * 100))) / 10_000n
@@ -105,8 +98,8 @@ export async function withdraw(o: WithdrawOptions) {
   }
 
   // ---- 1) 撤仓位 ----
-  const { sendEstimated, ensureErc20Approval, stats } = txKit(o.clients, usd, symOf)
-  for (const [, ps] of groups) await sendEstimated(`撤仓位 ${ps.map((p) => p.id).join(',')}`, burnTx(ps))
+  const kit = txKit(o.clients, usd, symOf)
+  for (const [, ps] of groups) await kit.sendEstimated(`撤仓位 ${ps.map((p) => p.id).join(',')}`, burnTx(ps))
   const [usdgAfterBurn, tokenBal] = await Promise.all([balanceOf(USDG), balanceOf(token)])
   log(`撤仓完成: 拿回 ${fmtU(usdgAfterBurn - usdgStart)} USDG + ${fmtT(tokenBal - tokenStart)} ${symbol}（含手续费）`)
 
@@ -115,18 +108,11 @@ export async function withdraw(o: WithdrawOptions) {
     const [best] = await offers(tokenBal)
     if (!best) die('卖币报价失败，代币留在钱包里')
     log(`卖出 ${fmtT(tokenBal)} ${symbol} -> ${best.text}`)
-    if (best.via === 'okx') {
-      await ensureErc20Approval(token, tokenBal, await okx!.approver(), 'OKX DEX')
-      await sendEstimated('卖币 (OKX)', best.okx!.tx, best.okx!.tx.gasLimit)
-    } else {
-      await ensureErc20Approval(token, tokenBal)
-      const tx = await uni.swapTx(best.uni!, wc!)
-      await sendEstimated('卖币 (Uniswap)', tx, tx.gasLimit)
-    }
+    await executeSwap(best, deps, kit, o.clients, token, USDG, '卖币')
   }
   const [usdgEnd, tokenEnd] = await Promise.all([balanceOf(USDG), balanceOf(token)])
   log(`完成: 共收回 ${fmtU(usdgEnd - usdgStart)} USDG${tokenEnd > 0n ? `，钱包还剩 ${fmtT(tokenEnd)} ${symbol}` : ''}`)
-  log(`gas 合计: ${stats.txCount} 笔，${trim(stats.gasTotal, 18)} ETH ($${usd(stats.gasTotal)})`)
+  log(`gas 合计: ${kit.stats.txCount} 笔，${trim(kit.stats.gasTotal, 18)} ETH ($${usd(kit.stats.gasTotal)})`)
   return { usdgGained: usdgEnd - usdgStart, tokenLeft: tokenEnd }
 }
 

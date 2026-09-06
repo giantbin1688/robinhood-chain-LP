@@ -57,16 +57,18 @@ npm run exit -- --token 0x代币地址
 |---|---|---|
 | `USDG_AMOUNT` | `25` | LP 总预算（USDG）。工具按区间配比和实时报价算出该换多少代币，剩下的 USDG 直接进 LP |
 | `POOL_FEE` | `5` | 池子手续费，百分比，最多 4 位小数：`5` = 5%，`3.9999` = 3.9999%，`0.3` = 0.3% |
+| `POOL_SELECT` | `auto` | 配置的池不存在时：`auto` = 复用该币已有的 USDG 池（同费率优先，否则流动性 ≥ max($5k, 预算) 中日成交最大的）；`exact` = 只用配置的费率/间距，没有就新建 |
 | `TICK_SPACING` | 空 | tick 间距。留空 = `POOL_FEE × 10000 / 50`（5%→1000、3%→600、1%→200）。只在建新池时生效，复用已有池时以链上为准 |
 | `RANGE` | `-50%,+100%` | LP 区间，相对现价的百分比，写法见下 |
 | `SWAP_SLIPPAGE` | `5` | 换币滑点 % |
+| `SWAP_VIA` | `best` | 进场换币走哪家：`best`（Uniswap、OKX 都报价取多者）/ `okx` / `uniswap`。Uniswap 路由常常只认一个薄池报不出大单，OKX 通常能找到更深的路 |
 | `LP_SLIPPAGE` | `5` | 组 LP / 撤 LP 时数量的余量 %，防止交易前价格小幅波动导致失败 |
 | `MAX_DEVIATION` | `10` | 池价与市场价的最大偏离 %，超过就先校正池价（见"池价校正"） |
 | `EXIT_SWAP_VIA` | `best` | 撤退时卖币走哪家：`best`（Uniswap、OKX 都报价取高者）/ `okx` / `uniswap` |
 | `WATCH_INTERVAL` | `10` | 监控：每隔几秒检查一次池价 |
 | `WATCH_CONFIRM` | `2` | 监控：连续几次检查都跳出区间才触发撤退（防单次插针） |
 
-手续费 + 间距共同决定"是哪个池"：3.9999% 和 4% 是两个不同的池，"已存在则复用"只匹配完全相同的组合。
+手续费 + 间距共同决定"是哪个池"：3.9999% 和 4% 是两个不同的池。这条链上别人建池多用"间距 = 费率 ÷ 100"（1.9999% → 200），Uniswap 网页默认是 ÷ 50，所以同一个费率也可能对不上——`POOL_SELECT=auto` 就是为此：会用 pool id 反推出已有池的精确间距再复用。
 
 ### `RANGE` 写法
 
@@ -91,7 +93,7 @@ npm run launch -- --token <地址> [--usdg 50] [--fee 3] [--spacing 600] [--rang
 | 参数 | 说明 |
 |---|---|
 | `--token` | 代币合约地址（必填） |
-| `--usdg` `--fee` `--spacing` `--range` `--slippage` `--lp-slippage` `--max-deviation` | 临时覆盖 `params.env` 里的同名参数，只对本次生效 |
+| `--usdg` `--fee` `--spacing` `--range` `--slippage` `--lp-slippage` `--max-deviation` `--pool-select` | 临时覆盖 `params.env` 里的同名参数，只对本次生效 |
 | `--watch` | 组完 LP 后不退出，继续监控，跳出区间自动撤退 |
 | `--dry-run` | 只打印计划，不发任何交易。没有私钥也能用，配合 `--from 0x地址` 指定钱包 |
 | `--yes` | 跳过 y/N 确认 |
@@ -118,6 +120,17 @@ npm run launch -- --token <地址> [--usdg 50] [--fee 3] [--spacing 600] [--rang
 23:37:00       https://robinhoodchain.blockscout.com/tx/0x<hash>
 23:37:00 gas 合计: 3 笔，0.000251 ETH ($0.62)
 ```
+
+配置的池不存在而这个币已经有 USDG 池时，会先打印候选并说明复用了哪个：
+
+```
+00:22:52 已有 PROLOGUE/USDG 池: 1.9999%/200 流动性$151,255 日成交$255,348；5%/500 流动性$321,192 日成交$98,594；…
+00:22:52 复用 PROLOGUE / USDG 2%（1.9999%/200，同费率）；只想用自己配置的费率请设 POOL_SELECT=exact
+00:22:55 市场价 0.00720377 USDG/PROLOGUE（okx），池价偏离 +6.6%
+00:22:58 计划: 换币 ≈148.379044 USDG -> OKX ≈19720.313383 PROLOGUE (Unknown Uniswap V3 Fork 100% + Uniswap V4 100%)，LP ≈851.620956 USDG + 全部拿到的 PROLOGUE
+```
+
+计划阶段就用真实数量向 Uniswap 和 OKX 两家报价：都找不到路、或价格冲击超过 20%，会在确认前直接停下，不花钱。
 
 每笔交易一行，发送后原地追加结果；任何一笔失败会立刻退出并打印 explorer 链接。ERC20 → Permit2 的授权是链上交易，每个币种每个钱包只需一次；Permit2 → PositionManager / UniversalRouter 的额度用签名附在交易里，不单独发交易。首次跑一个代币通常 3 笔交易，之后 2 笔。每次 mint 的仓位 id 都会记到 `positions.json`，供监控和撤退使用。
 
