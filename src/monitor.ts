@@ -24,16 +24,21 @@ export async function watchToken(o: WatchOptions) {
   const edges = (p: Position) => [usdgPerTokenAtTick(p.tickLower), usdgPerTokenAtTick(p.tickUpper)].sort((a, b) => a - b)
   log(`监控 ${symbol}/USDG: ${main.map((p) => `仓位 ${p.id} 区间 ${edges(p).map(p6).join(' .. ')}`).join('；')}，每 ${o.interval}s 检查，连续 ${o.confirm} 次跳出区间即撤退（Ctrl+C 停止）`)
 
+  // 只有"进入过区间后又离开"才算跳出：一开始就在区间外的是等待型仓位（挂在现价一侧等价格来），不触发
+  const armed = new Set<bigint>()
   let outStreak = 0, lastStatus = '', lastBeat = 0, errors = 0, polls = 0
   for (;;) {
     try {
       const ticks = new Map<Hex, number>()
       for (const id of new Set(main.map((p) => v4.poolId(p.key)))) ticks.set(id, (await pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [id] }))[1])
       const tickOf = (p: Position) => ticks.get(v4.poolId(p.key))!
-      const out = main.filter((p) => tickOf(p) < p.tickLower || tickOf(p) >= p.tickUpper)
+      const inRange = (p: Position) => tickOf(p) >= p.tickLower && tickOf(p) < p.tickUpper
+      for (const p of main) if (inRange(p)) armed.add(p.id)
+      const out = main.filter((p) => !inRange(p) && armed.has(p.id))
+      const waiting = main.filter((p) => !inRange(p) && !armed.has(p.id))
       const cur = usdgPerTokenAtTick(tickOf(main[0]))
       const [lo, hi] = [Math.min(...main.map((p) => edges(p)[0])), Math.max(...main.map((p) => edges(p)[1]))]
-      const status = `价格 ${p6(cur)} USDG/${symbol}，区间 ${p6(lo)} .. ${p6(hi)}（距下沿 ${pct(lo / cur - 1)}，距上沿 ${pct(hi / cur - 1)}）${out.length ? `，仓位 ${out.map((p) => p.id).join(',')} 已跳出区间` : '，区间内'}`
+      const status = `价格 ${p6(cur)} USDG/${symbol}，区间 ${p6(lo)} .. ${p6(hi)}（距下沿 ${pct(lo / cur - 1)}，距上沿 ${pct(hi / cur - 1)}）${out.length ? `，仓位 ${out.map((p) => p.id).join(',')} 已跳出区间` : waiting.length ? `，等待进入区间（现价在区间${cur > hi ? '上' : '下'}方）` : '，区间内'}`
       if (status !== lastStatus || Date.now() - lastBeat > 5 * 60_000) { log(status); lastStatus = status; lastBeat = Date.now() }
       outStreak = out.length ? outStreak + 1 : 0
       if (outStreak >= o.confirm) {

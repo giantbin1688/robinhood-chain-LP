@@ -18,6 +18,7 @@ const { values: opt } = parseArgs({
     fee: { type: 'string', default: env('POOL_FEE', '5') },                   // 池子费率 %
     spacing: { type: 'string', default: env('TICK_SPACING', '') },            // 留空 = fee/50
     range: { type: 'string', default: env('RANGE', '-50%,+100%') },          // 区间：相对现价的百分比
+    'price-range': { type: 'string', default: env('PRICE_RANGE', '') },      // 区间：绝对价格（USDG/代币）"最低价,最高价"，设置了就优先于 RANGE
     slippage: { type: 'string', default: env('SWAP_SLIPPAGE', '5') },         // 换币滑点 %
     'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },      // mint amountMax 余量 %
     'max-deviation': { type: 'string', default: env('MAX_DEVIATION', '10') },// 池价与市场价最大偏离 %
@@ -28,7 +29,7 @@ const { values: opt } = parseArgs({
     from: { type: 'string' },                         // --dry-run 时可用地址代替私钥
   },
 })
-if (!opt.token) die('用法: npm run launch -- --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--range="-50%,+100%"] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
+if (!opt.token) die('用法: npm run launch -- --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--range="-50%,+100%" | --price-range="0.006,0.01"] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
 const token = getAddress(opt.token)
 const usdgBudget = parseUnits(opt.usdg, 6)
 if (usdgBudget <= 0n) die('USDG_AMOUNT / --usdg 必须大于 0')
@@ -44,7 +45,10 @@ if (rangePct.length !== 2 || rangePct[0] === rangePct[1]) die(`RANGE / --range �
 const [pLo, pHi] = [Math.min(...rangePct), Math.max(...rangePct)]
 if (pLo <= -100) die('RANGE 下限必须大于 -100%')
 const [mLo, mHi] = [1 + pLo / 100, 1 + pHi / 100] // 代币价格倍数
-const rangeLabel = `${pLo > 0 ? '+' : ''}${pLo}% .. ${pHi > 0 ? '+' : ''}${pHi}%`
+// 绝对价格区间（USDG/代币）：设置了就用它，不看 RANGE
+const priceRange = (opt['price-range'].match(/\d*\.?\d+(?:e-?\d+)?/gi) ?? []).map(Number)
+if (opt['price-range'] && (priceRange.length !== 2 || !(priceRange[0] > 0) || !(priceRange[1] > priceRange[0]))) die(`PRICE_RANGE / --price-range 写法：最低价,最高价（USDG/代币），如 0.006,0.01，当前 "${opt['price-range']}"`)
+const rangeLabel = priceRange.length ? `${priceRange[0]} .. ${priceRange[1]} USDG` : `${pLo > 0 ? '+' : ''}${pLo}% .. ${pHi > 0 ? '+' : ''}${pHi}%`
 const swapSlippage = Number(opt.slippage), lpSlippage = Number(opt['lp-slippage'])
 if (!(swapSlippage >= 0 && swapSlippage <= 50 && lpSlippage >= 0 && lpSlippage <= 50)) die('滑点必须是 [0, 50] 之间的百分比')
 const maxDev = Number(opt['max-deviation']) / 100
@@ -113,11 +117,23 @@ log(`池子 ${symbol}/USDG 费率=${fee / 10000}% 间距=${spacing}: ${initializ
 // 代币价格 × m  <=>  代币是 currency0 时原始价格 × m，是 currency1 时原始价格 ÷ m
 const tickDelta = (m: number) => Math.log(m) / Math.log(1.0001)
 const [dLo, dHi] = tokenIs1 ? [-tickDelta(mHi), -tickDelta(mLo)] : [tickDelta(mLo), tickDelta(mHi)]
+// USDG/代币 的价格 -> 池子 tick（usdgPerTokenAtTick 的反函数）
+const tickAtUsdgPerToken = (p: number) => v4.tickFromPrice((tokenIs1 ? 1 / p : p) * 10 ** (dec1 - dec0))
 // 远端边界向外取整（保证覆盖要求的范围）；0% 那条边向内取整（单边仓位不包含现价，保持纯单边）
 const rangeFor = (t: number) => {
-  const lo = dLo === 0 ? v4.ceilToSpacing(t + 1, spacing) : v4.floorToSpacing(t + dLo, spacing)
-  const hi = dHi === 0 ? v4.floorToSpacing(t, spacing) : v4.ceilToSpacing(t + dHi, spacing)
+  let lo: number, hi: number
+  if (priceRange.length) {
+    // 绝对价格：两端向外取整；若本来整体在现价一侧、取整后却跨过了现价，把靠近现价的那端收回一格，保持纯单边
+    const ticks = priceRange.map(tickAtUsdgPerToken).sort((a, b) => a - b)
+    ;[lo, hi] = [v4.floorToSpacing(ticks[0], spacing), v4.ceilToSpacing(ticks[1], spacing)]
+    if (ticks[1] < t && hi > t) hi -= spacing
+    if (ticks[0] > t && lo <= t) lo += spacing
+  } else {
+    lo = dLo === 0 ? v4.ceilToSpacing(t + 1, spacing) : v4.floorToSpacing(t + dLo, spacing)
+    hi = dHi === 0 ? v4.floorToSpacing(t, spacing) : v4.ceilToSpacing(t + dHi, spacing)
+  }
   if (hi <= lo) die(`区间 ${rangeLabel} 不足一个 tick 间距（${spacing}），请放宽区间或减小 TICK_SPACING`)
+  if (lo < v4.MIN_TICK || hi > v4.MAX_TICK) die(`区间 ${rangeLabel} 超出可用价格范围`)
   return [lo, hi] as const
 }
 const rangeText = ([lo, hi]: readonly [number, number]) => {
