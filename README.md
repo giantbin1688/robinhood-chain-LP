@@ -1,15 +1,14 @@
-# rh-uni — Robinhood Chain 一键换币 + 建池 + 组 LP
+# rh-uni — Robinhood Chain 一键 LP：进场 / 监控 / 撤退
 
-输入一个代币地址，一条命令在 Robinhood Chain 上自动完成：
+在 Robinhood Chain 上围绕一个代币做 Uniswap v4 LP 的全套命令行工具，三条命令覆盖整个生命周期：
 
-1. **换币**：把预算中合适的份额 `USDG -> 代币`（Uniswap Trading API 找路由，UniversalRouter 成交，Permit2 签名授权，不需要单独 approve 给路由）
-2. **建池 / 复用**：`代币/USDG` 的 Uniswap v4 池，手续费和 tick 间距由参数决定（默认 5% / 1000）；池子已存在则复用
-3. **池价校正**：已有池的价格偏离市场价超过阈值时，先把池价推回市场价再组仓（见下文）
-4. **组 LP**：在现价的指定区间（默认 -50% ~ +100%）mint 仓位，预算两边几乎用尽
+| 命令 | 做什么 |
+|---|---|
+| `npm run launch -- --token 0x…` | **进场**：USDG 换币 → 建池（已有则复用，价格偏了先校正）→ 在现价区间组 LP |
+| `npm run watch -- --token 0x…` | **监控**：盯着池价，跳出区间就自动撤退 + 卖币；你手动撤了它自动停 |
+| `npm run exit -- --token 0x…` | **撤退**：撤掉全部仓位（本金 + 手续费），代币自动换回 USDG（Uniswap / OKX DEX 比价取高者） |
 
-还有一键撤退 `npm run exit`（撤掉该代币的全部仓位，本金 + 手续费，代币自动换回 USDG，Uniswap / OKX DEX 比价取高者）和自动监控 `npm run watch`（盯着池价，跳出区间就自动撤退 + 卖币；进场时加 `--watch` 可一条龙）。
-
-只需要一个钱包（USDG + 少量 ETH 付 gas）和一个 Uniswap API key。
+进场时加 `--watch` 可以一条龙：组完 LP 直接进入监控。只需要一个钱包（USDG + 少量 ETH 付 gas）和一个 Uniswap API key；OKX DEX 密钥可选。
 
 ## 快速开始
 
@@ -17,17 +16,30 @@
 npm install
 copy .env.example .env      # Linux/macOS: cp .env.example .env
 # 编辑 .env 填入 PRIVATE_KEY 和 UNISWAP_API_KEY；策略参数在 params.env
+```
 
-# 先演练（只打印计划，不发交易）
+典型流程：
+
+```bash
+# 1. 先演练（只打印计划，不发交易）
 npm run launch -- --token 0x代币地址 --dry-run
 
-# 正式执行（打印计划后输入 y 确认）
+# 2. 进场并直接进入监控（打印计划后输入 y 确认；之后终端保持打开）
+npm run launch -- --token 0x代币地址 --watch
+
+#    或者分开：先进场，再单独开监控
 npm run launch -- --token 0x代币地址
+npm run watch -- --token 0x代币地址
+
+# 3. 任何时候想手动撤退（监控会自动发现并停止）
+npm run exit -- --token 0x代币地址
 ```
+
+每条命令都支持 `--dry-run`（只看计划 / 模拟交易，不花钱）和 `--yes`（跳过确认）。
 
 ## 配置文件
 
-密钥和策略参数分成两个文件，`.env` 已被 `.gitignore` 排除，永远不要提交或分享它。
+密钥和策略参数分成两个文件。`.env` 和 `positions.json` 已被 `.gitignore` 排除，永远不要提交或分享 `.env`。
 
 ### `.env` — 密钥
 
@@ -35,24 +47,26 @@ npm run launch -- --token 0x代币地址
 |---|---|
 | `PRIVATE_KEY` | 付款钱包私钥（`0x` 开头 64 位十六进制）。钱包里要有 `USDG_AMOUNT` 的 USDG 和少量 ETH |
 | `UNISWAP_API_KEY` | Uniswap Trading API key，只用于问路由/拿交易数据，和钱包无关。免费申请：https://developers.uniswap.org/dashboard |
-| `HTTPS_PROXY` | 可选。本机直连不了 `trade-api.gateway.uniswap.org` 时填本地代理，如 `http://127.0.0.1:7897` |
-| `OKX_API_KEY` `OKX_SECRET_KEY` `OKX_API_PASSPHRASE` | 可选。撤退卖币时用 OKX DEX 聚合器和 Uniswap 比价。在 https://web3.okx.com/onchainos 申请 |
+| `OKX_API_KEY` `OKX_SECRET_KEY` `OKX_API_PASSPHRASE` | 可选。撤退卖币时用 OKX DEX 聚合器和 Uniswap 比价（实测常比 Uniswap 多换回 1~2%）。在 https://web3.okx.com/onchainos 申请 |
 | `RPC_URL` | 可选，默认公共节点 `https://rpc.mainnet.chain.robinhood.com`。强烈建议换成自己的 Alchemy 等节点：实测每次请求 50ms vs 公共节点 260ms，整趟快一倍 |
+| `HTTPS_PROXY` | 可选。本机直连不了 `trade-api.gateway.uniswap.org` / `web3.okx.com` 时填本地代理，如 `http://127.0.0.1:7897` |
 
 ### `params.env` — 策略参数
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `USDG_AMOUNT` | `25` | LP 总预算（USDG）。工具按区间配比和实时报价算出该换多少代币，剩下的 USDG 直接进 LP |
-| `POOL_FEE` | `5` | 池子手续费，百分比：`5` = 5%，`3` = 3%，`0.3` = 0.3% |
+| `POOL_FEE` | `5` | 池子手续费，百分比，最多 4 位小数：`5` = 5%，`3.9999` = 3.9999%，`0.3` = 0.3% |
 | `TICK_SPACING` | 空 | tick 间距。留空 = `POOL_FEE × 10000 / 50`（5%→1000、3%→600、1%→200）。只在建新池时生效，复用已有池时以链上为准 |
 | `RANGE` | `-50%,+100%` | LP 区间，相对现价的百分比，写法见下 |
 | `SWAP_SLIPPAGE` | `5` | 换币滑点 % |
-| `LP_SLIPPAGE` | `5` | 组 LP 时最大投入量的余量 %，防止 mint 前价格小幅波动导致失败 |
-| `MAX_DEVIATION` | `10` | 池价与市场价的最大偏离 %，超过就先校正池价 |
+| `LP_SLIPPAGE` | `5` | 组 LP / 撤 LP 时数量的余量 %，防止交易前价格小幅波动导致失败 |
+| `MAX_DEVIATION` | `10` | 池价与市场价的最大偏离 %，超过就先校正池价（见"池价校正"） |
 | `EXIT_SWAP_VIA` | `best` | 撤退时卖币走哪家：`best`（Uniswap、OKX 都报价取高者）/ `okx` / `uniswap` |
 | `WATCH_INTERVAL` | `10` | 监控：每隔几秒检查一次池价 |
 | `WATCH_CONFIRM` | `2` | 监控：连续几次检查都跳出区间才触发撤退（防单次插针） |
+
+手续费 + 间距共同决定"是哪个池"：3.9999% 和 4% 是两个不同的池，"已存在则复用"只匹配完全相同的组合。
 
 ### `RANGE` 写法
 
@@ -67,92 +81,120 @@ npm run launch -- --token 0x代币地址
 
 区间边界必须落在 tick 间距的格点上：远端边界向外取整（保证覆盖你要的范围），0% 那端向内取整（单边仓位不包含现价，保持纯单边）。5% 池的间距是 1000 tick ≈ 每格 10.5%，所以实际区间会比填的略宽、单边仓位离现价可能有最多一格的空档；计划里会打印实际区间。想更精确，建新池时把 `TICK_SPACING` 调小（如 `100`，每格 ≈ 1%）。区间不足一格会报错。
 
-## 命令行参数
-
-命令行参数只对本次运行生效，覆盖 `params.env` 的默认值：
+## 进场 `npm run launch`
 
 ```bash
 npm run launch -- --token <地址> [--usdg 50] [--fee 3] [--spacing 600] [--range="-30%,+30%"] \
-                  [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--yes] [--dry-run] [--from <地址>]
+                  [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run] [--from <地址>]
 ```
 
 | 参数 | 说明 |
 |---|---|
 | `--token` | 代币合约地址（必填） |
-| `--usdg` `--fee` `--spacing` `--range` `--slippage` `--lp-slippage` `--max-deviation` | 对应 `params.env` 里的同名参数 |
+| `--usdg` `--fee` `--spacing` `--range` `--slippage` `--lp-slippage` `--max-deviation` | 临时覆盖 `params.env` 里的同名参数，只对本次生效 |
+| `--watch` | 组完 LP 后不退出，继续监控，跳出区间自动撤退 |
 | `--dry-run` | 只打印计划，不发任何交易。没有私钥也能用，配合 `--from 0x地址` 指定钱包 |
-| `--watch` | 组完 LP 后不退出，继续监控，跳出区间自动撤退（见下文） |
-| `npm run exit -- …` / `npm run watch -- …` | 一键撤退 / 自动监控，见下文 |
 | `--yes` | 跳过 y/N 确认 |
 
 注意 `--range` 要写成 `--range="-30%,+30%"`（带 `=` 和引号），否则 `-30%` 会被当成另一个选项。
 
-## 执行流程与日志
+一次真实运行（8 秒，3 笔交易，gas 共 $0.62）：
 
 ```
-钱包 0x… | 53.14 USDG, 0.0287 ETH | ETH $2485
-代币 WORTHLESS (Worthless Coin) 精度=18 地址 0x…
-池子 WORTHLESS/USDG 费率=5% 间距=1000: 已存在，tick 346001 = 0.000942 USDG/WORTHLESS
-市场价 0.00151 USDG/WORTHLESS，池价偏离 -37.5%
-计划: 池价偏离 -37.5% 超过 10%，……把价格推到市场价
-计划: 换币 ≈12.23 USDG -> ≈8119 WORTHLESS，LP ≈12.77 USDG + 全部拿到的 WORTHLESS
-计划: 区间 ticks [334000, 349000] = 0.000698 .. 0.00313 USDG/WORTHLESS (-50% .. +100%)，滑点 换币 5% / LP 5%
+23:36:52 钱包 0xbD81…A828 | 1626.298771 USDG, 0.026797 ETH | ETH $2477.30
+23:36:52 代币 Investor (Investor) 精度=18 地址 0xa129…2Ed8
+23:36:52 池子 Investor/USDG 费率=3.9999% 间距=800: 不存在，将创建
+23:36:53 市场价 0.00113326 USDG/Investor
+23:36:53 计划: 换币 ≈56.517674 USDG -> ≈49874.134779 Investor，LP ≈43.482326 USDG + 全部拿到的 Investor
+23:36:53 计划: 区间 ticks [334400, 351200] = 0.000560196 .. 0.00300551 USDG/Investor (-50% .. +150%)，滑点 换币 5% / LP 5%
 确认执行? (y/N) y
-换币 0x<hash> ... 成功，247422 gas $0.23
-换币完成: 12.23 USDG -> 8050.12 WORTHLESS
-授权 WORTHLESS -> Permit2 0x<hash> ... 成功，46296 gas $0.04
-LP 价格: 池 tick 343480 = 0.00151 USDG/WORTHLESS
-组LP: ticks [334000, 349000]，liquidity …，投入 12.76 USDG + 8050.12 WORTHLESS（上限 …），剩余 0.01 USDG + 0 WORTHLESS
-组LP 0x<hash> ... 成功，365816 gas $0.34
-完成: 仓位 2019256，池 0x…
-      https://robinhoodchain.blockscout.com/tx/0x<hash>
-gas 合计: 3 笔，0.000230 ETH ($0.57)
+23:36:57 换币 0x<hash> ... 成功，194586 gas $0.18
+23:36:57 换币完成: 56.517674 USDG -> 48682.022211 Investor
+23:36:58 LP 价格: 新池初始价 tick 344170 = 0.00113145 USDG/Investor（市场探测价）
+23:36:58 组LP: ticks [334400, 351200]，liquidity 4237451407992395，投入 42.241099 USDG + 48682.022211 Investor（上限 43.482326 / 48682.022211），剩余 1.241227 USDG + 0 Investor
+23:36:59 授权 Investor -> Permit2 0x<hash> ... 成功，46201 gas $0.04
+23:37:00 建池+组LP 0x<hash> ... 成功，439531 gas $0.40
+23:37:00 完成: 仓位 2027534，池 0xb7bf…80c4（已记录到 positions.json，撤退: npm run exit -- --token 0xa129…2Ed8）
+23:37:00       https://robinhoodchain.blockscout.com/tx/0x<hash>
+23:37:00 gas 合计: 3 笔，0.000251 ETH ($0.62)
 ```
 
-每笔交易一行，发送后原地追加结果；任何一笔失败会立刻退出并打印 explorer 链接。ERC20 → Permit2 的授权是链上交易，每个币种每个钱包只需一次；Permit2 → PositionManager / UniversalRouter 的额度用签名附在交易里，不单独发交易。首次跑一个代币通常 3 笔交易（授权、换币、组 LP），之后 2 笔。
+每笔交易一行，发送后原地追加结果；任何一笔失败会立刻退出并打印 explorer 链接。ERC20 → Permit2 的授权是链上交易，每个币种每个钱包只需一次；Permit2 → PositionManager / UniversalRouter 的额度用签名附在交易里，不单独发交易。首次跑一个代币通常 3 笔交易，之后 2 笔。每次 mint 的仓位 id 都会记到 `positions.json`，供监控和撤退使用。
 
-## 一键撤退
+## 监控 `npm run watch`
 
 ```bash
-npm run exit -- --token 0x代币地址 --dry-run    # 先看：找到哪些仓位、能拿回多少、卖币报价
+npm run watch -- --token 0x代币地址                  # 对已有仓位开监控（终端保持打开）
+npm run watch -- --token 0x… --interval 5 --confirm 3  # 临时覆盖检查间隔 / 确认次数
+npm run watch -- --token 0x… --dry-run               # 触发时只演练撤退，不发交易（用来验证）
+```
+
+每 `WATCH_INTERVAL` 秒读一次池子的 tick，判断主要仓位是否在区间内（忽略过渡仓位和粉尘）。连续 `WATCH_CONFIRM` 次跳出区间就自动执行撤退：撤仓 + 领手续费 + 代币全部卖成 USDG，然后进程结束。每分钟核对一次仓位是否还在：**你手动撤掉了，监控自动停止**。日志只在状态变化或每 5 分钟打一行，不刷屏；RPC 偶发出错会继续重试，连续 30 次失败才退出。Ctrl+C 随时停止，仓位不受影响。
+
+```
+23:38:02 监控 Investor/USDG: 仓位 2027534 区间 0.000560196 .. 0.00300551，每 10s 检查，连续 2 次跳出区间即撤退（Ctrl+C 停止）
+23:38:02 价格 0.00107401 USDG/Investor，区间 0.000560196 .. 0.00300551（距下沿 -47.8%，距上沿 +179.8%），区间内
+```
+
+跳出区间的两种情况：价格**跌破下沿**时仓位已全部变成代币，撤退等于止损卖出；价格**涨破上沿**时仓位已全部变成 USDG，撤退等于止盈落袋（几乎没有代币可卖）。
+
+## 撤退 `npm run exit`
+
+```bash
+npm run exit -- --token 0x代币地址 --dry-run    # 先看：找到哪些仓位、能拿回多少、两家卖币报价、模拟撤仓交易
 npm run exit -- --token 0x代币地址              # 确认后执行
-npm run exit -- --position 2024265              # 只撤某一个仓位（自动识别代币）
-npm run exit -- --token 0x… --keep-tokens       # 只撤仓位不卖币
+npm run exit -- --position 2027534              # 只撤某一个仓位（自动识别代币）
+npm run exit -- --token 0x… --keep-tokens       # 只撤仓位，不卖币
 npm run exit -- --token 0x… --via okx           # 指定卖币走 OKX（或 uniswap）
+npm run exit -- --token 0x… --yes               # 跳过确认
 ```
 
-流程：找仓位（`positions.json` 记录 + 链上扫描 PositionManager 转给钱包的 NFT）→ 只保留该代币/USDG 池里还有流动性的 → 一笔交易撤掉同一个池的所有仓位并领取手续费（`BURN_POSITION` + `TAKE_PAIR`，最少拿回量按 `LP_SLIPPAGE` 留余量）→ 钱包里该代币全部卖成 USDG：Uniswap 和 OKX DEX 同时报价，走能换回更多 USDG 的一家（OKX 会顺带标记貔貅币）→ 打印共收回多少 USDG。演练模式会用 `estimateGas` 模拟撤仓交易，确认编码无误。
+流程：
 
-进场命令每次 mint 都会把仓位 id 记到 `positions.json`（本地文件，不进 git）；没记录的老仓位靠链上扫描也能找到。
+1. **找仓位**：`positions.json` 记录 + 链上扫描 PositionManager 转给钱包的所有 NFT，只保留"仍归你所有、属于该代币/USDG 池、还有流动性"的（没记录的老仓位也能找到）。
+2. **撤仓**：同一个池的仓位合并成一笔交易，`BURN_POSITION` + `TAKE_PAIR`，本金和未领手续费一起到账；最少拿回量按 `LP_SLIPPAGE` 留余量。过渡仓位的粉尘顺带回收。
+3. **卖币**：钱包里该代币全部卖成 USDG。Uniswap 和 OKX DEX 同时报价，走能换回更多 USDG 的一家（OKX 还会顺带标记貔貅币）。
+4. 打印共收回多少 USDG 和 gas。
 
-## 自动监控（跳出区间自动撤退）
+演练模式会用 `estimateGas` 在链上模拟撤仓交易，确认编码无误：
 
-```bash
-npm run launch -- --token 0x代币地址 --watch     # 进场后直接进入监控
-npm run watch -- --token 0x代币地址              # 对已有仓位单独开监控
-npm run watch -- --token 0x… --dry-run           # 触发时只演练撤退，不发交易（用来验证）
+```
+23:34:51 钱包 0xbD81…A828 | 1626.298771 USDG, 0 ROBIN | ETH $2479.11
+23:34:51 仓位 2024265: ROBIN/USDG 5% ticks [-320000, -311000]，≈227.174249 USDG + 13001.855366 ROBIN
+23:34:51 计划: 撤 1 个仓位（1 笔交易），拿回 ≈227.174249 USDG + 13001.855366 ROBIN
+23:34:51 计划: 卖出 ≈13001.855366 ROBIN：OKX ≈257.796604 USDG (Uniswap V4 - Community Hook 100%)；Uniswap ≈255.58358 USDG，走 okx
+23:34:51 模拟撤仓 2024265: OK，gas 221121
+23:34:51 演练模式，到此为止
 ```
 
-每 `WATCH_INTERVAL` 秒读一次池子的 tick，判断主要仓位是否在区间内（忽略过渡仓位和粉尘）。连续 `WATCH_CONFIRM` 次跳出区间就自动执行一键撤退：撤仓 + 领手续费 + 代币全部卖成 USDG（Uniswap / OKX 比价）。每分钟核对一次仓位是否还在：你手动撤掉了，监控自动停止。日志只在状态变化或每 5 分钟打一行，不刷屏；RPC 偶发出错会重试，连续 30 次失败才退出。Ctrl+C 随时停止（停止后仓位不受影响）。
+## 池价校正（进场时自动处理）
 
-跳出区间的两种情况：价格跌破下沿时仓位已全部变成代币，撤退等于止损卖出；价格涨破上沿时仓位已全部变成 USDG，撤退等于止盈落袋（几乎没有代币可卖）。
-
-## 池价校正
-
-别人建的池价格常常是过时的。如果直接在偏离的价格上组 LP，套利者会立刻把价格推回市场价，等于你以低于/高于市价的价格被动成交。所以工具在组 LP 前把池价与市场价（Uniswap API 报价）做比较：
+别人建的池价格常常是过时的。如果直接在偏离的价格上组 LP，套利者会立刻把价格推回市场价，等于你以低于/高于市价的价格被动成交。所以进场前把池价与市场价（Uniswap API 报价）做比较：
 
 - 偏离 ≤ `MAX_DEVIATION`：直接组 LP。
 - 偏离超过阈值、池内流动性够用：直接在这个池里做一笔 swap 把价格推回市场价。数量按恒定流动性模型计算，并用链上 Quoter 真实模拟核对；买入方向等于低价拿币。
-- 偏离超过阈值、但池价到市场价之间没有流动性（典型情况：池里唯一的仓位边缘就在那里，swap 推不动）：先用约 1% 预算（最少 0.2 USDG）建一个覆盖这段空隙的单边"过渡仓位"，再通过它做一笔精确输出的 swap 把价格推到市场价。过渡仓位用完即弃，剩几美分粉尘，多花两笔 gas。
+- 偏离超过阈值、但池价到市场价之间没有流动性（典型情况：池里唯一的仓位边缘就在那里，swap 推不动）：先用约 1% 预算（最少 0.2 USDG）建一个覆盖这段空隙的单边"过渡仓位"，再通过它做一笔精确输出的 swap 把价格推到市场价。过渡仓位用完即弃，撤退时一并回收，多花两笔 gas。
 - 校正花费超过预算、或 3 轮后仍不达标：放弃，不组 LP，不花钱。
 
 如果某个代币只有这一个池、没有别的市场，API 报价就是池价本身，偏离恒为 0，不会触发校正。
 
-## 自检
+## 文件说明
+
+| 文件 | 作用 |
+|---|---|
+| `src/cli.ts` | 进场命令 |
+| `src/monitor.ts` | 监控命令（也被 `launch --watch` 调用） |
+| `src/exit.ts` | 撤退命令（也被监控触发时调用） |
+| `src/common.ts` | 公共部分：链上地址、客户端、Uniswap / OKX API、发交易与授权、仓位记录 |
+| `src/v4.ts` | Uniswap v4 数学与编码：tick / 流动性 / mint / burn / swap |
+| `src/selfcheck.ts` | 离线自检：用链上一笔真实 mint 交易复算并逐字节比对 |
+| `params.env` | 策略参数 |
+| `.env` | 密钥（不进 git） |
+| `positions.json` | 本地仓位记录（不进 git） |
 
 ```bash
-npm run selfcheck    # 用链上一笔真实 mint 交易复算 tick / liquidity / 编码，逐字节比对
-npm run typecheck
+npm run selfcheck    # 自检
+npm run typecheck    # 类型检查
 ```
 
 ## 链上地址（Robinhood Chain, chainId 4663）
@@ -169,7 +211,8 @@ npm run typecheck
 
 ## 注意事项
 
-- `.env` 里是私钥，已被 `.gitignore` 排除，不要提交、不要截图分享。
+- `.env` 里是私钥和 API 密钥，已被 `.gitignore` 排除，不要提交、不要截图分享。
 - Robinhood Chain 上的 UniversalRouter 是 2.1.1，请求 Trading API 时不能带 `x-universal-router-version: 2.0`（会报错），本工具不发该 header。
+- Alchemy 免费版的 `eth_getLogs` 只允许 10 个区块的范围，所以扫描仓位固定走公共节点，其余请求用 `RPC_URL`。
 - 新币风险自负：貔貅币能 mint 成功但卖不掉；池子薄时你的仓位可能就是主要流动性，退出会砸价；无常损失由 LP 承担。建议先用小预算试。
-- 第一次跑某个代币会多几笔授权交易；Robinhood Chain gas 很便宜，整套流程通常不到 1 美元。
+- Robinhood Chain gas 很便宜，进场 + 撤退整套流程通常不到 1.5 美元。
