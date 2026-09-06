@@ -7,6 +7,8 @@
 3. **池价校正**：已有池的价格偏离市场价超过阈值时，先把池价推回市场价再组仓（见下文）
 4. **组 LP**：在现价的指定区间（默认 -50% ~ +100%）mint 仓位，预算两边几乎用尽
 
+还有一键撤退 `npm run exit`：撤掉该代币的全部仓位（本金 + 手续费），代币自动换回 USDG（Uniswap / OKX DEX 比价取高者）。
+
 只需要一个钱包（USDG + 少量 ETH 付 gas）和一个 Uniswap API key。
 
 ## 快速开始
@@ -34,6 +36,7 @@ npm run launch -- --token 0x代币地址
 | `PRIVATE_KEY` | 付款钱包私钥（`0x` 开头 64 位十六进制）。钱包里要有 `USDG_AMOUNT` 的 USDG 和少量 ETH |
 | `UNISWAP_API_KEY` | Uniswap Trading API key，只用于问路由/拿交易数据，和钱包无关。免费申请：https://developers.uniswap.org/dashboard |
 | `HTTPS_PROXY` | 可选。本机直连不了 `trade-api.gateway.uniswap.org` 时填本地代理，如 `http://127.0.0.1:7897` |
+| `OKX_API_KEY` `OKX_SECRET_KEY` `OKX_API_PASSPHRASE` | 可选。撤退卖币时用 OKX DEX 聚合器和 Uniswap 比价。在 https://web3.okx.com/onchainos 申请 |
 | `RPC_URL` | 可选，默认公共节点 `https://rpc.mainnet.chain.robinhood.com`。强烈建议换成自己的 Alchemy 等节点：实测每次请求 50ms vs 公共节点 260ms，整趟快一倍 |
 
 ### `params.env` — 策略参数
@@ -47,6 +50,7 @@ npm run launch -- --token 0x代币地址
 | `SWAP_SLIPPAGE` | `5` | 换币滑点 % |
 | `LP_SLIPPAGE` | `5` | 组 LP 时最大投入量的余量 %，防止 mint 前价格小幅波动导致失败 |
 | `MAX_DEVIATION` | `10` | 池价与市场价的最大偏离 %，超过就先校正池价 |
+| `EXIT_SWAP_VIA` | `best` | 撤退时卖币走哪家：`best`（Uniswap、OKX 都报价取高者）/ `okx` / `uniswap` |
 
 ### `RANGE` 写法
 
@@ -75,6 +79,7 @@ npm run launch -- --token <地址> [--usdg 50] [--fee 3] [--spacing 600] [--rang
 | `--token` | 代币合约地址（必填） |
 | `--usdg` `--fee` `--spacing` `--range` `--slippage` `--lp-slippage` `--max-deviation` | 对应 `params.env` 里的同名参数 |
 | `--dry-run` | 只打印计划，不发任何交易。没有私钥也能用，配合 `--from 0x地址` 指定钱包 |
+| `npm run exit -- …` | 一键撤退，参数见下一节 |
 | `--yes` | 跳过 y/N 确认 |
 
 注意 `--range` 要写成 `--range="-30%,+30%"`（带 `=` 和引号），否则 `-30%` 会被当成另一个选项。
@@ -102,6 +107,20 @@ gas 合计: 3 笔，0.000230 ETH ($0.57)
 ```
 
 每笔交易一行，发送后原地追加结果；任何一笔失败会立刻退出并打印 explorer 链接。ERC20 → Permit2 的授权是链上交易，每个币种每个钱包只需一次；Permit2 → PositionManager / UniversalRouter 的额度用签名附在交易里，不单独发交易。首次跑一个代币通常 3 笔交易（授权、换币、组 LP），之后 2 笔。
+
+## 一键撤退
+
+```bash
+npm run exit -- --token 0x代币地址 --dry-run    # 先看：找到哪些仓位、能拿回多少、卖币报价
+npm run exit -- --token 0x代币地址              # 确认后执行
+npm run exit -- --position 2024265              # 只撤某一个仓位（自动识别代币）
+npm run exit -- --token 0x… --keep-tokens       # 只撤仓位不卖币
+npm run exit -- --token 0x… --via okx           # 指定卖币走 OKX（或 uniswap）
+```
+
+流程：找仓位（`positions.json` 记录 + 链上扫描 PositionManager 转给钱包的 NFT）→ 只保留该代币/USDG 池里还有流动性的 → 一笔交易撤掉同一个池的所有仓位并领取手续费（`BURN_POSITION` + `TAKE_PAIR`，最少拿回量按 `LP_SLIPPAGE` 留余量）→ 钱包里该代币全部卖成 USDG：Uniswap 和 OKX DEX 同时报价，走能换回更多 USDG 的一家（OKX 会顺带标记貔貅币）→ 打印共收回多少 USDG。演练模式会用 `estimateGas` 模拟撤仓交易，确认编码无误。
+
+进场命令每次 mint 都会把仓位 id 记到 `positions.json`（本地文件，不进 git）；没记录的老仓位靠链上扫描也能找到。
 
 ## 池价校正
 

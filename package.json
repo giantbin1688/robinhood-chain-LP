@@ -6,6 +6,7 @@
   "description": "Robinhood Chain: USDG -> token swap, create/reuse a Uniswap v4 pool, LP around spot, in one command",
   "scripts": {
     "launch": "node --env-file=.env --env-file=params.env --import tsx src/cli.ts",
+    "exit": "node --env-file=.env --env-file=params.env --import tsx src/exit.ts",
     "selfcheck": "node --import tsx src/selfcheck.ts",
     "typecheck": "tsc --noEmit"
   },

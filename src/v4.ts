@@ -150,3 +150,19 @@ export function encodeMintUnlockData(
   const settle = encodeAbiParameters([{ type: 'address' }, { type: 'address' }], [key.currency0, key.currency1])
   return encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], ['0x020d', [mint, settle]])
 }
+
+// unlockData for burning whole positions of one pool: BURN_POSITION (0x03) per position + TAKE_PAIR (0x11) to the recipient
+export function encodeBurnUnlockData(key: PoolKey, positions: { id: bigint; amount0Min: bigint; amount1Min: bigint }[], recipient: Address): Hex {
+  const burns = positions.map((p) => encodeAbiParameters(
+    [{ type: 'uint256' }, { type: 'uint128' }, { type: 'uint128' }, { type: 'bytes' }], [p.id, p.amount0Min, p.amount1Min, '0x'],
+  ))
+  const take = encodeAbiParameters([{ type: 'address' }, { type: 'address' }, { type: 'address' }], [key.currency0, key.currency1, recipient])
+  const actions = ('0x' + '03'.repeat(positions.length) + '11') as Hex
+  return encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [actions, [...burns, take]])
+}
+
+// PositionInfo packing (v4-periphery PositionInfoLibrary): poolId (200 bits) | tickUpper (24) | tickLower (24) | hasSubscriber (8)
+export function decodePositionInfo(info: bigint) {
+  const int24 = (x: bigint) => { const n = Number(x & 0xffffffn); return n >= 0x800000 ? n - 0x1000000 : n }
+  return { tickLower: int24(info >> 8n), tickUpper: int24(info >> 32n) }
+}
