@@ -307,7 +307,7 @@ if (correction) {
   }
 }
 
-// 2) 按市价换币：先按探测汇率算份额报价（计划阶段的报价没过期就直接用）；报价汇率与探测差得多（大单价格冲击）就按新汇率重算再报一次
+// 2) 按市价换币：先按探测汇率算份额报价（计划阶段的报价没过期就直接用）；大单实际汇率与探测价有差（价格冲击）就按新汇率重算再报一次，减少 LP 配比失衡留下的剩余
 let { spent, held } = await holdings()
 let budgetLeft = usdgBudget - spent
 if (budgetLeft > 0n) {
@@ -316,7 +316,7 @@ if (budgetLeft > 0n) {
   if (swapAmount > 0n) {
     let o = planOffer && planOffer.amountIn === swapAmount && Date.now() - planOffer.at < 20_000 ? planOffer : await bestBuy(swapAmount, '换币')
     const resized = swapShare(budgetLeft, held, ref, Number(o.out) / Number(o.amountIn))
-    if (abs(resized - swapAmount) > swapAmount / 50n) { swapAmount = resized; o = await bestBuy(swapAmount, '换币') }
+    if (abs(resized - swapAmount) > swapAmount / 200n) { swapAmount = resized; o = await bestBuy(swapAmount, '换币') } // 差 0.5% 以上就按大单实际汇率重算
     const got = await buy(o, '换币')
     log(`换币完成: ${fmtU(swapAmount)} USDG -> ${fmtT(got)} ${symbol}`)
     ;({ spent, held } = await holdings())
