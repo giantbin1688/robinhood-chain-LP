@@ -7,6 +7,7 @@ import {
   POSM, QUOTER, STATE_VIEW, UR, USDG, EXPLORER, abs, die, env, erc20Abi, ethPriceUsd, log, makeClients, min, now, p6, pct, posmAbi,
   quoterAbi, savePosition, sleep, stateViewAbi, tokenMeta, trim, txKit, uniswapApi,
 } from './common.ts'
+import { watchToken } from './monitor.ts'
 
 // 默认值来自 params.env，命令行参数可临时覆盖
 const { values: opt } = parseArgs({
@@ -19,12 +20,13 @@ const { values: opt } = parseArgs({
     slippage: { type: 'string', default: env('SWAP_SLIPPAGE', '5') },         // 换币滑点 %
     'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },      // mint amountMax 余量 %
     'max-deviation': { type: 'string', default: env('MAX_DEVIATION', '10') },// 池价与市场价最大偏离 %
+    watch: { type: 'boolean', default: false },     // 组完 LP 后继续监控，跳出区间自动撤退
     yes: { type: 'boolean', default: false },
     'dry-run': { type: 'boolean', default: false },   // 只看计划，不发交易
     from: { type: 'string' },                         // --dry-run 时可用地址代替私钥
   },
 })
-if (!opt.token) die('用法: npm run launch -- --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--range="-50%,+100%"] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--yes] [--dry-run]')
+if (!opt.token) die('用法: npm run launch -- --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--range="-50%,+100%"] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
 const token = getAddress(opt.token)
 const usdgBudget = parseUnits(opt.usdg, 6)
 if (usdgBudget <= 0n) die('USDG_AMOUNT / --usdg 必须大于 0')
@@ -318,3 +320,9 @@ const { rc: mintRc, positionId } = await mint(initialized ? '组LP' : '建池+�
 log(`完成: 仓位 ${positionId ?? '?'}，池 ${id}（已记录到 positions.json，撤退: npm run exit -- --token ${token}）`)
 log(`      ${EXPLORER}/tx/${mintRc.transactionHash}`)
 log(`gas 合计: ${stats.txCount} 笔，${trim(stats.gasTotal, 18)} ETH ($${usd(stats.gasTotal)})`)
+
+// 6) 可选：继续监控，跳出区间自动撤退
+if (opt.watch) await watchToken({
+  token, clients, interval: Math.max(3, Number(env('WATCH_INTERVAL', '10'))), confirm: Math.max(1, Number(env('WATCH_CONFIRM', '2'))),
+  via: env('EXIT_SWAP_VIA', 'best'), slippage: swapSlippage, lpSlippage, dryRun: false,
+})

@@ -7,7 +7,7 @@
 3. **池价校正**：已有池的价格偏离市场价超过阈值时，先把池价推回市场价再组仓（见下文）
 4. **组 LP**：在现价的指定区间（默认 -50% ~ +100%）mint 仓位，预算两边几乎用尽
 
-还有一键撤退 `npm run exit`：撤掉该代币的全部仓位（本金 + 手续费），代币自动换回 USDG（Uniswap / OKX DEX 比价取高者）。
+还有一键撤退 `npm run exit`（撤掉该代币的全部仓位，本金 + 手续费，代币自动换回 USDG，Uniswap / OKX DEX 比价取高者）和自动监控 `npm run watch`（盯着池价，跳出区间就自动撤退 + 卖币；进场时加 `--watch` 可一条龙）。
 
 只需要一个钱包（USDG + 少量 ETH 付 gas）和一个 Uniswap API key。
 
@@ -51,6 +51,8 @@ npm run launch -- --token 0x代币地址
 | `LP_SLIPPAGE` | `5` | 组 LP 时最大投入量的余量 %，防止 mint 前价格小幅波动导致失败 |
 | `MAX_DEVIATION` | `10` | 池价与市场价的最大偏离 %，超过就先校正池价 |
 | `EXIT_SWAP_VIA` | `best` | 撤退时卖币走哪家：`best`（Uniswap、OKX 都报价取高者）/ `okx` / `uniswap` |
+| `WATCH_INTERVAL` | `10` | 监控：每隔几秒检查一次池价 |
+| `WATCH_CONFIRM` | `2` | 监控：连续几次检查都跳出区间才触发撤退（防单次插针） |
 
 ### `RANGE` 写法
 
@@ -79,7 +81,8 @@ npm run launch -- --token <地址> [--usdg 50] [--fee 3] [--spacing 600] [--rang
 | `--token` | 代币合约地址（必填） |
 | `--usdg` `--fee` `--spacing` `--range` `--slippage` `--lp-slippage` `--max-deviation` | 对应 `params.env` 里的同名参数 |
 | `--dry-run` | 只打印计划，不发任何交易。没有私钥也能用，配合 `--from 0x地址` 指定钱包 |
-| `npm run exit -- …` | 一键撤退，参数见下一节 |
+| `--watch` | 组完 LP 后不退出，继续监控，跳出区间自动撤退（见下文） |
+| `npm run exit -- …` / `npm run watch -- …` | 一键撤退 / 自动监控，见下文 |
 | `--yes` | 跳过 y/N 确认 |
 
 注意 `--range` 要写成 `--range="-30%,+30%"`（带 `=` 和引号），否则 `-30%` 会被当成另一个选项。
@@ -121,6 +124,18 @@ npm run exit -- --token 0x… --via okx           # 指定卖币走 OKX（或 un
 流程：找仓位（`positions.json` 记录 + 链上扫描 PositionManager 转给钱包的 NFT）→ 只保留该代币/USDG 池里还有流动性的 → 一笔交易撤掉同一个池的所有仓位并领取手续费（`BURN_POSITION` + `TAKE_PAIR`，最少拿回量按 `LP_SLIPPAGE` 留余量）→ 钱包里该代币全部卖成 USDG：Uniswap 和 OKX DEX 同时报价，走能换回更多 USDG 的一家（OKX 会顺带标记貔貅币）→ 打印共收回多少 USDG。演练模式会用 `estimateGas` 模拟撤仓交易，确认编码无误。
 
 进场命令每次 mint 都会把仓位 id 记到 `positions.json`（本地文件，不进 git）；没记录的老仓位靠链上扫描也能找到。
+
+## 自动监控（跳出区间自动撤退）
+
+```bash
+npm run launch -- --token 0x代币地址 --watch     # 进场后直接进入监控
+npm run watch -- --token 0x代币地址              # 对已有仓位单独开监控
+npm run watch -- --token 0x… --dry-run           # 触发时只演练撤退，不发交易（用来验证）
+```
+
+每 `WATCH_INTERVAL` 秒读一次池子的 tick，判断主要仓位是否在区间内（忽略过渡仓位和粉尘）。连续 `WATCH_CONFIRM` 次跳出区间就自动执行一键撤退：撤仓 + 领手续费 + 代币全部卖成 USDG（Uniswap / OKX 比价）。每分钟核对一次仓位是否还在：你手动撤掉了，监控自动停止。日志只在状态变化或每 5 分钟打一行，不刷屏；RPC 偶发出错会重试，连续 30 次失败才退出。Ctrl+C 随时停止（停止后仓位不受影响）。
+
+跳出区间的两种情况：价格跌破下沿时仓位已全部变成代币，撤退等于止损卖出；价格涨破上沿时仓位已全部变成 USDG，撤退等于止盈落袋（几乎没有代币可卖）。
 
 ## 池价校正
 
