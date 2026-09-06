@@ -34,7 +34,7 @@ npm run launch -- --token 0x代币地址
 | `PRIVATE_KEY` | 付款钱包私钥（`0x` 开头 64 位十六进制）。钱包里要有 `USDG_AMOUNT` 的 USDG 和少量 ETH |
 | `UNISWAP_API_KEY` | Uniswap Trading API key，只用于问路由/拿交易数据，和钱包无关。免费申请：https://developers.uniswap.org/dashboard |
 | `HTTPS_PROXY` | 可选。本机直连不了 `trade-api.gateway.uniswap.org` 时填本地代理，如 `http://127.0.0.1:7897` |
-| `RPC_URL` | 可选，默认 `https://rpc.mainnet.chain.robinhood.com` |
+| `RPC_URL` | 可选，默认公共节点 `https://rpc.mainnet.chain.robinhood.com`。强烈建议换成自己的 Alchemy 等节点：实测每次请求 50ms vs 公共节点 260ms，整趟快一倍 |
 
 ### `params.env` — 策略参数
 
@@ -93,16 +93,15 @@ npm run launch -- --token <地址> [--usdg 50] [--fee 3] [--spacing 600] [--rang
 换币 0x<hash> ... 成功，247422 gas $0.23
 换币完成: 12.23 USDG -> 8050.12 WORTHLESS
 授权 WORTHLESS -> Permit2 0x<hash> ... 成功，46296 gas $0.04
-授权 Permit2 -> PositionManager (WORTHLESS) 0x<hash> ... 成功，47922 gas $0.04
 LP 价格: 池 tick 343480 = 0.00151 USDG/WORTHLESS
 组LP: ticks [334000, 349000]，liquidity …，投入 12.76 USDG + 8050.12 WORTHLESS（上限 …），剩余 0.01 USDG + 0 WORTHLESS
 组LP 0x<hash> ... 成功，365816 gas $0.34
 完成: 仓位 2019256，池 0x…
       https://robinhoodchain.blockscout.com/tx/0x<hash>
-gas 合计: 4 笔，0.000263 ETH ($0.66)
+gas 合计: 3 笔，0.000230 ETH ($0.57)
 ```
 
-每笔交易一行，发送后原地追加结果；任何一笔失败会立刻退出并打印 explorer 链接。授权（ERC20 → Permit2、Permit2 → PositionManager/UniversalRouter）只在额度不够或快过期时才发，第二次跑同一个代币通常不再需要。
+每笔交易一行，发送后原地追加结果；任何一笔失败会立刻退出并打印 explorer 链接。ERC20 → Permit2 的授权是链上交易，每个币种每个钱包只需一次；Permit2 → PositionManager / UniversalRouter 的额度用签名附在交易里，不单独发交易。首次跑一个代币通常 3 笔交易（授权、换币、组 LP），之后 2 笔。
 
 ## 池价校正
 

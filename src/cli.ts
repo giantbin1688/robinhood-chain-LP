@@ -28,10 +28,7 @@ const erc20Abi = parseAbi([
   'function balanceOf(address) view returns (uint256)', 'function allowance(address,address) view returns (uint256)',
   'function approve(address,uint256) returns (bool)',
 ])
-const permit2Abi = parseAbi([
-  'function allowance(address,address,address) view returns (uint160 amount, uint48 expiration, uint48 nonce)',
-  'function approve(address token, address spender, uint160 amount, uint48 expiration)',
-])
+const permit2Abi = parseAbi(['function allowance(address,address,address) view returns (uint160 amount, uint48 expiration, uint48 nonce)'])
 const stateViewAbi = parseAbi([
   'function getSlot0(bytes32) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)',
   'function getLiquidity(bytes32) view returns (uint128)',
@@ -43,6 +40,9 @@ const quoterAbi = parseAbi([ // 声明成 view 以便 eth_call；Quoter 内部�
 ])
 const posmAbi = parseAbi([
   poolKeyStruct,
+  'struct PermitDetails { address token; uint160 amount; uint48 expiration; uint48 nonce; }',
+  'struct PermitSingle { PermitDetails details; address spender; uint256 sigDeadline; }',
+  'function permit(address owner, PermitSingle permitSingle, bytes signature) payable returns (bytes err)',
   'function initializePool(PoolKey key, uint160 sqrtPriceX96) payable returns (int24)',
   'function modifyLiquidities(bytes unlockData, uint256 deadline) payable',
   'function multicall(bytes[] data) payable returns (bytes[])',
@@ -70,7 +70,7 @@ const ts = () => new Date().toTimeString().slice(0, 8)
 const log = (...a: unknown[]) => console.log(ts(), ...a)
 function die(msg: string): never { console.error('错误:', msg); process.exit(1) }
 
-if (!opt.token) die('用法: npm run launch -- --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--range -50%,+100%] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--yes] [--dry-run]')
+if (!opt.token) die('用法: npm run launch -- --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--range="-50%,+100%"] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--yes] [--dry-run]')
 const token = getAddress(opt.token)
 const usdgBudget = parseUnits(opt.usdg, 6)
 if (usdgBudget <= 0n) die('USDG_AMOUNT / --usdg 必须大于 0')
@@ -101,8 +101,10 @@ const chain = defineChain({
   id: CHAIN_ID, name: 'Robinhood Chain', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
   rpcUrls: { default: { http: [process.env.RPC_URL ?? 'https://rpc.mainnet.chain.robinhood.com'] } },
 })
-const pub = createPublicClient({ chain, transport: http() })
-const wc = account ? createWalletClient({ account, chain, transport: http() }) : undefined
+// batch: 同一时刻发出的多个请求合并成一个 HTTP 请求；pollingInterval: 等收据时的轮询间隔
+const transport = http(undefined, { batch: true })
+const pub = createPublicClient({ chain, transport, pollingInterval: 500 })
+const wc = account ? createWalletClient({ account, chain, transport }) : undefined
 
 const balanceOf = (t: Address) => pub.readContract({ address: t, abi: erc20Abi, functionName: 'balanceOf', args: [wallet] })
 const slot0 = (id: Hex) => pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [id] })
@@ -111,6 +113,8 @@ const trim = (x: bigint, dec: number) => { const [i, f = ''] = formatUnits(x, de
 const p6 = (n: number) => String(Number(n.toPrecision(6)))
 const pct = (x: number) => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%`
 const min = (a: bigint, b: bigint) => (a < b ? a : b)
+const abs = (a: bigint) => (a < 0n ? -a : a)
+const now = () => Math.floor(Date.now() / 1000)
 
 async function api(path: string, body: unknown): Promise<any> {
   for (let attempt = 1; ; attempt++) {
@@ -136,14 +140,15 @@ async function apiQuote(type: 'EXACT_INPUT' | 'EXACT_OUTPUT', amount: bigint) {
   return { ...q, usdgIn: BigInt(q.quote.input.amount) as bigint, usdgMax: BigInt(q.quote.input.maximumAmount ?? q.quote.input.amount) as bigint, out: BigInt(q.quote.output.amount) as bigint, at: Date.now() }
 }
 
-// ---- 钱包 / 代币 / 余额 ----
-const [symbol, name, decimals] = await Promise.all([
+// ---- 钱包 / 代币 / 余额 / 池子（一次批量读取）----
+const key = v4.makePoolKey(USDG, token, fee, spacing)
+const id = v4.poolId(key)
+const [symbol, name, decimals, usdgStart, ethBal, tokenStart, ethSlot, poolSlot] = await Promise.all([
   pub.readContract({ address: token, abi: erc20Abi, functionName: 'symbol' }),
   pub.readContract({ address: token, abi: erc20Abi, functionName: 'name' }),
   pub.readContract({ address: token, abi: erc20Abi, functionName: 'decimals' }),
-])
-const [usdgStart, ethBal, tokenStart, ethSlot] = await Promise.all([
-  balanceOf(USDG), pub.getBalance({ address: wallet }), balanceOf(token), slot0(v4.poolId(v4.makePoolKey(WETH, USDG, 500, 10))),
+  balanceOf(USDG), pub.getBalance({ address: wallet }), balanceOf(token),
+  slot0(v4.poolId(v4.makePoolKey(WETH, USDG, 500, 10))), slot0(id),
 ])
 const ethPrice = v4.priceFromSqrtX96(ethSlot[0]) * 1e12 // WETH 是 currency0 (18 位), USDG 是 currency1 (6 位)
 const usd = (wei: bigint) => (Number(formatEther(wei)) * ethPrice).toFixed(2)
@@ -154,12 +159,9 @@ if (usdgStart < usdgBudget) {
   const msg = `预算 ${fmtU(usdgBudget)} USDG，钱包只有 ${fmtU(usdgStart)}`
   dryRun ? log(`警告: ${msg}`) : die(msg)
 }
-const usdgSpent = async () => usdgStart - (await balanceOf(USDG))      // 本次已花掉的 USDG（卖币收回则为负）
-const tokensHeld = async () => (await balanceOf(token)) - tokenStart  // 本次拿到的代币
+// 本次已花掉的 USDG（卖币收回则为负）和本次拿到的代币
+const holdings = async () => { const [u, t] = await Promise.all([balanceOf(USDG), balanceOf(token)]); return { spent: usdgStart - u, held: t - tokenStart } }
 
-// ---- 池子 ----
-const key = v4.makePoolKey(USDG, token, fee, spacing)
-const id = v4.poolId(key)
 const tokenIs1 = key.currency1 === token
 const [dec0, dec1] = tokenIs1 ? [6, decimals] : [decimals, 6]
 const [sym0, sym1] = tokenIs1 ? ['USDG', symbol] : [symbol, 'USDG']
@@ -169,7 +171,7 @@ const tickFromProbe = (tokenOutPer1Usdg: bigint) => v4.tickFromPrice(tokenIs1 ? 
 const tokensForUsdg = (usdgBase: bigint, usdgPerToken: number) => BigInt(Math.floor((Number(usdgBase) / usdgPerToken) * 10 ** (decimals - 6)))
 const price = (t: number) => `${p6(usdgPerTokenAtTick(t))} USDG/${symbol}`
 const deviation = (poolTick: number, marketTick: number) => usdgPerTokenAtTick(poolTick) / usdgPerTokenAtTick(marketTick) - 1 // 池价相对市场价
-let [sqrtP, tick] = await slot0(id)
+let [sqrtP, tick] = poolSlot
 let initialized = sqrtP !== 0n
 log(`池子 ${symbol}/USDG 费率=${fee / 10000}% 间距=${spacing}: ${initialized ? `已存在，tick ${tick} = ${price(tick)}` : '不存在，将创建'}`)
 
@@ -211,7 +213,7 @@ type Correction =
   | { kind: 'swap'; dev: number; devAfter: number; zeroForOne: boolean; amountIn: bigint; minOut: bigint; sqrtNext: bigint }
   | { kind: 'bridge'; dev: number; zeroForOne: boolean; lo: number; hi: number; liquidity: bigint; need0: bigint; need1: bigint; exactOut: bigint; maxIn: bigint; sqrtNext: bigint }
 async function planCorrection(marketTick: number, marketPrice: number): Promise<Correction | null> {
-  const [sp, t, protocolFee, lpFee] = await slot0(id)
+  const [[sp, t, protocolFee, lpFee], L] = await Promise.all([slot0(id), pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getLiquidity', args: [id] })])
   const dev = deviation(t, marketTick)
   if (Math.abs(dev) <= maxDev) return null
   const sqrtT = v4.getSqrtRatioAtTick(marketTick)
@@ -219,7 +221,6 @@ async function planCorrection(marketTick: number, marketPrice: number): Promise<
   const pf = zeroForOne ? protocolFee & 0xfff : protocolFee >> 12
   const swapFee = BigInt(pf + lpFee - Math.floor((pf * lpFee) / 1_000_000)) // pips，v4 的 calculateSwapFee
   const gross = (net: bigint) => (net * 1_000_000n + 1_000_000n - swapFee - 1n) / (1_000_000n - swapFee) // 加上手续费的实际投入
-  const L = await pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getLiquidity', args: [id] })
 
   // 方案 A
   if (L > 0n) {
@@ -299,46 +300,48 @@ if (!opt.yes) {
 }
 
 // ---- 交易 ----
+// nonce 本地递增、gas 价整轮复用（RHC 费率稳定，上限给 3 倍余量，实际只按基础费扣），发交易前不再逐笔查询
+let [nonce, fees] = await Promise.all([pub.getTransactionCount({ address: wallet, blockTag: 'pending' }), pub.estimateFeesPerGas()])
 let txCount = 0, gasTotal = 0n
-async function send(label: string, tx: { to: Address; data: Hex; value?: bigint; gas?: bigint }) {
-  const hash = await wc!.sendTransaction(tx)
+async function send(label: string, tx: { to: Address; data: Hex; value?: bigint; gas: bigint }) {
+  const hash = await wc!.sendTransaction({ ...tx, nonce: nonce++, maxFeePerGas: fees.maxFeePerGas * 3n, maxPriorityFeePerGas: fees.maxPriorityFeePerGas })
   process.stdout.write(`${ts()} ${label} ${hash} ...`)
-  const rc = await pub.waitForTransactionReceipt({ hash })
+  const rc = await pub.waitForTransactionReceipt({ hash, retryDelay: 150, retryCount: 60 })
   const cost = rc.gasUsed * rc.effectiveGasPrice
   txCount++; gasTotal += cost
   process.stdout.write(rc.status === 'success' ? ` 成功，${rc.gasUsed} gas $${usd(cost)}\n` : ' 失败(revert)\n')
   if (rc.status !== 'success') die(`${label} 交易回滚: ${EXPLORER}/tx/${hash}`)
   return rc
 }
-// ERC20 -> Permit2（无限额）；给了 spender 则再 Permit2 -> spender（无限额，30 天）
-async function ensureApprovals(t: Address, need: bigint, spender?: Address) {
-  const sym = t === USDG ? 'USDG' : symbol
-  const erc20 = await pub.readContract({ address: t, abi: erc20Abi, functionName: 'allowance', args: [wallet, PERMIT2] })
-  if (erc20 < need) {
-    await send(`授权 ${sym} -> Permit2`, { to: t, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [PERMIT2, maxUint256] }) })
-  }
-  if (!spender) return
-  const [amount, expiration] = await pub.readContract({ address: PERMIT2, abi: permit2Abi, functionName: 'allowance', args: [wallet, t, spender] })
-  const now = Math.floor(Date.now() / 1000)
-  if (amount < need || expiration < now + 3600) {
-    const data = encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [t, spender, maxUint160, now + 30 * 86400] })
-    await send(`授权 Permit2 -> ${spender === POSM ? 'PositionManager' : 'UniversalRouter'} (${sym})`, { to: PERMIT2, data })
-  }
+const symOf = (t: Address) => (t === USDG ? 'USDG' : symbol)
+// ERC20 -> Permit2 无限额授权（每个币种每个钱包只需一次，链上交易）
+async function ensureErc20Approval(t: Address, need: bigint) {
+  const allowance = await pub.readContract({ address: t, abi: erc20Abi, functionName: 'allowance', args: [wallet, PERMIT2] })
+  if (allowance >= need) return
+  const tx = { to: t, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [PERMIT2, maxUint256] }) }
+  await send(`授权 ${symOf(t)} -> Permit2`, { ...tx, gas: ((await pub.estimateGas({ account: wallet, ...tx })) * 13n) / 10n })
+}
+// Permit2 -> spender 的额度用签名授权（塞进用它的那笔交易里，不单独发交易）；额度够且未过期则返回 null
+async function permitFor(t: Address, spender: Address, need: bigint): Promise<v4.SignedPermit | null> {
+  const [amount, expiration, pnonce] = await pub.readContract({ address: PERMIT2, abi: permit2Abi, functionName: 'allowance', args: [wallet, t, spender] })
+  if (amount >= need && expiration >= now() + 3600) return null
+  const permitSingle: v4.PermitSingle = { details: { token: t, amount: maxUint160, expiration: now() + 30 * 86400, nonce: pnonce }, spender, sigDeadline: BigInt(now() + 1800) }
+  const signature = await wc!.signTypedData({ domain: { name: 'Permit2', chainId: CHAIN_ID, verifyingContract: PERMIT2 }, types: v4.PERMIT_TYPES, primaryType: 'PermitSingle', message: permitSingle })
+  return { permitSingle, signature }
 }
 // 用 API 报价换币：签 Permit2 消息 -> /swap 拿 calldata -> 发送。返回本次拿到的代币数量
 async function apiSwap(q: Awaited<ReturnType<typeof apiQuote>>, label: string) {
-  await ensureApprovals(USDG, q.usdgMax)
+  await ensureErc20Approval(USDG, q.usdgMax)
   if (Date.now() - q.at > 20_000) q = await apiQuote(q.quote.tradeType, BigInt(q.quote.tradeType === 'EXACT_INPUT' ? q.quote.input.amount : q.quote.output.amount))
   const signature = q.permitData
     ? await wc!.signTypedData({ domain: q.permitData.domain, types: q.permitData.types, primaryType: 'PermitSingle', message: q.permitData.values })
     : undefined
   const res = await api('/swap', {
     quote: q.quote, ...(signature ? { permitData: q.permitData, signature } : {}),
-    refreshGasPrice: true, deadline: Math.floor(Date.now() / 1000) + 600,
+    refreshGasPrice: true, deadline: now() + 600,
   })
   const tx = { to: getAddress(res.swap.to), data: res.swap.data as Hex, value: BigInt(res.swap.value ?? 0) }
-  const before = await balanceOf(token)
-  const est = await pub.estimateGas({ account: wallet, ...tx })
+  const [before, est] = await Promise.all([balanceOf(token), pub.estimateGas({ account: wallet, ...tx })])
   const apiGas = BigInt(res.swap.gasLimit ?? 0)
   await send(label, { ...tx, gas: ((est > apiGas ? est : apiGas) * 13n) / 10n })
   const got = (await balanceOf(token)) - before
@@ -347,17 +350,21 @@ async function apiSwap(q: Awaited<ReturnType<typeof apiQuote>>, label: string) {
 }
 // 手里的代币不够 need 时按市价买齐（精确输出）
 async function ensureTokens(need: bigint, label: string) {
-  const short = need - (await tokensHeld())
+  const short = need - (await holdings()).held
   if (short > 0n) { const got = await apiSwap(await apiQuote('EXACT_OUTPUT', short), label); log(`换币完成: 拿到 ${fmtT(got)} ${symbol}`) }
 }
-// PositionManager.multicall([initializePool?, modifyLiquidities(MINT)])，返回仓位 id
+// PositionManager.multicall([permit…, initializePool?, modifyLiquidities(MINT)])，返回仓位 id
 async function mint(label: string, lo: number, hi: number, liquidity: bigint, max0: bigint, max1: bigint, init?: bigint) {
-  if (max0 > 0n) await ensureApprovals(key.currency0, max0, POSM)
-  if (max1 > 0n) await ensureApprovals(key.currency1, max1, POSM)
-  const unlockData = v4.encodeMintUnlockData(key, lo, hi, liquidity, max0, max1, wallet)
   const calls: Hex[] = []
+  for (const [cur, max] of [[key.currency0, max0], [key.currency1, max1]] as const) {
+    if (max === 0n) continue
+    await ensureErc20Approval(cur, max)
+    const p = await permitFor(cur, POSM, max)
+    if (p) calls.push(encodeFunctionData({ abi: posmAbi, functionName: 'permit', args: [wallet, p.permitSingle, p.signature] }))
+  }
+  const unlockData = v4.encodeMintUnlockData(key, lo, hi, liquidity, max0, max1, wallet)
   if (init) calls.push(encodeFunctionData({ abi: posmAbi, functionName: 'initializePool', args: [key, init] }))
-  calls.push(encodeFunctionData({ abi: posmAbi, functionName: 'modifyLiquidities', args: [unlockData, BigInt(Math.floor(Date.now() / 1000) + 600)] }))
+  calls.push(encodeFunctionData({ abi: posmAbi, functionName: 'modifyLiquidities', args: [unlockData, BigInt(now() + 600)] }))
   const tx = { to: POSM, data: encodeFunctionData({ abi: posmAbi, functionName: 'multicall', args: [calls] }) }
   const est = await pub.estimateGas({ account: wallet, ...tx })
   const rc = await send(label, { ...tx, gas: (est * 13n) / 10n })
@@ -372,9 +379,9 @@ if (correction) {
     const c = round === 1 ? correction : await planCorrection(marketTick, marketPrice)
     if (!c) { log(`池价偏离 ${pct(deviation(tick, marketTick))}，已在阈值内`); break }
     if (round > 3) die(`3 轮校正后池价仍偏离 ${pct(c.dev)}，放弃`)
-    if (correctionCost(c, marketPrice) > usdgBudget - (await usdgSpent())) die(`校正约需 ${fmtU(correctionCost(c, marketPrice))} USDG，超过剩余预算，放弃`)
+    if (correctionCost(c, marketPrice) > usdgBudget - (await holdings()).spent) die(`校正约需 ${fmtU(correctionCost(c, marketPrice))} USDG，超过剩余预算，放弃`)
     const [cin, cout] = c.zeroForOne ? [key.currency0, key.currency1] : [key.currency1, key.currency0]
-    const fmt = (x: bigint, cur: Address) => `${trim(x, cur === USDG ? 6 : decimals)} ${cur === USDG ? 'USDG' : symbol}`
+    const fmt = (x: bigint, cur: Address) => `${trim(x, cur === USDG ? 6 : decimals)} ${symOf(cur)}`
     if (c.kind === 'bridge') {
       const tokenNeed = tokenIs1 ? c.need1 : c.need0
       if (tokenNeed > 0n) await ensureTokens(tokenNeed, `买入 ${symbol} 用于过渡仓位`)
@@ -383,9 +390,9 @@ if (correction) {
     }
     const maxIn = c.kind === 'swap' ? c.amountIn : c.maxIn
     if (cin === token) await ensureTokens(maxIn, `买入 ${symbol} 用于校正`)
-    await ensureApprovals(cin, maxIn, UR)
+    await ensureErc20Approval(cin, maxIn)
     const amount = c.kind === 'swap' ? { exactIn: c.amountIn, minOut: c.minOut } : { exactOut: c.exactOut, maxIn: c.maxIn }
-    const data = v4.encodeV4SwapCalldata(key, c.zeroForOne, amount, BigInt(Math.floor(Date.now() / 1000) + 600))
+    const data = v4.encodeV4SwapCalldata(key, c.zeroForOne, amount, BigInt(now() + 600), await permitFor(cin, UR, maxIn))
     const est = await pub.estimateGas({ account: wallet, to: UR, data })
     const label = c.kind === 'swap' ? `校正池价 (卖出 ${fmt(c.amountIn, cin)})` : `校正池价 (买回 ${fmt(c.exactOut, cout)})`
     await send(label, { to: UR, data, gas: (est * 13n) / 10n })
@@ -395,18 +402,20 @@ if (correction) {
   }
 }
 
-// 2) 按市价换币：先用一半剩余预算报价拿汇率，算出精确份额后再报最终价
-let budgetLeft = usdgBudget - (await usdgSpent())
-let held = await tokensHeld()
-if (budgetLeft / 2n > 0n) {
-  const sizing = await apiQuote('EXACT_INPUT', budgetLeft / 2n)
-  const swapAmount = swapShare(budgetLeft, held, initialized ? tick : marketTick, Number(sizing.out) / Number(sizing.usdgIn))
+// 2) 按市价换币：先按探测汇率算份额报价；报价汇率与探测差得多（大单价格冲击）就按新汇率重算再报一次
+let { spent, held } = await holdings()
+let budgetLeft = usdgBudget - spent
+if (budgetLeft > 0n) {
+  const ref = initialized ? tick : marketTick
+  let swapAmount = swapShare(budgetLeft, held, ref, rate)
   if (swapAmount > 0n) {
-    const q = swapAmount === sizing.usdgIn ? sizing : await apiQuote('EXACT_INPUT', swapAmount)
+    let q = await apiQuote('EXACT_INPUT', swapAmount)
+    const resized = swapShare(budgetLeft, held, ref, Number(q.out) / Number(q.usdgIn))
+    if (abs(resized - swapAmount) > swapAmount / 50n) { swapAmount = resized; q = await apiQuote('EXACT_INPUT', swapAmount) }
     const got = await apiSwap(q, '换币')
     log(`换币完成: ${fmtU(swapAmount)} USDG -> ${fmtT(got)} ${symbol}`)
-    budgetLeft = usdgBudget - (await usdgSpent())
-    held = await tokensHeld()
+    ;({ spent, held } = await holdings())
+    budgetLeft = usdgBudget - spent
   }
 }
 if (budgetLeft < 0n) budgetLeft = 0n

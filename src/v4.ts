@@ -101,10 +101,25 @@ export function swapConstantL(liquidity: bigint, sqrtP: bigint, zeroForOne: bool
   return { sqrtNext, amountInNet, out }
 }
 
+// Permit2 AllowanceTransfer PermitSingle (EIP-712 message and calldata struct)
+export const PERMIT_TYPES = {
+  PermitSingle: [{ name: 'details', type: 'PermitDetails' }, { name: 'spender', type: 'address' }, { name: 'sigDeadline', type: 'uint256' }],
+  PermitDetails: [{ name: 'token', type: 'address' }, { name: 'amount', type: 'uint160' }, { name: 'expiration', type: 'uint48' }, { name: 'nonce', type: 'uint48' }],
+} as const
+export type PermitSingle = { details: { token: Address; amount: bigint; expiration: number; nonce: number }; spender: Address; sigDeadline: bigint }
+export type SignedPermit = { permitSingle: PermitSingle; signature: Hex }
+const PERMIT_SINGLE_ABI = {
+  type: 'tuple', components: [
+    { name: 'details', type: 'tuple', components: [{ name: 'token', type: 'address' }, { name: 'amount', type: 'uint160' }, { name: 'expiration', type: 'uint48' }, { name: 'nonce', type: 'uint48' }] },
+    { name: 'spender', type: 'address' }, { name: 'sigDeadline', type: 'uint256' },
+  ],
+} as const
+
 // UniversalRouter (>= 2.1.1) calldata for one swap in one v4 pool, exact input or exact output:
-// V4_SWAP { SWAP_EXACT_IN_SINGLE | SWAP_EXACT_OUT_SINGLE, SETTLE_ALL, TAKE_ALL }. Input is pulled from the caller through Permit2.
+// [PERMIT2_PERMIT] V4_SWAP { SWAP_EXACT_IN_SINGLE | SWAP_EXACT_OUT_SINGLE, SETTLE_ALL, TAKE_ALL }. Input is pulled from the caller through Permit2;
+// an optional signed permit sets the Permit2 -> router allowance in the same transaction.
 export function encodeV4SwapCalldata(
-  key: PoolKey, zeroForOne: boolean, amount: { exactIn: bigint; minOut: bigint } | { exactOut: bigint; maxIn: bigint }, deadline: bigint,
+  key: PoolKey, zeroForOne: boolean, amount: { exactIn: bigint; minOut: bigint } | { exactOut: bigint; maxIn: bigint }, deadline: bigint, permit?: SignedPermit | null,
 ): Hex {
   const exactIn = 'exactIn' in amount
   const swap = encodeAbiParameters(
@@ -117,8 +132,10 @@ export function encodeV4SwapCalldata(
   const [cin, cout] = zeroForOne ? [key.currency0, key.currency1] : [key.currency1, key.currency0]
   const settle = encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [cin, exactIn ? amount.exactIn : amount.maxIn])
   const take = encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [cout, exactIn ? amount.minOut : amount.exactOut])
-  const input = encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [exactIn ? '0x060c0f' : '0x080c0f', [swap, settle, take]])
-  return encodeFunctionData({ abi: UR_ABI, functionName: 'execute', args: ['0x10', [input], deadline] })
+  const v4Input = encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [exactIn ? '0x060c0f' : '0x080c0f', [swap, settle, take]])
+  const commands: Hex = permit ? '0x0a10' : '0x10'
+  const inputs = permit ? [encodeAbiParameters([PERMIT_SINGLE_ABI, { type: 'bytes' }], [permit.permitSingle, permit.signature]), v4Input] : [v4Input]
+  return encodeFunctionData({ abi: UR_ABI, functionName: 'execute', args: [commands, inputs, deadline] })
 }
 const UR_ABI = parseAbi(['function execute(bytes commands, bytes[] inputs, uint256 deadline) payable'])
 
