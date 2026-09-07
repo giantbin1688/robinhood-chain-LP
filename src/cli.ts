@@ -5,7 +5,7 @@ import { encodeFunctionData, formatEther, getAddress, parseEventLogs, parseUnits
 import * as v4 from './v4.ts'
 import {
   POSM, QUOTER, STATE_VIEW, UR, USDG, EXPLORER, abs, die, env, erc20Abi, ethPriceUsd, log, makeClients, min, now, p6, pct, posmAbi,
-  quoterAbi, savePosition, sleep, stateViewAbi, tokenMeta, trim, txKit, uniswapApi, okxDex, swapOffers, executeSwap, type SwapOffer,
+  quoterAbi, savePosition, sleep, slippageRevert, stateViewAbi, tokenMeta, trim, txKit, uniswapApi, okxDex, swapOffers, executeSwap, type SwapOffer,
 } from './common.ts'
 import { watchToken } from './monitor.ts'
 import { discoverUsdgPools } from './pools.ts'
@@ -314,15 +314,6 @@ async function mint(label: string, kind: 'lp' | 'bridge', lo: number, hi: number
   return { rc, positionId }
 }
 const withHeadroom = (x: bigint, avail: bigint) => min((x * BigInt(Math.round((100 + lpSlippage) * 100))) / 10_000n, avail)
-// PositionManager 的 MaximumAmountExceeded(uint128 maximumAmount, uint128 amountRequested)，从 viem 错误链里取 revert data 解出来
-function slippageRevert(e: unknown): { max: bigint; need: bigint } | null {
-  for (let x: any = e; x; x = x.cause) {
-    const data: unknown = x.data
-    if (typeof data === 'string' && data.startsWith('0x31e30ad0') && data.length === 10 + 128)
-      return { max: BigInt('0x' + data.slice(10, 74)), need: BigInt('0x' + data.slice(74, 138)) }
-  }
-  return null
-}
 
 // 1) 池价校正（最多 3 轮，每轮重新探测市场价）
 if (correction) {
@@ -402,11 +393,11 @@ for (let attempt = 1; !mintResult; attempt++) {
   try {
     mintResult = await mint(initialized ? '组LP' : '建池+组LP', 'lp', tickLower, tickUpper, liquidity, max0, max1, initialized ? undefined : sqrtP)
   } catch (e) {
-    const exceeded = slippageRevert(e)
-    if (!exceeded || attempt >= 5) throw e
-    const cur = exceeded.max === max0 ? key.currency0 : key.currency1
+    const r = slippageRevert(e)
+    if (r?.kind !== 'max' || attempt >= 5) throw e
+    const cur = r.limit === max0 ? key.currency0 : key.currency1
     const f = cur === key.currency0 ? f0 : f1
-    log(`组LP 回滚: 池价变动，需要 ${f(exceeded.need)} ${symOf(cur)} 超过上限 ${f(exceeded.max)}，等 3 秒按新池价重算（第 ${attempt} 次）`)
+    log(`组LP 回滚: 池价变动，需要 ${f(r.actual)} ${symOf(cur)} 超过上限 ${f(r.limit)}，等 3 秒按新池价重算（第 ${attempt} 次）`)
     await sleep(3000)
   }
 }

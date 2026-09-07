@@ -7,7 +7,7 @@ import { createPublicClient, encodeFunctionData, formatEther, getAddress, http, 
 import * as v4 from './v4.ts'
 import {
   POSM, PUBLIC_RPC, STATE_VIEW, USDG, chain, die, env, erc20Abi, ethPriceUsd, loadPositions, log, makeClients, now, okxDex, posmAbi,
-  sleep, stateViewAbi, tokenMeta, trim, txKit, uniswapApi, swapOffers, executeSwap, type Clients,
+  sleep, slippageRevert, stateViewAbi, tokenMeta, trim, txKit, uniswapApi, swapOffers, executeSwap, type Clients,
 } from './common.ts'
 
 export const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase() // 合约返回的是校验和大小写地址，比较时忽略大小写
@@ -100,8 +100,28 @@ export async function withdraw(o: WithdrawOptions) {
   }
 
   // ---- 1) 撤仓位 ----
+  // 最少拿回量按池价算，等确认的这段时间价格可能已经变了：发送前按最新池价重算；上链时仍回滚（MinimumAmountInsufficient）就再重读重试
+  const refresh = async (ps: Position[]) => {
+    const [sqrtP, tick] = await pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [v4.poolId(ps[0].key)] })
+    return ps.map((p) => { const [amount0, amount1] = v4.amountsForLiquidity(sqrtP, v4.getSqrtRatioAtTick(p.tickLower), v4.getSqrtRatioAtTick(p.tickUpper), p.liquidity); return { ...p, tick, amount0, amount1 } })
+  }
   const kit = txKit(o.clients, usd, symOf)
-  for (const [, ps] of groups) await kit.sendEstimated(`撤仓位 ${ps.map((p) => p.id).join(',')}`, burnTx(ps))
+  for (const [, ps0] of groups) {
+    let ps = await refresh(ps0)
+    const label = `撤仓位 ${ps.map((p) => p.id).join(',')}`
+    for (let attempt = 1; ; attempt++) {
+      try { await kit.sendEstimated(label, burnTx(ps)); break } catch (e) {
+        const r = slippageRevert(e)
+        if (r?.kind !== 'min' || attempt >= 5) throw e
+        const hit = ps.find((p) => floor(p.amount0) === r.limit || floor(p.amount1) === r.limit)
+        const cur = hit && floor(hit.amount1) === r.limit ? hit.key.currency1 : ps[0].key.currency0
+        const f = (x: bigint) => trim(x, same(cur, USDG) ? 6 : decimals)
+        log(`${label} 回滚: 池价变动，能拿回 ${f(r.actual)} ${symOf(cur)} 低于最少 ${f(r.limit)}，等 3 秒按新池价重算（第 ${attempt} 次）`)
+        await sleep(3000)
+        ps = await refresh(ps)
+      }
+    }
+  }
   const [usdgAfterBurn, tokenBal] = await Promise.all([balanceOf(USDG), balanceOf(token)])
   log(`撤仓完成: 拿回 ${fmtU(usdgAfterBurn - usdgStart)} USDG + ${fmtT(tokenBal - tokenStart)} ${symbol}（含手续费）`)
 

@@ -199,6 +199,18 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
   return { send, sendEstimated, ensureErc20Approval, permitFor, stats }
 }
 
+// PositionManager 的滑点回滚：MaximumAmountExceeded(uint128 max, uint128 requested) / MinimumAmountInsufficient(uint128 min, uint128 received)，
+// 从 viem 错误链里取 revert data 解出来；池价在计划和上链之间变了就会遇到，调用方重读池价重算再试
+export function slippageRevert(e: unknown): { kind: 'max' | 'min'; limit: bigint; actual: bigint } | null {
+  for (let x: any = e; x; x = x.cause) {
+    const data: unknown = x.data
+    if (typeof data !== 'string' || data.length !== 10 + 128) continue
+    const kind = data.startsWith('0x31e30ad0') ? 'max' : data.startsWith('0x12816f22') ? 'min' : null
+    if (kind) return { kind, limit: BigInt('0x' + data.slice(10, 74)), actual: BigInt('0x' + data.slice(74, 138)) }
+  }
+  return null
+}
+
 // ---- 换币：Uniswap 和 OKX 同时报价，按结果排序（精确输入看产出多少，精确输出看投入多少）----
 export type SwapOffer = {
   via: 'uniswap' | 'okx'; amountIn: bigint; amountInMax: bigint; out: bigint; text: string; at: number

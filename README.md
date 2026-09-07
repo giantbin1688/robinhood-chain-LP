@@ -185,7 +185,7 @@ npm run exit -- --token 0x… --yes               # 跳过确认
 流程：
 
 1. **找仓位**：`--token` 模式下用 `positions.json` 记录 + 链上扫描 PositionManager 转给钱包的所有 NFT，只保留"仍归你所有、属于该代币/USDG 池、还有流动性"的（没记录的老仓位也能找到）；`--position` 模式只看指定的那些 id。
-2. **撤仓**：同一个池的仓位合并成一笔交易，`BURN_POSITION` + `TAKE_PAIR`，本金和未领手续费一起到账；最少拿回量按 `LP_SLIPPAGE` 留余量。过渡仓位的粉尘顺带回收。
+2. **撤仓**：同一个池的仓位合并成一笔交易，`BURN_POSITION` + `TAKE_PAIR`，本金和未领手续费一起到账；最少拿回量按 `LP_SLIPPAGE` 留余量，且在你确认之后按最新池价重算（等确认期间价格可能已经变了），上链仍回滚就等几秒重读重试，最多 5 次。过渡仓位的粉尘顺带回收。
 3. **卖币**：`--token` 模式把钱包里该代币全部卖成 USDG；`--position` 模式只卖这次撤出来的。Uniswap 和 OKX DEX 同时报价，走能换回更多 USDG 的一家（OKX 还会顺带标记貔貅币）。
 4. 打印共收回多少 USDG 和 gas。
 
