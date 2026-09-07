@@ -418,5 +418,6 @@ log(`gas 合计: ${stats.txCount} 笔，${trim(stats.gasTotal, 18)} ETH ($${usd(
 // 6) 可选：继续监控本次建的仓位，跳出区间自动撤退（同一代币的其他仓位不管，可以再开一个进程做别的区间）
 if (opt.watch) await watchToken({
   token, positions: minted.length ? minted : undefined, clients, interval: Math.max(3, Number(env('WATCH_INTERVAL', '10'))), confirm: Math.max(1, Number(env('WATCH_CONFIRM', '2'))),
+  upperGrace: Math.max(0, Number(env('WATCH_UPPER_GRACE', '600'))),
   via: env('EXIT_SWAP_VIA', 'best'), slippage: swapSlippage, lpSlippage, dryRun: false,
 })

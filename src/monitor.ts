@@ -8,7 +8,7 @@ import { POSM, STATE_VIEW, die, env, log, makeClients, p6, pct, posmAbi, sleep, 
 import { findPositions, same, withdraw, type Position } from './exit.ts'
 
 // positions 给了就只盯这些仓位、触发时也只撤这些（同一代币可以开多个进程各管各的）；否则盯钱包里该代币的全部仓位
-export type WatchOptions = { token: Address; positions?: bigint[]; clients: Clients; interval: number; confirm: number; via: string; slippage: number; lpSlippage: number; dryRun: boolean }
+export type WatchOptions = { token: Address; positions?: bigint[]; clients: Clients; interval: number; confirm: number; upperGrace: number; via: string; slippage: number; lpSlippage: number; dryRun: boolean }
 export async function watchToken(o: WatchOptions) {
   const { pub, wallet } = o.clients
   const { symbol, decimals } = await tokenMeta(pub, o.token)
@@ -23,30 +23,38 @@ export async function watchToken(o: WatchOptions) {
   let main = all.filter((p) => p.kind !== 'bridge' && value(p) >= total * 0.02)
   if (main.length === 0) { log('没有可监控的主要仓位'); return }
   const edges = (p: Position) => [usdgPerTokenAtTick(p.tickLower), usdgPerTokenAtTick(p.tickUpper)].sort((a, b) => a - b)
-  log(`监控 ${symbol}/USDG: ${main.map((p) => `仓位 ${p.id} 区间 ${edges(p).map(p6).join(' .. ')}`).join('；')}，每 ${o.interval}s 检查，连续 ${o.confirm} 次跳出区间即撤退（Ctrl+C 停止）`)
+  log(`监控 ${symbol}/USDG: ${main.map((p) => `仓位 ${p.id} 区间 ${edges(p).map(p6).join(' .. ')}`).join('；')}，每 ${o.interval}s 检查，连续 ${o.confirm} 次跳出区间即撤退${o.upperGrace > 0 ? `（涨破上沿时仓位已全是 USDG，多等 ${Math.round(o.upperGrace / 60)} 分钟没回来才撤）` : ''}（Ctrl+C 停止）`)
 
   // 只有"进入过区间后又离开"才算跳出：一开始就在区间外的是等待型仓位（挂在现价一侧等价格来），不触发
   const armed = new Set<bigint>()
-  let outStreak = 0, lastStatus = '', lastBeat = 0, errors = 0, polls = 0
+  let outStreak = 0, aboveSince: number | null = null, lastStatus = '', lastBeat = 0, errors = 0, polls = 0
   for (;;) {
     try {
       const ticks = new Map<Hex, number>()
       for (const id of new Set(main.map((p) => v4.poolId(p.key)))) ticks.set(id, (await pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [id] }))[1])
       const tickOf = (p: Position) => ticks.get(v4.poolId(p.key))!
       const inRange = (p: Position) => tickOf(p) >= p.tickLower && tickOf(p) < p.tickUpper
+      const above = (p: Position) => usdgPerTokenAtTick(tickOf(p)) > edges(p)[1]
       for (const p of main) if (inRange(p)) armed.add(p.id)
       const out = main.filter((p) => !inRange(p) && armed.has(p.id))
+      const outBelow = out.filter((p) => !above(p))
+      // 涨破上沿：仓位已全是 USDG，等一段宽限期，价格回到区间就重新计时；跌破下沿：满仓代币，按确认次数尽快止损
+      outStreak = out.length ? outStreak + 1 : 0
+      aboveSince = out.length > outBelow.length ? (aboveSince ?? Date.now()) : null
+      const graceLeft = aboveSince === null ? 0 : o.upperGrace * 1000 - (Date.now() - aboveSince)
       // 每个仓位各报各的区间和状态（多个仓位可能在不同池，价格也各取各池的）
       const one = (p: Position) => {
         const cur = usdgPerTokenAtTick(tickOf(p)), [lo, hi] = edges(p)
-        const state = inRange(p) ? '区间内' : armed.has(p.id) ? '已跳出区间' : `等待进入区间（现价在区间${cur > hi ? '上' : '下'}方）`
+        const state = inRange(p) ? '区间内'
+          : !armed.has(p.id) ? `等待进入区间（现价在区间${cur > hi ? '上' : '下'}方）`
+          : above(p) && graceLeft > 0 ? `已涨破上沿（全是 USDG，再等 ${Math.ceil(graceLeft / 60_000)} 分钟没回来就撤退）`
+          : '已跳出区间'
         return `仓位 ${p.id} 区间 ${p6(lo)} .. ${p6(hi)}（距下沿 ${pct(lo / cur - 1)}，距上沿 ${pct(hi / cur - 1)}）${state}`
       }
       const status = `价格 ${p6(usdgPerTokenAtTick(tickOf(main[0])))} USDG/${symbol}；${main.map(one).join('；')}`
       if (status !== lastStatus || Date.now() - lastBeat > 5 * 60_000) { log(status); lastStatus = status; lastBeat = Date.now() }
-      outStreak = out.length ? outStreak + 1 : 0
-      if (outStreak >= o.confirm) {
-        log(`触发撤退: 连续 ${outStreak} 次检查跳出区间`)
+      if (outStreak >= o.confirm && (outBelow.length > 0 || graceLeft <= 0)) {
+        log(`触发撤退: 连续 ${outStreak} 次检查跳出区间${outBelow.length ? '' : `，涨破上沿已超过 ${Math.round(o.upperGrace / 60)} 分钟`}`)
         await withdraw({ token: o.token, positions: o.positions, via: o.via, slippage: o.slippage, lpSlippage: o.lpSlippage, keepTokens: false, yes: true, dryRun: o.dryRun, clients: o.clients })
         return
       }
@@ -79,6 +87,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       position: { type: 'string' },                                        // 只盯这些仓位 id（逗号分隔），触发时也只撤这些
       interval: { type: 'string', default: env('WATCH_INTERVAL', '10') },  // 检查间隔（秒）
       confirm: { type: 'string', default: env('WATCH_CONFIRM', '2') },     // 连续几次跳出区间才撤退
+      'upper-grace': { type: 'string', default: env('WATCH_UPPER_GRACE', '600') }, // 涨破上沿后多等几秒没回来才撤（0 = 不等）
       via: { type: 'string', default: env('EXIT_SWAP_VIA', 'best') },
       slippage: { type: 'string', default: env('SWAP_SLIPPAGE', '5') },
       'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },
@@ -86,11 +95,11 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       from: { type: 'string' },
     },
   })
-  if (!opt.token) die('用法: npm run watch -- --token <代币地址> [--position <仓位id,仓位id>] [--interval 10] [--confirm 2] [--via okx|uniswap|best] [--dry-run]')
+  if (!opt.token) die('用法: npm run watch -- --token <代币地址> [--position <仓位id,仓位id>] [--interval 10] [--confirm 2] [--upper-grace 600] [--via okx|uniswap|best] [--dry-run]')
   await watchToken({
     token: getAddress(opt.token), positions: opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined,
     clients: makeClients(opt.from, !opt['dry-run']), interval: Math.max(3, Number(opt.interval)), confirm: Math.max(1, Number(opt.confirm)),
-    via: opt.via, slippage: Number(opt.slippage), lpSlippage: Number(opt['lp-slippage']), dryRun: opt['dry-run'],
+    upperGrace: Math.max(0, Number(opt['upper-grace'])), via: opt.via, slippage: Number(opt.slippage), lpSlippage: Number(opt['lp-slippage']), dryRun: opt['dry-run'],
   })
   await sleep(100); process.exit(0)
 }
