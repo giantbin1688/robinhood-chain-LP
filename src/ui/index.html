@@ -44,6 +44,9 @@
   .actions { display:flex; gap:8px; align-items:center; margin-top:14px; flex-wrap:wrap }
   .cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:14px }
   .cards .card { min-height:112px }
+  .stats { grid-template-columns:repeat(5,minmax(0,1fr)) }
+  .stats .card { min-height:0; padding:13px 18px 12px }
+  .stats .stat { font-size:22px; font-weight:600; letter-spacing:-.02em; line-height:1.2; margin:-3px 0 3px }
   .kv { display:grid; grid-template-columns:auto 1fr; gap:5px 11px; font-size:12px }
   .kv .k { color:var(--muted); white-space:nowrap } .kv .v { word-break:break-all; font-weight:510 }
   .badge { display:inline-flex; align-items:center; padding:2px 7px; border-radius:999px; font-size:10px; line-height:17px; font-weight:650; white-space:nowrap }
@@ -81,6 +84,16 @@
   .depth svg { width:100%; display:block }
   .depth .legend { display:flex; gap:16px; font-size:11px; color:var(--muted); margin-top:5px }
   .depth .legend i { display:inline-block; width:9px; height:9px; border-radius:3px; margin-right:5px; vertical-align:-1px }
+  .cal { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:8px }
+  .cal .dow { font-size:10px; font-weight:700; letter-spacing:.11em; color:#929089; text-transform:uppercase; text-align:center; padding:2px 0 4px }
+  .cal .day { min-height:86px; padding:8px 11px; border:1px solid var(--line-soft); border-radius:11px; background:rgba(255,255,255,.45) }
+  .cal .day.blank { border-color:transparent; background:transparent }
+  .cal .day.has { cursor:pointer; transition:.15s ease } .cal .day.has:hover { transform:translateY(-1px); box-shadow:var(--shadow) }
+  .cal .day.up { background:#e7f0e9; border-color:#cfe0d4 } .cal .day.down { background:#f6e8e5; border-color:#ead0cb }
+  .cal .day.today .n { color:var(--accent-dark); font-weight:700 }
+  .cal .day.sel { box-shadow:0 0 0 2px var(--text) }
+  .cal .day .n { font-size:11px; color:var(--muted) }
+  .cal .day .v { font-size:16px; font-weight:600; letter-spacing:-.01em; margin:5px 0 2px }
   ::selection { background:rgba(217,119,87,.2) }
   ::-webkit-scrollbar { width:9px; height:9px } ::-webkit-scrollbar-thumb { background:#c9c7c0; border:3px solid transparent; border-radius:9px; background-clip:padding-box }
   @media(max-width:1050px) { .grid { grid-template-columns:1fr } .cards { grid-template-columns:repeat(2,1fr) } }
@@ -91,6 +104,7 @@
   <span class="brand">rh-uni</span>
   <a class="tab on" data-page="launch">进场</a>
   <a class="tab" data-page="positions">仓位</a>
+  <a class="tab" data-page="calendar">盈亏日历</a>
   <a class="tab" data-page="tasks">任务 <span class="badge run" id="jobCount" style="display:none">0</span></a>
   <span class="wallet" id="walletChip">连接中…</span>
 </header>
@@ -165,6 +179,7 @@
 
 <!-- ===================== 仓位 ===================== -->
 <section class="page" id="page-positions">
+  <div class="cards stats" id="pos-stats"></div>
   <div class="toolbar">
     <button class="btn" id="btn-rescan">重新扫描链上仓位</button>
     <button class="btn" id="btn-refresh">刷新价格</button>
@@ -185,6 +200,19 @@
     <div class="kv" id="card-exit"></div>
     <div id="detail-pos" style="display:none"><pre class="log" id="log-pos" style="height:260px;margin-top:8px"></pre></div>
   </div>
+</section>
+
+<!-- ===================== 盈亏日历 ===================== -->
+<section class="page" id="page-calendar">
+  <div class="cards stats" id="cal-stats"></div>
+  <div class="card">
+    <div class="head" style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+      <button class="btn sm" id="cal-prev" title="上个月">‹</button><b id="cal-title" style="font-size:14px;min-width:96px;text-align:center"></b><button class="btn sm" id="cal-next" title="下个月">›</button>
+      <span class="small" id="cal-note" style="margin-left:6px"></span><span class="sp"></span><button class="btn sm" id="cal-refresh">刷新</button>
+    </div>
+    <div class="cal" id="cal-grid"></div>
+  </div>
+  <div class="card" id="cal-day" style="margin-top:12px;display:none"></div>
 </section>
 
 <!-- ===================== 任务 ===================== -->
@@ -298,7 +326,7 @@ function onStatus(m, was) {
   const n = running().length
   $('#jobCount').style.display = n ? '' : 'none'; $('#jobCount').textContent = n
   // 任务结束 / 进入监控阶段：仓位和余额可能变了
-  if ((was && was.running && !m.running) || (m.phase === 'watch' && (!was || was.phase !== 'watch'))) { loadState(false); if ($('#page-positions').classList.contains('on')) loadPositions(m.kind !== 'watch' && !m.dryRun) }
+  if ((was && was.running && !m.running) || (m.phase === 'watch' && (!was || was.phase !== 'watch'))) { loadState(false); if ($('#page-positions').classList.contains('on')) loadPositions(m.kind !== 'watch' && !m.dryRun); if ($('#page-calendar').classList.contains('on') && !m.dryRun) loadCalendar() }
 }
 async function stopJob(id) {
   const m = job(id).meta
@@ -312,6 +340,7 @@ function showPage(p) {
   document.querySelectorAll('a.tab').forEach((x) => x.classList.toggle('on', x.dataset.page === p))
   document.querySelectorAll('.page').forEach((x) => x.classList.toggle('on', x.id === 'page-' + p))
   if (p === 'positions') loadPositions(false)
+  if (p === 'calendar') loadCalendar()
   if (p === 'tasks') renderTasks()
 }
 
@@ -459,22 +488,43 @@ function fmtHold(ms) {
 }
 // uPNL = 现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入（每笔按当时的池价折算，不含进场换币成本）；绿正红负；点数字展开资金明细
 const money = (v) => `${v >= 0 ? '+' : '−'}$${Math.abs(v).toFixed(2)}`
+const pnlCol = (v) => (v > 0.004 ? '#1a7f37' : v < -0.004 ? '#c62828' : 'var(--muted)')
+const tile = (k, v, d, col = '') => `<div class="card"><h4>${k}</h4><div class="stat" style="color:${col}">${v}</div><div class="small">${d}</div></div>`
 function pnlCell(p) {
   if (p.pnlUsd === null) return '<span class="small" title="资金流水需要 Alchemy 节点（RPC_URL），或该仓位是别处转进来的">—</span>'
-  const v = Number(p.pnlUsd), pctv = Number(p.entryUsd) > 0 ? (v / Number(p.entryUsd)) * 100 : 0, col = v >= 0 ? '#1a7f37' : '#c62828'
+  const v = Number(p.pnlUsd), pctv = Number(p.entryUsd) > 0 ? (v / Number(p.entryUsd)) * 100 : 0, col = pnlCol(v)
   const taken = Number(p.collectedUsd) + Number(p.withdrawnUsd)
   return `<span class="exp" data-act="hist" data-id="${p.id}" style="color:${col};font-weight:600" title="现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入（不含进场换币成本）。点击看明细">${money(v)} ${histOpen.has(p.id) ? '▾' : '▸'}</span><br><span class="small" style="color:${col}">${v >= 0 ? '+' : '−'}${Math.abs(pctv).toFixed(1)}%</span><br><span class="small">存入 $${p.entryUsd}${taken > 0.005 ? `<br>已领 $${taken.toFixed(2)}` : ''}</span>`
 }
 let POS = [], posTimer = null
 const expanded = new Set() // 展开了深度图的仓位 id
 const histOpen = new Set() // 展开了资金明细的仓位 id
+// 页顶四格汇总：投入价值 = 存入 − 已撤本金；现金价值 = 本金现值 + 未领手续费；手续费收益 = 已领 + 未领；
+// 总盈亏 = 现金价值 + 已领手续费 − 投入价值 = 各仓位 uPNL 之和。没有资金流水的仓位（无 Alchemy 节点 / 别处转进来的）只计入现金价值和未领手续费
+// DPR（日收益率）= 总盈亏 ÷ Σ(各仓位投入 × 持仓天数)：仓位大小和持仓时间不同时按"投入×天数"加权，等价于单个仓位的 盈亏% ÷ 天数
+function renderStats() {
+  const tot = (k, list = POS) => list.reduce((s, p) => s + Number(p[k]), 0)
+  const led = POS.filter((p) => p.pnlUsd !== null)
+  const value = tot('value'), unclaimed = tot('feesUsd'), deposits = tot('entryUsd', led), collected = tot('collectedUsd', led), withdrawn = tot('withdrawnUsd', led)
+  const invested = deposits - withdrawn, pnl = tot('value', led) + tot('feesUsd', led) + collected - invested, usd = (v) => `$${v.toFixed(2)}`
+  const dollarDays = led.reduce((s, p) => s + (Math.max(Number(p.entryUsd) - Number(p.withdrawnUsd), 0) * Math.max(Date.now() - (p.mintedAt || Date.now()), 0)) / 864e5, 0)
+  const pct = (v) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}%`
+  const noLedger = '需要 Alchemy 节点（RPC_URL）才能读资金流水'
+  $('#pos-stats').innerHTML = POS.length ? [
+    tile('投入价值', led.length ? usd(invested) : '—', !led.length ? noLedger : withdrawn > 0.005 ? `存入 ${usd(deposits)} − 已撤本金 ${usd(withdrawn)}` : '每笔存入按当时的池价折算'),
+    tile('现金价值', usd(value + unclaimed), `本金 ${usd(value)} + 未领手续费 ${usd(unclaimed)}`),
+    tile('手续费收益', usd(collected + unclaimed), led.length ? `已领 ${usd(collected)} + 未领 ${usd(unclaimed)}` : `只有未领 ${usd(unclaimed)}，已领的要资金流水`),
+    tile('总盈亏', led.length ? money(pnl) : '—', !led.length ? noLedger : `${invested > 0 ? `${pnl >= 0 ? '+' : '−'}${Math.abs((pnl / invested) * 100).toFixed(1)}% · ` : ''}现金价值 + 已领手续费 − 投入价值`, led.length ? pnlCol(pnl) : ''),
+    tile('DPR 日收益率', dollarDays > 0 ? pct((pnl / dollarDays) * 100) : '—', !led.length ? noLedger : dollarDays > 0 ? `加权持仓 ${fmtHold((dollarDays / invested) * 864e5)} · 其中手续费 ${pct(((collected + tot('feesUsd', led)) / dollarDays) * 100)}/天` : '仓位刚建立', dollarDays > 0 ? pnlCol(pnl) : ''),
+  ].join('') : ''
+}
 async function loadPositions(full) {
   const sum = $('#pos-summary')
   if (full) sum.textContent = '扫描链上仓位中（首次几秒）…'
   try { POS = (await api('/api/positions' + (full ? '?full=1' : ''))).positions } catch (e) { sum.textContent = '加载失败: ' + e.message; return }
-  const total = POS.reduce((s, p) => s + Number(p.value), 0), fees = POS.reduce((s, p) => s + Number(p.feesUsd), 0)
-  const pnl = POS.reduce((s, p) => s + (p.pnlUsd === null ? 0 : Number(p.pnlUsd)), 0)
-  sum.textContent = `${POS.length} 个仓位，本金按当前池价折合 ≈$${total.toFixed(2)}，未领手续费 ≈$${fees.toFixed(2)}，uPNL ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} · ${new Date().toLocaleTimeString()}`
+  renderStats()
+  const noLedger = POS.filter((p) => p.pnlUsd === null).length
+  sum.textContent = `${POS.length} 个仓位，按当前池价折算 · ${new Date().toLocaleTimeString()}${noLedger ? `（${noLedger} 个没有资金流水，未计入投入 / 已领手续费 / 盈亏）` : ''}`
   const tb = $('#pos-table tbody'); tb.innerHTML = ''
   for (const p of POS) {
     const lo = Math.log(Number(p.lo)), hi = Math.log(Number(p.hi)), cur = Math.log(Number(p.price))
@@ -595,6 +645,56 @@ $('#btn-rescan').onclick = () => loadPositions(true)
 $('#btn-refresh').onclick = () => loadPositions(false)
 function setAuto() { clearInterval(posTimer); const s = Number($('#p-auto').value); if (s > 0) posTimer = setInterval(() => { if ($('#page-positions').classList.contains('on')) loadPositions(false) }, s * 1000) }
 $('#p-auto').onchange = setAuto
+
+// ---- 盈亏日历：已平仓仓位按平仓日归类，每格 = 当天平仓的仓位各自整段盈亏（拿回本金 + 手续费 − 存入）之和；点格子看当天明细 ----
+let CAL = null, calMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1), calSel = null
+async function loadCalendar() {
+  $('#cal-note').textContent = CAL ? '刷新中…' : '首次要读取钱包全部 LP 历史，约半分钟…'
+  try { CAL = await api('/api/closed') } catch (e) { $('#cal-note').textContent = '加载失败: ' + e.message; return }
+  renderCalendar()
+}
+// 胜 / 负 / 平：盈亏在 ±1 分以内算平（开了马上撤、价格没动的仓位很多），胜率只看胜负
+const wlc = (list) => ({ w: list.filter((c) => c.pnl > 0.004).length, l: list.filter((c) => c.pnl < -0.004).length, f: list.filter((c) => Math.abs(c.pnl) <= 0.004).length })
+const wl = (list) => { const { w, l, f } = wlc(list); return `${w} 胜 ${l} 负${f ? ` ${f} 平` : ''}` }
+function renderCalendar() {
+  if (!CAL) return
+  const y = calMonth.getFullYear(), mo = calMonth.getMonth(), today = new Date()
+  $('#cal-title').textContent = `${y} 年 ${mo + 1} 月`
+  const byDay = new Map()
+  for (const c of CAL.closed) { const d = new Date(c.closedAt); if (d.getFullYear() === y && d.getMonth() === mo) byDay.set(d.getDate(), [...(byDay.get(d.getDate()) ?? []), c]) }
+  const days = [...byDay].map(([d, list]) => ({ d, list, pnl: list.reduce((s, c) => s + c.pnl, 0) }))
+  const all = days.flatMap((x) => x.list), month = all.reduce((s, c) => s + c.pnl, 0), { w, l } = wlc(all)
+  const best = days.reduce((a, b) => (b.pnl > a.pnl ? b : a), days[0]), worst = days.reduce((a, b) => (b.pnl < a.pnl ? b : a), days[0])
+  $('#cal-stats').innerHTML = [
+    tile('本月盈亏', all.length ? money(month) : '—', all.length ? `${days.length} 天有平仓` : '本月没有平仓', all.length ? pnlCol(month) : ''),
+    tile('平仓', `${all.length}`, `${mo + 1} 月平掉的仓位数`),
+    tile('胜率', w + l ? `${Math.round((w / (w + l)) * 100)}%` : '—', all.length ? `${wl(all)}（平不计入）` : '盈亏 > 0 算胜'),
+    tile('最好一天', best ? money(best.pnl) : '—', best ? `${mo + 1} 月 ${best.d} 日，${best.list.length} 个平仓` : '', best ? pnlCol(best.pnl) : ''),
+    tile('最差一天', worst ? money(worst.pnl) : '—', worst ? `${mo + 1} 月 ${worst.d} 日，${worst.list.length} 个平仓` : '', worst ? pnlCol(worst.pnl) : ''),
+  ].join('')
+  let h = ['一', '二', '三', '四', '五', '六', '日'].map((d) => `<div class="dow">周${d}</div>`).join('')
+  h += '<div class="day blank"></div>'.repeat((new Date(y, mo, 1).getDay() + 6) % 7)
+  for (let d = 1, n = new Date(y, mo + 1, 0).getDate(); d <= n; d++) {
+    const x = byDay.get(d), pnl = x ? x.reduce((s, c) => s + c.pnl, 0) : 0
+    const cls = ['day', x ? (pnl >= 0 ? 'up has' : 'down has') : '', today.getFullYear() === y && today.getMonth() === mo && today.getDate() === d ? 'today' : '', calSel === d ? 'sel' : '']
+    h += `<div class="${cls.filter(Boolean).join(' ')}" data-day="${d}"><div class="n">${d}</div>${x ? `<div class="v" style="color:${pnlCol(pnl)}">${money(pnl)}</div><div class="small">${x.length} 个平仓 · ${wl(x)}</div>` : ''}</div>`
+  }
+  $('#cal-grid').innerHTML = h
+  $('#cal-note').textContent = `共 ${CAL.closed.length} 个已平仓仓位（本地时间归日）${CAL.nonUsdg ? `，${CAL.nonUsdg} 个非 USDG 池的未计入` : ''}${CAL.failed ? `，${CAL.failed} 个读取失败` : ''}`
+  const sel = byDay.get(calSel), box = $('#cal-day')
+  box.style.display = sel ? '' : 'none'
+  if (sel) box.innerHTML = `<h4 style="margin:0 0 10px;font-size:11px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase">${mo + 1} 月 ${calSel} 日平仓 ${sel.length} 个，合计 <b style="color:${pnlCol(sel.reduce((s, c) => s + c.pnl, 0))}">${money(sel.reduce((s, c) => s + c.pnl, 0))}</b></h4>
+    <table><thead><tr><th>平仓时间</th><th>仓位</th><th>交易对</th><th>存入</th><th>拿回本金</th><th>手续费</th><th>盈亏</th><th>持仓时间</th><th>交易</th></tr></thead><tbody>${[...sel].sort((a, b) => b.closedAt - a.closedAt).map((c) => `<tr>
+      <td>${new Date(c.closedAt).toLocaleTimeString()}</td><td class="mono">#${c.id}</td><td>${esc(c.symbol)}/USDG ${c.fee}%</td>
+      <td>$${c.deposits.toFixed(2)}</td><td>$${c.withdrawn.toFixed(2)}</td><td>$${c.fees.toFixed(2)}</td>
+      <td style="color:${pnlCol(c.pnl)};font-weight:600">${money(c.pnl)}<br><span class="small" style="color:${pnlCol(c.pnl)}">${c.deposits > 0 ? `${c.pnl >= 0 ? '+' : '−'}${Math.abs((c.pnl / c.deposits) * 100).toFixed(1)}%` : ''}</span></td>
+      <td>${c.openedAt ? fmtHold(c.closedAt - c.openedAt) : '—'}</td>
+      <td class="mono"><a class="tx" href="${STATE.explorer}/tx/${c.closedTx}" target="_blank">${c.closedTx.slice(0, 8)}…${c.closedTx.slice(-4)}</a></td></tr>`).join('')}</tbody></table>`
+}
+$('#cal-prev').onclick = () => { calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1); calSel = null; renderCalendar() }
+$('#cal-next').onclick = () => { calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1); calSel = null; renderCalendar() }
+$('#cal-refresh').onclick = loadCalendar
+$('#cal-grid').onclick = (e) => { const d = e.target.closest('.day.has'); if (!d) return; const n = Number(d.dataset.day); calSel = calSel === n ? null : n; renderCalendar() }
 
 // ---- 任务列表 ----
 const fmtDur = (ms) => ms < 60000 ? `${Math.round(ms / 1000)}s` : ms < 3600000 ? `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s` : `${(ms / 3600000).toFixed(1)}h`

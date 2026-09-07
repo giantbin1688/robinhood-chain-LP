@@ -74,7 +74,7 @@ export async function refreshLedger(c: Clients, since: bigint) {
 
 // 某个仓位的流水（按区块升序）。一笔交易动了同池多个仓位时（本工具按池批量撤仓/领取）：本金按各自 liquidityDelta 在当时池价下应得的数量算，
 // 手续费按各仓位交易前的流动性比例分；存入则按本金比例分
-export async function positionLedger(c: Clients, p: Position): Promise<LedgerEvent[]> {
+export async function positionLedger(c: Clients, p: Pick<Position, 'id' | 'key' | 'tickLower' | 'tickUpper'>): Promise<LedgerEvent[]> {
   const pid = v4.poolId(p.key)
   const c0 = p.key.currency0.toLowerCase(), c1 = p.key.currency1.toLowerCase()
   const events: LedgerEvent[] = []
@@ -111,4 +111,17 @@ export async function positionLedger(c: Clients, p: Position): Promise<LedgerEve
     events.push({ tx, block: t.block, time: t.time, action, amount0, amount1, principal0: min(principal0, amount0), principal1: min(principal1, amount1), tick })
   }
   return events.sort((a, b) => (a.block < b.block ? -1 : a.block > b.block ? 1 : 0))
+}
+
+// 已平仓 = 流水里出现过、liquidityDelta 累计归零的仓位（全部撤出；销毁 NFT 前也必先撤完，Uniswap 网页撤完不销毁的也算）。
+// 要求流水从创世块扫起（refreshLedger(c, 0n)），否则早期的加流动性看不到、累计不归零。池子 key 由调用方按 poolId 查（销毁后 POSM 里只剩 poolKeys）
+export function closedPositions() {
+  const acc = new Map<bigint, { poolId: Hex; tickLower: number; tickUpper: number; delta: bigint; closed: { block: bigint; time: number; tx: Hex } }>()
+  for (const [tx, t] of txs) for (const m of t.mods) {
+    const a = acc.get(m.id) ?? { poolId: m.poolId, tickLower: m.tickLower, tickUpper: m.tickUpper, delta: 0n, closed: { block: 0n, time: 0, tx } }
+    a.delta += m.delta
+    if (m.delta < 0n && t.block >= a.closed.block) a.closed = { block: t.block, time: t.time, tx }
+    acc.set(m.id, a)
+  }
+  return [...acc].filter(([, a]) => a.delta === 0n && a.closed.block > 0n).map(([id, { poolId, tickLower, tickUpper, closed }]) => ({ id, poolId, tickLower, tickUpper, closed }))
 }

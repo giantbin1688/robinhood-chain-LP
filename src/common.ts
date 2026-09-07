@@ -49,6 +49,7 @@ export const posmAbi = parseAbi([
   'function ownerOf(uint256 id) view returns (address)',
   'function getPoolAndPositionInfo(uint256 tokenId) view returns (PoolKey poolKey, uint256 info)',
   'function getPositionLiquidity(uint256 tokenId) view returns (uint128 liquidity)',
+  'function poolKeys(bytes25 poolId) view returns (address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks)', // 销毁的 NFT 仓位信息已删，只能按 poolId 前 25 字节查池子
   'event Transfer(address indexed from, address indexed to, uint256 indexed id)',
 ])
 

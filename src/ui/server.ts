@@ -5,12 +5,12 @@ import { readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { formatEther, isAddress, parseAbi, type Address } from 'viem'
+import { formatEther, isAddress, parseAbi, type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import * as v4 from '../v4.ts'
 import { POSM, STATE_VIEW, USDG, EXPLORER, env, erc20Abi, ethPriceUsd, log, makeClients, p6, posmAbi, stateViewAbi, tokenMeta, trim } from '../common.ts'
 import { findPositions, positionFees, same, type Position } from '../exit.ts'
-import { positionLedger, refreshLedger } from '../history.ts'
+import { closedPositions, positionLedger, refreshLedger, type LedgerEvent } from '../history.ts'
 import { listTokenPools } from '../pools.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -84,7 +84,7 @@ const svExtAbi = parseAbi([
 ])
 const meta = new Map<string, { symbol: string; decimals: number }>()
 let known: Position[] = []
-const tokenOf = (p: Position) => ({ tokenIs1: same(p.key.currency0, USDG), token: (same(p.key.currency0, USDG) ? p.key.currency1 : p.key.currency0) as Address })
+const tokenOf = (p: Pick<Position, 'key'>) => ({ tokenIs1: same(p.key.currency0, USDG), token: (same(p.key.currency0, USDG) ? p.key.currency1 : p.key.currency0) as Address })
 async function metaOf(token: Address) { let m = meta.get(token.toLowerCase()); if (!m) { m = await tokenMeta(clients!.pub, token); meta.set(token.toLowerCase(), m) }; return m }
 // 池子原始价格 -> 每个代币多少 USDG
 const priceFn = (tokenIs1: boolean, decimals: number) => { const [dec0, dec1] = tokenIs1 ? [6, decimals] : [decimals, 6]; return (t: number) => { const h = v4.priceAtTick(t) * 10 ** (dec0 - dec1); return tokenIs1 ? 1 / h : h } }
@@ -93,25 +93,29 @@ const uncollectedFees = (p: Position): Promise<[bigint, bigint]> => positionFees
 // ---- 资金流水（history.ts）：每个仓位的 存入 / 已领手续费 / 已撤本金，每笔按当时池价折算 ----
 // 盈亏 = 现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入。流水从当前仓位里最早的 mint 区块起扫，全量刷新或距上次超过 1 分钟才重新拉
 let ledgerAt = 0, ledgerOk = false
+async function refresh(since: bigint) {
+  try { await refreshLedger(clients!, since); ledgerOk = true; ledgerAt = Date.now() }
+  catch (e: any) { ledgerOk = false; throw new Error(`资金流水读取失败（需要 Alchemy 节点）: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`) }
+}
 async function ensureLedger(full: boolean) {
   const minted = known.filter((p) => p.mint)
   if (!minted.length || (!full && ledgerOk && Date.now() - ledgerAt < 60_000)) return
-  const since = minted.reduce((m, p) => (p.mint!.block < m ? p.mint!.block : m), minted[0].mint!.block)
-  try { await refreshLedger(clients!, since); ledgerOk = true; ledgerAt = Date.now() }
-  catch (e: any) { ledgerOk = false; log(`资金流水读取失败（需要 Alchemy 节点）: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`) }
+  await refresh(minted.reduce((m, p) => (p.mint!.block < m ? p.mint!.block : m), minted[0].mint!.block)).catch((e) => log(e.message))
 }
 const usdAt = (tokenIs1: boolean, decimals: number, priceAt: (t: number) => number) => (a0: bigint, a1: bigint, tick: number) => { const [u, t] = tokenIs1 ? [a0, a1] : [a1, a0]; return Number(u) / 1e6 + (Number(t) / 10 ** decimals) * priceAt(tick) }
-async function ledgerSummary(p: Position, decimals: number, priceAt: (t: number) => number) {
-  if (!ledgerOk || !p.mint) return null
-  const events = await positionLedger(clients!, p)
-  const usd = usdAt(tokenOf(p).tokenIs1, decimals, priceAt)
+function sumLedger(events: LedgerEvent[], usd: ReturnType<typeof usdAt>) {
   let deposits = 0, fees = 0, withdrawn = 0, mintedAt = 0
   for (const e of events) {
     const total = usd(e.amount0, e.amount1, e.tick), principal = usd(e.principal0, e.principal1, e.tick)
     if (e.action === 'add') { deposits += total; if (!mintedAt) mintedAt = e.time }
     else { withdrawn += principal; fees += total - principal }
   }
-  return events.length ? { mintedAt, deposits, fees, withdrawn, events } : null
+  return { mintedAt, deposits, fees, withdrawn }
+}
+async function ledgerSummary(p: Position, decimals: number, priceAt: (t: number) => number) {
+  if (!ledgerOk || !p.mint) return null
+  const events = await positionLedger(clients!, p)
+  return events.length ? sumLedger(events, usdAt(tokenOf(p).tokenIs1, decimals, priceAt)) : null
 }
 // 流水不可用（没有 Alchemy 节点）时持仓时间退回用 mint 区块的时间
 const blockTime = new Map<bigint, Promise<number>>()
@@ -249,6 +253,34 @@ async function history(idStr: string) {
   return { id: idStr, symbol: m.symbol, events: rows, deposits: deposits.toFixed(2), fees: fees.toFixed(2), withdrawn: withdrawn.toFixed(2), value: value.toFixed(2), unclaimed: unclaimed.toFixed(2), pnl: (value + unclaimed + fees + withdrawn - deposits).toFixed(2) }
 }
 
+// ---- 盈亏日历：已平仓仓位各自整段的盈亏 = 拿回本金 + 手续费 − 存入（每笔按当时池价折算），按平仓日归类由网页做 ----
+// 第一次要从创世块起拉钱包全部 LP 交易的回执、逐笔读当时池价，几十秒；平仓后的数字不会再变，算过一次就缓存
+type ClosedRow = { id: string; token: Address; symbol: string; fee: number; openedAt: number; closedAt: number; closedTx: Hex; deposits: number; withdrawn: number; fees: number; pnl: number }
+const closedCache = new Map<bigint, ClosedRow>()
+async function closedList() {
+  if (!clients) return { closed: [], nonUsdg: 0, failed: 0 }
+  const { pub } = clients
+  await refresh(0n)
+  const list = closedPositions().filter((c) => !closedCache.has(c.id))
+  const poolIds = [...new Set(list.map((c) => c.poolId))]
+  const keys = await pub.multicall({ allowFailure: false, batchSize: 0, contracts: poolIds.map((pid) => ({ address: POSM, abi: posmAbi, functionName: 'poolKeys', args: [pid.slice(0, 52) as Hex] }) as const) })
+  const keyOf = new Map(poolIds.map((pid, i) => { const [currency0, currency1, fee, tickSpacing, hooks] = keys[i]; return [pid, { currency0, currency1, fee, tickSpacing, hooks } as v4.PoolKey] }))
+  const cents = (x: number) => Math.round(x * 100) / 100
+  let nonUsdg = 0, failed = 0
+  for (const c of list) { // 逐个算：每笔都要按当时的区块读池价（归档调用），并发会撞 Alchemy 的每秒额度
+    const key = keyOf.get(c.poolId)!
+    if (![key.currency0, key.currency1].some((x) => same(x, USDG))) { nonUsdg++; continue }
+    try {
+      const p = { id: c.id, key, tickLower: c.tickLower, tickUpper: c.tickUpper }
+      const { tokenIs1, token } = tokenOf(p)
+      const m = await metaOf(token)
+      const s = sumLedger(await positionLedger(clients, p), usdAt(tokenIs1, m.decimals, priceFn(tokenIs1, m.decimals)))
+      closedCache.set(c.id, { id: c.id.toString(), token, symbol: m.symbol, fee: key.fee / 10000, openedAt: s.mintedAt, closedAt: c.closed.time, closedTx: c.closed.tx, deposits: cents(s.deposits), withdrawn: cents(s.withdrawn), fees: cents(s.fees), pnl: cents(s.withdrawn + s.fees - s.deposits) })
+    } catch (e: any) { failed++; log(`仓位 ${c.id} 平仓盈亏读取失败: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`) }
+  }
+  return { closed: [...closedCache.values()].sort((a, b) => a.closedAt - b.closedAt), nonUsdg, failed }
+}
+
 // ---- 该代币的全部池子（GeckoTerminal 列表，可复用的 USDG v4 池再读链上池价）----
 async function poolsFor(token: Address) {
   if (!clients) throw new Error('没有钱包')
@@ -325,6 +357,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/positions') return json(res, 200, { positions: await listPositions(url.searchParams.get('full') === '1') })
     if (req.method === 'GET' && url.pathname === '/api/depth') return json(res, 200, await depth(str(url.searchParams.get('id'))))
     if (req.method === 'GET' && url.pathname === '/api/history') return json(res, 200, await history(str(url.searchParams.get('id'))))
+    if (req.method === 'GET' && url.pathname === '/api/closed') return json(res, 200, await closedList())
     if (req.method === 'GET' && url.pathname === '/api/pools') {
       const t = str(url.searchParams.get('token'))
       if (!isAddress(t)) throw new Error('代币地址不合法')
