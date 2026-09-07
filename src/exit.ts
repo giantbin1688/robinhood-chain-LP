@@ -66,8 +66,29 @@ export async function positionFees(pub: Clients['pub'], p: Position): Promise<[b
   return [(((in0 - last0) & U256) * liq) / Q128, (((in1 - last1) & U256) * liq) / Q128]
 }
 
-// 只领手续费，不动本金：同一个池的仓位合并成一笔 DECREASE_LIQUIDITY(0) ×n + TAKE_PAIR
-export type CollectOptions = { positions: bigint[]; yes: boolean; dryRun: boolean; clients: Clients; json?: boolean }
+// 把代币卖成 USDG：Uniswap 和 OKX 同时报价，能换回更多 USDG 的排前面。plan 在计划阶段报价并打印（拿不到报价就放弃，还没发任何交易），sell 按实际数量重新报价再执行
+function seller(c: Clients, token: Address, symbol: string, fmtT: (x: bigint) => string, via: string, slippage: number) {
+  const deps = { uni: uniswapApi(c.wallet, slippage), okx: okxDex(c.wallet, slippage), via, fmtOut: (x: bigint) => trim(x, 6), outSym: 'USDG' }
+  if (via === 'okx' && !deps.okx) die('--via okx 需要在 .env 里配置 OKX_API_KEY / OKX_SECRET_KEY / OKX_API_PASSPHRASE')
+  const offers = (amount: bigint) => swapOffers(deps, token, USDG, 'EXACT_INPUT', amount)
+  return {
+    plan: async (amount: bigint) => {
+      const got = await offers(amount)
+      if (got.length === 0) die('拿不到卖币报价，放弃')
+      log(`计划: 卖出 ≈${fmtT(amount)} ${symbol}：${got.map((x) => x.text).join('；')}${got.length > 1 ? `，走 ${got[0].via}` : ''}${!deps.okx && via !== 'uniswap' ? '（未配置 OKX_API_KEY，只有 Uniswap）' : ''}`)
+      return got
+    },
+    sell: async (amount: bigint, kit: ReturnType<typeof txKit>) => {
+      const [best] = await offers(amount)
+      if (!best) die('卖币报价失败，代币留在钱包里')
+      log(`卖出 ${fmtT(amount)} ${symbol} -> ${best.text}`)
+      await executeSwap(best, deps, kit, c, token, USDG, '卖币')
+    },
+  }
+}
+
+// 只领手续费，不动本金：同一个池的仓位合并成一笔 DECREASE_LIQUIDITY(0) ×n + TAKE_PAIR；sell = 领完把领到的代币卖成 USDG（USDG 那部分本来就是 USDG）
+export type CollectOptions = { positions: bigint[]; sell?: boolean; via: string; slippage: number; yes: boolean; dryRun: boolean; clients: Clients; json?: boolean }
 export async function collectFees(o: CollectOptions) {
   const { wallet, pub } = o.clients
   const balanceOf = (t: Address) => pub.readContract({ address: t, abi: erc20Abi, functionName: 'balanceOf', args: [wallet] })
@@ -89,7 +110,12 @@ export async function collectFees(o: CollectOptions) {
     log(`仓位 ${p.id}: ${symbol}/USDG ${p.key.fee / 10000}% 未领手续费 ≈${fmtU(u)} USDG + ${fmtT(t)} ${symbol}`)
   }
   log(`计划: 领取 ${positions.length} 个仓位的手续费（${groups.size} 笔交易），≈${fmtU(expectUsdg)} USDG + ${fmtT(expectToken)} ${symbol}，本金不动`)
-  if (o.json) console.log('@@plan ' + JSON.stringify({ kind: 'collect', wallet, token: { address: token, symbol, decimals }, positions: positions.map((p) => p.id.toString()), txCount: groups.size, expectUsdg: fmtU(expectUsdg), expectToken: fmtT(expectToken) }))
+  const s = o.sell ? seller(o.clients, token, symbol, fmtT, o.via, o.slippage) : null
+  const sellOffers = s && expectToken > 0n ? await s.plan(expectToken) : []
+  if (o.json) console.log('@@plan ' + JSON.stringify({
+    kind: 'collect', wallet, token: { address: token, symbol, decimals }, positions: positions.map((p) => p.id.toString()), txCount: groups.size, expectUsdg: fmtU(expectUsdg), expectToken: fmtT(expectToken),
+    sell: !!s, offers: sellOffers.map((x) => ({ via: x.via, out: fmtU(x.out), text: x.text })),
+  }))
   const tx = (ps: Position[]) => ({ to: POSM, data: encodeFunctionData({ abi: posmAbi, functionName: 'modifyLiquidities', args: [v4.encodeCollectUnlockData(ps[0].key, ps.map((p) => p.id), wallet), BigInt(now() + 600)] }) })
   if (o.dryRun) {
     for (const [, ps] of groups) log(`模拟领取 ${ps.map((p) => p.id).join(',')}: OK，gas ${await pub.estimateGas({ account: wallet, ...tx(ps) })}`)
@@ -104,8 +130,9 @@ export async function collectFees(o: CollectOptions) {
   }
   const kit = txKit(o.clients, usd, symOf)
   for (const [, ps] of groups) await kit.sendEstimated(`领手续费 ${ps.map((p) => p.id).join(',')}`, tx(ps))
-  const [usdgEnd, tokenEnd] = await Promise.all([balanceOf(USDG), balanceOf(token)])
-  log(`完成: 领到 ${fmtU(usdgEnd - usdgStart)} USDG + ${fmtT(tokenEnd - tokenStart)} ${symbol}`)
+  const [usdgGot, tokenGot] = await Promise.all([balanceOf(USDG), balanceOf(token)])
+  log(`${s ? '领取完成' : '完成'}: 领到 ${fmtU(usdgGot - usdgStart)} USDG + ${fmtT(tokenGot - tokenStart)} ${symbol}`)
+  if (s && tokenGot > tokenStart) { await s.sell(tokenGot - tokenStart, kit); log(`完成: 共收回 ${fmtU((await balanceOf(USDG)) - usdgStart)} USDG`) }
   log(`gas 合计: ${kit.stats.txCount} 笔，${trim(kit.stats.gasTotal, 18)} ETH ($${usd(kit.stats.gasTotal)})`)
 }
 
@@ -143,15 +170,8 @@ export async function withdraw(o: WithdrawOptions) {
   log(`计划: 撤 ${positions.length} 个仓位（${groups.size} 笔交易），拿回 ≈${fmtU(expectUsdg)} USDG + ${fmtT(expectToken)} ${symbol}`)
 
   // 卖币报价：Uniswap 和 OKX 同时报价，能换回更多 USDG 的排前面
-  const deps = { uni: uniswapApi(wallet, o.slippage), okx: okxDex(wallet, o.slippage), via: o.via, fmtOut: fmtU, outSym: 'USDG' }
-  if (o.via === 'okx' && !deps.okx) die('--via okx 需要在 .env 里配置 OKX_API_KEY / OKX_SECRET_KEY / OKX_API_PASSPHRASE')
-  const offers = (amount: bigint) => swapOffers(deps, token, USDG, 'EXACT_INPUT', amount)
-  let sellOffers: SwapOffer[] = []
-  if (!o.keepTokens && sellAmount > 0n) {
-    sellOffers = await offers(sellAmount)
-    if (sellOffers.length === 0) die('拿不到卖币报价，放弃')
-    log(`计划: 卖出 ≈${fmtT(sellAmount)} ${symbol}：${sellOffers.map((x) => x.text).join('；')}${sellOffers.length > 1 ? `，走 ${sellOffers[0].via}` : ''}${!deps.okx && o.via !== 'uniswap' ? '（未配置 OKX_API_KEY，只有 Uniswap）' : ''}`)
-  }
+  const s = seller(o.clients, token, symbol, fmtT, o.via, o.slippage)
+  const sellOffers: SwapOffer[] = !o.keepTokens && sellAmount > 0n ? await s.plan(sellAmount) : []
   if (o.json) console.log('@@plan ' + JSON.stringify({
     kind: 'exit', wallet, token: { address: token, symbol, decimals }, usdg: fmtU(usdgStart), held: fmtT(tokenStart), ethPrice: ethPrice.toFixed(2),
     positions: positions.map((p) => { const [u, t] = same(p.key.currency1, token) ? [p.amount0, p.amount1] : [p.amount1, p.amount0]; return { id: p.id.toString(), fee: p.key.fee / 10000, tickLower: p.tickLower, tickUpper: p.tickUpper, usdg: fmtU(u), token: fmtT(t), kind: p.kind } }),
@@ -204,12 +224,7 @@ export async function withdraw(o: WithdrawOptions) {
 
   // ---- 2) 卖币：按实际余额重新报价，走更好的一家 ----
   const toSell = sellHeld + (tokenBal - tokenStart)
-  if (!o.keepTokens && toSell > 0n) {
-    const [best] = await offers(toSell)
-    if (!best) die('卖币报价失败，代币留在钱包里')
-    log(`卖出 ${fmtT(toSell)} ${symbol} -> ${best.text}`)
-    await executeSwap(best, deps, kit, o.clients, token, USDG, '卖币')
-  }
+  if (!o.keepTokens && toSell > 0n) await s.sell(toSell, kit)
   const [usdgEnd, tokenEnd] = await Promise.all([balanceOf(USDG), balanceOf(token)])
   log(`完成: 共收回 ${fmtU(usdgEnd - usdgStart)} USDG${tokenEnd > 0n ? `，钱包还剩 ${fmtT(tokenEnd)} ${symbol}` : ''}`)
   log(`gas 合计: ${kit.stats.txCount} 笔，${trim(kit.stats.gasTotal, 18)} ETH ($${usd(kit.stats.gasTotal)})`)
@@ -228,18 +243,19 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       'keep-tokens': { type: 'boolean', default: false },                   // 只撤仓位，不卖币
       'sell-all': { type: 'boolean', default: false },                      // --position 模式下也把钱包里原有的币一起卖光
       collect: { type: 'boolean', default: false },                         // 只领手续费，本金不动（需要 --position）
+      sell: { type: 'boolean', default: false },                            // --collect 时把领到的代币卖成 USDG
       yes: { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       from: { type: 'string' },
       json: { type: 'boolean', default: false },                            // 给网页界面用：计划确定后打印一行 "@@plan {json}"
     },
   })
-  if (!opt.token && !opt.position) die('用法: npm run exit -- --token <代币地址> [--position <仓位id,仓位id>] [--via okx|uniswap|best] [--keep-tokens] [--sell-all] [--collect] [--yes] [--dry-run]')
+  if (!opt.token && !opt.position) die('用法: npm run exit -- --token <代币地址> [--position <仓位id,仓位id>] [--via okx|uniswap|best] [--keep-tokens] [--sell-all] [--collect [--sell]] [--yes] [--dry-run]')
   if (!['okx', 'uniswap', 'best'].includes(opt.via)) die('--via 只能是 okx / uniswap / best')
   const positions = opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined
   if (opt.collect) {
     if (!positions) die('--collect 需要 --position 指定仓位')
-    await collectFees({ positions, yes: opt.yes, dryRun: opt['dry-run'], json: opt.json, clients: makeClients(opt.from, !opt['dry-run']) })
+    await collectFees({ positions, sell: opt.sell, via: opt.via, slippage: Number(opt.slippage), yes: opt.yes, dryRun: opt['dry-run'], json: opt.json, clients: makeClients(opt.from, !opt['dry-run']) })
     await sleep(100); process.exit(0)
   }
   await withdraw({

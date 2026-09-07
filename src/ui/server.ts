@@ -312,6 +312,7 @@ async function state() {
 // ---- 表单 -> 命令行参数。数值原样透传，合法性由命令本身检查（出错会打印"错误: …"并退出）；一律 --key=value，负数才不会被当成另一个选项 ----
 const str = (x: unknown) => String(x ?? '').trim()
 const ids = (x: unknown) => str(x).split(',').map((s) => s.trim()).filter((s) => /^\d+$/.test(s))
+const via = (x: unknown) => (['okx', 'uniswap', 'best'].includes(str(x)) ? str(x) : 'best')
 function launchArgs(b: any) {
   const token = str(b.token)
   if (!isAddress(token)) throw new Error('代币地址不合法')
@@ -328,7 +329,7 @@ function exitArgs(b: any) {
   if (ids(b.positions).length) args.push(`--position=${ids(b.positions).join(',')}`)
   else if (isAddress(str(b.token))) args.push(`--token=${str(b.token)}`)
   else throw new Error('要么给仓位 id，要么给代币地址')
-  args.push(`--via=${['okx', 'uniswap', 'best'].includes(str(b.via)) ? str(b.via) : 'best'}`)
+  args.push(`--via=${via(b.via)}`)
   if (b.keepTokens) args.push('--keep-tokens')
   else if (b.sellAll) args.push('--sell-all')
   args.push(b.dryRun ? '--dry-run' : '--yes')
@@ -387,11 +388,12 @@ const server = createServer(async (req, res) => {
       const job = startJob('exit', `${b.dryRun ? '撤退演练' : '撤退'} ${ids(b.positions).length ? '#' + ids(b.positions).join(',#') : str(b.symbol) || str(b.token).slice(0, 10) + '…'}`, 'src/exit.ts', exitArgs(b), { dryRun: !!b.dryRun, token: isAddress(str(b.token)) ? str(b.token) : undefined, positions: ids(b.positions) })
       return json(res, 200, { job: summary(job) })
     }
-    if (req.method === 'POST' && url.pathname === '/api/collect') { // 只领手续费：exit.ts --collect
+    if (req.method === 'POST' && url.pathname === '/api/collect') { // 只领手续费：exit.ts --collect（sell = 领到的币顺便卖成 USDG）
       needKey(); const b = await readBody(req)
       if (!ids(b.positions).length) throw new Error('要给仓位 id')
       const args = [`--position=${ids(b.positions).join(',')}`, '--collect', b.dryRun ? '--dry-run' : '--yes']
-      const job = startJob('exit', `${b.dryRun ? '领手续费演练' : '领手续费'} #${ids(b.positions).join(',#')}`, 'src/exit.ts', args, { dryRun: !!b.dryRun, positions: ids(b.positions) })
+      if (b.sell) args.push('--sell', `--via=${via(b.via)}`)
+      const job = startJob('exit', `${b.dryRun ? '领手续费演练' : '领手续费'}${b.sell ? '+卖币' : ''} #${ids(b.positions).join(',#')}`, 'src/exit.ts', args, { dryRun: !!b.dryRun, positions: ids(b.positions) })
       return json(res, 200, { job: summary(job) })
     }
     if (req.method === 'POST' && url.pathname === '/api/watch') {
