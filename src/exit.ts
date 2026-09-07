@@ -109,9 +109,9 @@ export async function collectFees(o: CollectOptions) {
   log(`gas 合计: ${kit.stats.txCount} 笔，${trim(kit.stats.gasTotal, 18)} ETH ($${usd(kit.stats.gasTotal)})`)
 }
 
-// positions 给了就只撤这些仓位、只卖撤出来的币（同一代币可能还有别的进程在管的仓位）；否则撤该代币全部仓位、卖光钱包里的币
+// positions 给了就只撤这些仓位、只卖撤出来的币（同一代币可能还有别的进程在管的仓位；sellAll 则连钱包里原有的一起卖光）；否则撤该代币全部仓位、卖光钱包里的币
 export type WithdrawOptions = {
-  token?: Address; positions?: bigint[]; via: string; slippage: number; lpSlippage: number; keepTokens: boolean; yes: boolean; dryRun: boolean; clients: Clients
+  token?: Address; positions?: bigint[]; via: string; slippage: number; lpSlippage: number; keepTokens: boolean; sellAll?: boolean; yes: boolean; dryRun: boolean; clients: Clients
   json?: boolean // 计划确定后额外打印一行 "@@plan {json}" 给网页界面用
 }
 export async function withdraw(o: WithdrawOptions) {
@@ -128,7 +128,7 @@ export async function withdraw(o: WithdrawOptions) {
   const symOf = (t: Address) => (same(t, USDG) ? 'USDG' : symbol)
   log(`钱包 ${wallet} | ${fmtU(usdgStart)} USDG, ${fmtT(tokenStart)} ${symbol} | ETH $${ethPrice.toFixed(2)}`)
   if (positions.length === 0) die(o.positions ? `仓位 ${o.positions.join(',')} 不在钱包名下或已没有流动性` : `钱包名下没有 ${symbol}/USDG 的有效仓位`)
-  const sellHeld = o.positions ? 0n : tokenStart // 钱包里原有的币要不要一起卖
+  const sellHeld = o.positions && !o.sellAll ? 0n : tokenStart // 钱包里原有的币要不要一起卖
 
   // ---- 计划 ----
   let expectUsdg = 0n, expectToken = 0n
@@ -226,6 +226,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       slippage: { type: 'string', default: env('SWAP_SLIPPAGE', '5') },     // 卖币滑点 %
       'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },  // 撤仓最少拿回量的余量 %
       'keep-tokens': { type: 'boolean', default: false },                   // 只撤仓位，不卖币
+      'sell-all': { type: 'boolean', default: false },                      // --position 模式下也把钱包里原有的币一起卖光
       collect: { type: 'boolean', default: false },                         // 只领手续费，本金不动（需要 --position）
       yes: { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
@@ -233,7 +234,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       json: { type: 'boolean', default: false },                            // 给网页界面用：计划确定后打印一行 "@@plan {json}"
     },
   })
-  if (!opt.token && !opt.position) die('用法: npm run exit -- --token <代币地址> [--position <仓位id,仓位id>] [--via okx|uniswap|best] [--keep-tokens] [--collect] [--yes] [--dry-run]')
+  if (!opt.token && !opt.position) die('用法: npm run exit -- --token <代币地址> [--position <仓位id,仓位id>] [--via okx|uniswap|best] [--keep-tokens] [--sell-all] [--collect] [--yes] [--dry-run]')
   if (!['okx', 'uniswap', 'best'].includes(opt.via)) die('--via 只能是 okx / uniswap / best')
   const positions = opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined
   if (opt.collect) {
@@ -243,7 +244,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   }
   await withdraw({
     token: opt.token ? getAddress(opt.token) : undefined, positions, via: opt.via,
-    slippage: Number(opt.slippage), lpSlippage: Number(opt['lp-slippage']), keepTokens: opt['keep-tokens'], yes: opt.yes, dryRun: opt['dry-run'], json: opt.json,
+    slippage: Number(opt.slippage), lpSlippage: Number(opt['lp-slippage']), keepTokens: opt['keep-tokens'], sellAll: opt['sell-all'], yes: opt.yes, dryRun: opt['dry-run'], json: opt.json,
     clients: makeClients(opt.from, !opt['dry-run']),
   })
   await sleep(100); process.exit(0)

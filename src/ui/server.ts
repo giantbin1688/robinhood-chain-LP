@@ -330,6 +330,7 @@ function exitArgs(b: any) {
   else throw new Error('要么给仓位 id，要么给代币地址')
   args.push(`--via=${['okx', 'uniswap', 'best'].includes(str(b.via)) ? str(b.via) : 'best'}`)
   if (b.keepTokens) args.push('--keep-tokens')
+  else if (b.sellAll) args.push('--sell-all')
   args.push(b.dryRun ? '--dry-run' : '--yes')
   return args
 }

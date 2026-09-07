@@ -79,7 +79,9 @@
   #pos-table .num { text-align:right; font-variant-numeric:tabular-nums }
   #pos-table .big { font-size:14px; font-weight:600; letter-spacing:-.01em }
   #pos-table .sub { display:block; font-size:11px; color:var(--muted); margin-top:2px }
-  #pos-table .btns { display:flex; flex-wrap:wrap; gap:4px; width:104px } /* 2×2：领取 撤退 / 监控 撤全部 */
+  #pos-table .btns { display:flex; flex-wrap:wrap; gap:4px; width:104px } /* 两行：领取 撤退 / 监控（监控中：日志 停止） */
+  dialog { border:1px solid var(--line); border-radius:14px; padding:18px 20px; max-width:440px; box-shadow:var(--shadow); font:inherit; color:var(--text) }
+  dialog::backdrop { background:rgba(25,25,24,.35) }
   #pos-table .btns .btn { min-height:25px; padding:3px 8px }
   .small { font-size:11px; color:var(--muted) }
   .mono { font-family:var(--mono) }
@@ -222,6 +224,13 @@
   <div class="card" id="cal-day" style="margin-top:12px;display:none"></div>
 </section>
 
+<!-- 撤退确认框：原生 dialog，多一个"顺便卖光钱包里全部该币"的勾选（等于 exit --position --sell-all） -->
+<dialog id="dlg-exit"><form method="dialog">
+  <div id="dlg-exit-msg" style="font-size:13px;line-height:1.6"></div>
+  <label id="dlg-exit-all" style="display:flex;gap:7px;align-items:flex-start;margin:12px 0 0;font-size:12px;color:var(--muted)"><input type="checkbox" id="dlg-exit-sellall" style="margin-top:3px"><span>顺便把钱包里全部 <b id="dlg-exit-sym"></b> 卖光（含不在仓位里的余额，比如以前撤退留下的）</span></label>
+  <div class="actions" style="justify-content:flex-end"><button class="btn" value="cancel">取消</button><button class="btn danger" value="ok">确认发送交易</button></div>
+</form></dialog>
+
 <!-- ===================== 任务 ===================== -->
 <section class="page" id="page-tasks">
   <div class="card">
@@ -334,6 +343,14 @@ function onStatus(m, was) {
   $('#jobCount').style.display = n ? '' : 'none'; $('#jobCount').textContent = n
   // 任务结束 / 进入监控阶段：仓位和余额可能变了
   if ((was && was.running && !m.running) || (m.phase === 'watch' && (!was || was.phase !== 'watch'))) { loadState(false); if ($('#page-positions').classList.contains('on')) loadPositions(m.kind !== 'watch' && !m.dryRun); if ($('#page-calendar').classList.contains('on') && !m.dryRun) loadCalendar() }
+}
+// 撤退确认：返回 { sellAll } 或 null（取消）
+function askExit(id, sym, keepTokens) {
+  const dlg = $('#dlg-exit')
+  $('#dlg-exit-msg').innerHTML = `撤退仓位 <b>#${id}</b>（${esc(sym)}/USDG）：撤仓 + 领手续费${keepTokens ? '，不卖币' : ' + 把撤出来的 ' + esc(sym) + ' 卖成 USDG'}。<br>在主网发送交易，不可撤销。`
+  $('#dlg-exit-sym').textContent = sym; $('#dlg-exit-sellall').checked = false; $('#dlg-exit-all').style.display = keepTokens ? 'none' : ''
+  dlg.returnValue = ''
+  return new Promise((resolve) => { dlg.onclose = () => resolve(dlg.returnValue === 'ok' ? { sellAll: $('#dlg-exit-sellall').checked } : null); dlg.showModal() })
 }
 async function stopJob(id) {
   const m = job(id).meta
@@ -557,8 +574,8 @@ async function loadPositions(full) {
         : `<span class="exp big" data-act="hist" data-id="${p.id}" style="color:${pnlCol(pnl)}" title="现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入（不含进场换币成本）。点击看明细">${histOpen.has(p.id) ? '▾' : '▸'} ${money(pnl)}</span><span class="sub" style="color:${pnlCol(pnl)}">${invested > 0 ? signed((pnl / invested) * 100) : ''}</span>`}</td>
       <td class="num">${dpr === null ? '<span class="small">—</span>' : `<span class="big" style="color:${pnlCol(dpr)}" title="每天 ${signed(dpr, 2)} = uPNL ÷ 投入 ÷ 持仓天数">${signed(dpr, 2)}</span>`}</td>
       <td><span class="btns">
-        <button class="btn sm" data-act="collect" data-id="${p.id}" data-fees="$${p.feesUsd}" ${unclaimed < 0.01 ? 'disabled' : ''} title="领取未领手续费 ≈${fmtUsd(unclaimed)}，本金不动">领取</button><button class="btn sm danger" data-act="exit" data-id="${p.id}" title="撤掉这一个仓位，卖掉撤出来的币">撤退</button>
-        ${p.watchJob !== null ? `<button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button><button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}" title="停止监控 #${p.watchJob}">停止</button>` : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${sym}" title="盯着池价，跳出区间自动撤退">监控</button>`}<button class="btn sm" data-act="exit-token" data-token="${p.token}" data-sym="${sym}" title="撤掉 ${sym} 的全部仓位并卖光钱包里的 ${sym}">撤全部</button></span></td>`
+        <button class="btn sm" data-act="collect" data-id="${p.id}" data-fees="$${p.feesUsd}" ${unclaimed < 0.01 ? 'disabled' : ''} title="领取未领手续费 ≈${fmtUsd(unclaimed)}，本金不动">领取</button><button class="btn sm danger" data-act="exit" data-id="${p.id}" data-sym="${sym}" title="撤掉这一个仓位，卖掉撤出来的币">撤退</button>
+        ${p.watchJob !== null ? `<button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button><button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}" title="停止监控 #${p.watchJob}">停止</button>` : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${sym}" title="盯着池价，跳出区间自动撤退">监控</button>`}</span></td>`
     tb.appendChild(tr)
     if (open) {
       const dr = document.createElement('tr'); dr.className = 'depthrow'
@@ -646,8 +663,7 @@ $('#pos-table').onclick = async (e) => {
     if (d.act === 'watch') r = await api('/api/watch', { token: d.token, positions: d.id, symbol: d.sym })
     else if (d.act === 'collect') { if (!confirm(`领取仓位 #${d.id} 的未领手续费（≈${d.fees}），本金不动，1 笔交易。\n\n确认在主网发送交易？`)) return; $('#card-exit').innerHTML = ''; r = await api('/api/collect', { positions: d.id, dryRun: false }) }
     else if (d.act === 'dry') { $('#card-exit').innerHTML = ''; r = await api('/api/exit', { positions: d.id, via, keepTokens, dryRun: true }) }
-    else if (d.act === 'exit') { if (!confirm(`撤退仓位 #${d.id}：撤仓 + 领手续费${keepTokens ? '' : ' + 把撤出来的币卖成 USDG'}。\n\n确认在主网发送交易？`)) return; $('#card-exit').innerHTML = ''; r = await api('/api/exit', { positions: d.id, via, keepTokens, dryRun: false }) }
-    else if (d.act === 'exit-token') { if (!confirm(`撤掉 ${d.sym} 的全部仓位${keepTokens ? '' : '，并把钱包里全部 ' + d.sym + ' 卖成 USDG'}。\n\n确认在主网发送交易？`)) return; $('#card-exit').innerHTML = ''; r = await api('/api/exit', { token: d.token, symbol: d.sym, via, keepTokens, dryRun: false }) }
+    else if (d.act === 'exit') { const a = await askExit(d.id, d.sym, keepTokens); if (!a) return; $('#card-exit').innerHTML = ''; r = await api('/api/exit', { positions: d.id, via, keepTokens, sellAll: a.sellAll, dryRun: false }) }
     if (r) { job(r.job.id).meta = r.job; panes.pos.show(r.job.id); setTimeout(() => loadPositions(false), 800) }
   } catch (err) { toast(err.message) }
 }
