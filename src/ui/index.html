@@ -70,10 +70,16 @@
   .placeholder { margin:0 0 14px; padding:42px 24px; border:1px dashed #d4d1c9; border-radius:14px; color:var(--muted); text-align:center; background:rgba(255,255,255,.3) }
   .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:14px; padding:12px 14px; border:1px solid var(--line); border-radius:13px; background:rgba(255,255,255,.5); flex-wrap:wrap }
   .toolbar select { width:auto; min-height:30px; padding:4px 28px 4px 8px }
-  .rangebar { position:relative; height:7px; background:#e5e3dc; border-radius:99px; margin:8px 0 3px; width:220px; overflow:visible }
+  .rangebar { position:relative; display:inline-block; vertical-align:middle; height:7px; background:#e5e3dc; border-radius:99px; margin:0 8px 2px 0; width:150px; overflow:visible }
   .rangebar .in { position:absolute; top:0; bottom:0; background:#dca58f; border-radius:99px }
   .rangebar .now { position:absolute; top:-3px; width:2px; height:13px; background:var(--red); border-radius:2px }
   .rangebar .now.ok { background:var(--green) }
+  /* 仓位表：每格不换行、垂直居中，数字列右对齐等宽数字，主数字大一号、次要信息小字第二行 */
+  #pos-table tr.pos > td, #pos-table th { white-space:nowrap; vertical-align:middle }
+  #pos-table .num { text-align:right; font-variant-numeric:tabular-nums }
+  #pos-table .big { font-size:14px; font-weight:600; letter-spacing:-.01em }
+  #pos-table .sub { display:block; font-size:11px; color:var(--muted); margin-top:2px }
+  #pos-table .btns { display:flex; gap:6px }
   .small { font-size:11px; color:var(--muted) }
   .mono { font-family:var(--mono) }
   .toast { position:fixed; right:22px; bottom:22px; background:#252522; color:#fff; padding:10px 14px; border:1px solid rgba(255,255,255,.1); border-radius:10px; font-size:12px; opacity:0; transform:translateY(8px); transition:.2s ease; pointer-events:none; max-width:420px; box-shadow:0 12px 36px rgba(0,0,0,.18) }
@@ -191,7 +197,7 @@
   <div class="card">
     <div id="pos-summary" class="small" style="margin-bottom:6px">加载中…</div>
     <table id="pos-table">
-      <thead><tr><th>id</th><th>交易对</th><th>费率</th><th>状态</th><th>区间（USDG/代币）</th><th>持仓</th><th>价值</th><th>未领手续费</th><th>uPNL</th><th>持仓时间</th><th>监控</th><th style="width:190px">撤退</th></tr></thead>
+      <thead><tr><th>仓位</th><th>区间（USDG/代币）</th><th>持仓时间</th><th class="num">投入</th><th class="num">价值</th><th class="num">手续费</th><th class="num">uPNL</th><th class="num" title="日收益率 = uPNL ÷ 投入 ÷ 持仓天数">DPR</th><th>监控</th><th>操作</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -487,15 +493,15 @@ function fmtHold(ms) {
   return d > 0 ? `${d}天${h % 24}小时` : h > 0 ? `${h}小时${m % 60}分` : `${Math.max(m, 0)}分钟`
 }
 // uPNL = 现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入（每笔按当时的池价折算，不含进场换币成本）；绿正红负；点数字展开资金明细
-const money = (v) => `${v >= 0 ? '+' : '−'}$${Math.abs(v).toFixed(2)}`
+// 数字显示：美元统一 2 位小数带千分位；币数量大数不留小数、小数 3 位有效数字（41319.959661 这种一长串没人看）；价格 4 位有效数字
+const fmtUsd = (v) => `$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+const money = (v) => `${v >= 0 ? '+' : '−'}${fmtUsd(v)}`
+const fmtAmt = (s) => { const v = Number(s), a = Math.abs(v); return !a ? '0' : a >= 1000 ? v.toLocaleString('en-US', { maximumFractionDigits: 0 }) : a >= 1 ? v.toLocaleString('en-US', { maximumFractionDigits: 2 }) : v.toLocaleString('en-US', { maximumSignificantDigits: 3 }) }
+const fmtPrice = (s) => Number(s).toLocaleString('en-US', { maximumSignificantDigits: 4 })
+const signed = (v, d = 1) => { const s = Math.abs(v).toFixed(d); return `${Number(s) === 0 ? '' : v > 0 ? '+' : '−'}${s}%` }
 const pnlCol = (v) => (v > 0.004 ? '#1a7f37' : v < -0.004 ? '#c62828' : 'var(--muted)')
 const tile = (k, v, d, col = '') => `<div class="card"><h4>${k}</h4><div class="stat" style="color:${col}">${v}</div><div class="small">${d}</div></div>`
-function pnlCell(p) {
-  if (p.pnlUsd === null) return '<span class="small" title="资金流水需要 Alchemy 节点（RPC_URL），或该仓位是别处转进来的">—</span>'
-  const v = Number(p.pnlUsd), pctv = Number(p.entryUsd) > 0 ? (v / Number(p.entryUsd)) * 100 : 0, col = pnlCol(v)
-  const taken = Number(p.collectedUsd) + Number(p.withdrawnUsd)
-  return `<span class="exp" data-act="hist" data-id="${p.id}" style="color:${col};font-weight:600" title="现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入（不含进场换币成本）。点击看明细">${money(v)} ${histOpen.has(p.id) ? '▾' : '▸'}</span><br><span class="small" style="color:${col}">${v >= 0 ? '+' : '−'}${Math.abs(pctv).toFixed(1)}%</span><br><span class="small">存入 $${p.entryUsd}${taken > 0.005 ? `<br>已领 $${taken.toFixed(2)}` : ''}</span>`
-}
+const NO_LEDGER = '资金流水需要 Alchemy 节点（RPC_URL），或该仓位是别处转进来的'
 let POS = [], posTimer = null
 const expanded = new Set() // 展开了深度图的仓位 id
 const histOpen = new Set() // 展开了资金明细的仓位 id
@@ -506,15 +512,15 @@ function renderStats() {
   const tot = (k, list = POS) => list.reduce((s, p) => s + Number(p[k]), 0)
   const led = POS.filter((p) => p.pnlUsd !== null)
   const value = tot('value'), unclaimed = tot('feesUsd'), deposits = tot('entryUsd', led), collected = tot('collectedUsd', led), withdrawn = tot('withdrawnUsd', led)
-  const invested = deposits - withdrawn, pnl = tot('value', led) + tot('feesUsd', led) + collected - invested, usd = (v) => `$${v.toFixed(2)}`
+  const invested = deposits - withdrawn, pnl = tot('value', led) + tot('feesUsd', led) + collected - invested, usd = fmtUsd
   const dollarDays = led.reduce((s, p) => s + (Math.max(Number(p.entryUsd) - Number(p.withdrawnUsd), 0) * Math.max(Date.now() - (p.mintedAt || Date.now()), 0)) / 864e5, 0)
-  const pct = (v) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}%`
+  const pct = (v) => signed(v, 2)
   const noLedger = '需要 Alchemy 节点（RPC_URL）才能读资金流水'
   $('#pos-stats').innerHTML = POS.length ? [
     tile('投入价值', led.length ? usd(invested) : '—', !led.length ? noLedger : withdrawn > 0.005 ? `存入 ${usd(deposits)} − 已撤本金 ${usd(withdrawn)}` : '每笔存入按当时的池价折算'),
     tile('现金价值', usd(value + unclaimed), `本金 ${usd(value)} + 未领手续费 ${usd(unclaimed)}`),
     tile('手续费收益', usd(collected + unclaimed), led.length ? `已领 ${usd(collected)} + 未领 ${usd(unclaimed)}` : `只有未领 ${usd(unclaimed)}，已领的要资金流水`),
-    tile('总盈亏', led.length ? money(pnl) : '—', !led.length ? noLedger : `${invested > 0 ? `${pnl >= 0 ? '+' : '−'}${Math.abs((pnl / invested) * 100).toFixed(1)}% · ` : ''}现金价值 + 已领手续费 − 投入价值`, led.length ? pnlCol(pnl) : ''),
+    tile('总盈亏', led.length ? money(pnl) : '—', !led.length ? noLedger : `${invested > 0 ? `${signed((pnl / invested) * 100)} · ` : ''}现金价值 + 已领手续费 − 投入价值`, led.length ? pnlCol(pnl) : ''),
     tile('DPR 日收益率', dollarDays > 0 ? pct((pnl / dollarDays) * 100) : '—', !led.length ? noLedger : dollarDays > 0 ? `加权持仓 ${fmtHold((dollarDays / invested) * 864e5)} · 其中手续费 ${pct(((collected + tot('feesUsd', led)) / dollarDays) * 100)}/天` : '仓位刚建立', dollarDays > 0 ? pnlCol(pnl) : ''),
   ].join('') : ''
 }
@@ -531,39 +537,43 @@ async function loadPositions(full) {
     const span = (hi - lo) * 1.6, left = lo - (hi - lo) * 0.3
     const pos = (x) => Math.max(0, Math.min(100, ((x - left) / span) * 100))
     const w = p.watchJob !== null ? job(p.watchJob).meta : null
-    const open = expanded.has(p.id)
-    const tr = document.createElement('tr')
+    const open = expanded.has(p.id), sym = esc(p.symbol)
+    // 投入 = 存入 − 已撤本金；手续费 = 已领 + 未领；DPR = uPNL ÷ 投入 ÷ 持仓天数
+    const led = p.pnlUsd !== null, entry = led ? Number(p.entryUsd) : 0, withdrawn = led ? Number(p.withdrawnUsd) : 0, invested = entry - withdrawn
+    const unclaimed = Number(p.feesUsd), collected = led ? Number(p.collectedUsd) : 0, pnl = led ? Number(p.pnlUsd) : null
+    const days = p.mintedAt ? (Date.now() - p.mintedAt) / 864e5 : 0, dpr = pnl !== null && invested > 0 && days > 1 / 1440 ? (pnl / invested / days) * 100 : null
+    const tr = document.createElement('tr'); tr.className = 'pos'
     tr.innerHTML = `
-      <td class="mono"><span class="exp" data-act="toggle" data-id="${p.id}" title="展开/收起池子流动性分布">${open ? '▾' : '▸'} #${p.id}</span>${p.kind === 'bridge' ? '<br><span class="small">过渡仓位</span>' : ''}</td>
-      <td>${esc(p.symbol)}/USDG</td><td>${p.fee}%</td>
-      <td><span class="badge ${p.inRange ? 'ok' : 'warn'}">${p.inRange ? '区间内' : Number(p.price) > Number(p.hi) ? '涨破上沿' : '跌破下沿'}</span></td>
-      <td>${p.lo} – ${p.hi}<br><span class="small">现价 ${p.price}</span>
-        <div class="rangebar" title="竖线 = 现价"><div class="in" style="left:${pos(lo)}%;width:${pos(hi) - pos(lo)}%"></div><div class="now ${p.inRange ? 'ok' : ''}" style="left:${pos(cur)}%"></div></div></td>
-      <td>${p.usdg} USDG<br>${p.tokenAmount} ${esc(p.symbol)}</td>
-      <td>$${p.value}</td>
-      <td>$${p.feesUsd}<br><span class="small">${p.feesUsdg} USDG<br>${p.feesToken} ${esc(p.symbol)}</span><br><button class="btn sm" data-act="collect" data-id="${p.id}" data-fees="$${p.feesUsd}" ${Number(p.feesUsd) < 0.01 ? 'disabled' : ''} title="只领手续费，本金不动">领取</button></td>
-      <td>${pnlCell(p)}</td>
+      <td><b>${sym}/USDG</b> <span class="badge wait">${p.fee}%</span>${p.kind === 'bridge' ? ' <span class="badge amber">过渡</span>' : ''}
+        <span class="sub mono"><span class="exp" data-act="toggle" data-id="${p.id}" title="展开/收起池子流动性分布">${open ? '▾' : '▸'} #${p.id}</span></span></td>
+      <td>${fmtPrice(p.lo)} – ${fmtPrice(p.hi)} <span class="badge ${p.inRange ? 'ok' : 'warn'}">${p.inRange ? '区间内' : Number(p.price) > Number(p.hi) ? '涨破上沿' : '跌破下沿'}</span>
+        <span class="sub"><span class="rangebar" title="竖线 = 现价"><span class="in" style="left:${pos(lo)}%;width:${pos(hi) - pos(lo)}%"></span><span class="now ${p.inRange ? 'ok' : ''}" style="left:${pos(cur)}%"></span></span>现价 ${fmtPrice(p.price)}</span></td>
       <td title="${p.mintedAt ? new Date(p.mintedAt).toLocaleString() : ''}">${p.mintedAt ? fmtHold(Date.now() - p.mintedAt) : '—'}</td>
+      <td class="num">${led ? `<span class="big">${fmtUsd(invested)}</span>${withdrawn > 0.005 ? `<span class="sub">存入 ${fmtUsd(entry)}，已撤 ${fmtUsd(withdrawn)}</span>` : ''}` : `<span class="small" title="${NO_LEDGER}">—</span>`}</td>
+      <td class="num"><span class="big">${fmtUsd(Number(p.value))}</span><span class="sub">${fmtAmt(p.usdg)} USDG · ${fmtAmt(p.tokenAmount)} ${sym}</span></td>
+      <td class="num"><span class="big" style="color:${pnlCol(unclaimed + collected)}">${fmtUsd(unclaimed + collected)}</span><span class="sub">未领 ${fmtUsd(unclaimed)}${collected > 0.005 ? ` · 已领 ${fmtUsd(collected)}` : ''}</span></td>
+      <td class="num">${pnl === null ? `<span class="small" title="${NO_LEDGER}">—</span>`
+        : `<span class="exp big" data-act="hist" data-id="${p.id}" style="color:${pnlCol(pnl)}" title="现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入（不含进场换币成本）。点击看明细">${histOpen.has(p.id) ? '▾' : '▸'} ${money(pnl)}</span><span class="sub" style="color:${pnlCol(pnl)}">${invested > 0 ? signed((pnl / invested) * 100) : ''}</span>`}</td>
+      <td class="num">${dpr === null ? '<span class="small">—</span>' : `<span class="big" style="color:${pnlCol(dpr)}">${signed(dpr, 2)}</span><span class="sub">每天</span>`}</td>
       <td>${p.watchJob !== null
-        ? `<span class="badge run" title="${esc(w?.label ?? '')}">监控中 #${p.watchJob}</span><br><button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button> <button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}">停止</button>`
-        : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${esc(p.symbol)}">开始监控</button>`}</td>
-      <td><button class="btn sm danger" data-act="exit" data-id="${p.id}">撤退</button>
-          <button class="btn sm" data-act="exit-token" data-token="${p.token}" data-sym="${esc(p.symbol)}" title="撤掉该代币全部仓位并卖光钱包里的币">撤全部 ${esc(p.symbol)}</button></td>`
+        ? `<span class="badge run" title="${esc(w?.label ?? '')}">监控中 #${p.watchJob}</span><span class="sub btns"><button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button><button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}">停止</button></span>`
+        : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${sym}">开始监控</button>`}</td>
+      <td><span class="btns"><button class="btn sm" data-act="collect" data-id="${p.id}" data-fees="$${p.feesUsd}" ${unclaimed < 0.01 ? 'disabled' : ''} title="只领手续费，本金不动">领取</button><button class="btn sm danger" data-act="exit" data-id="${p.id}">撤退</button><button class="btn sm" data-act="exit-token" data-token="${p.token}" data-sym="${sym}" title="撤掉该代币全部仓位并卖光钱包里的币">撤全部 ${sym}</button></span></td>`
     tb.appendChild(tr)
     if (open) {
       const dr = document.createElement('tr'); dr.className = 'depthrow'
-      dr.innerHTML = `<td colspan="12"><div class="depth" id="depth-${p.id}">加载池子流动性分布…</div></td>`
+      dr.innerHTML = `<td colspan="10"><div class="depth" id="depth-${p.id}">加载池子流动性分布…</div></td>`
       tb.appendChild(dr)
       loadDepth(p)
     }
     if (histOpen.has(p.id)) {
       const hr = document.createElement('tr'); hr.className = 'depthrow'
-      hr.innerHTML = `<td colspan="12"><div id="hist-${p.id}" class="small">加载资金明细…</div></td>`
+      hr.innerHTML = `<td colspan="10"><div id="hist-${p.id}" class="small">加载资金明细…</div></td>`
       tb.appendChild(hr)
       loadHistory(p)
     }
   }
-  if (!POS.length) tb.innerHTML = '<tr><td colspan="12" class="placeholder">钱包名下没有 USDG 池的仓位</td></tr>'
+  if (!POS.length) tb.innerHTML = '<tr><td colspan="10" class="placeholder">钱包名下没有 USDG 池的仓位</td></tr>'
 }
 // 资金明细：每笔交易（加流动性 / 领手续费 / 撤流动性）的两种币数量和按当时池价折算的价值，最新在前
 async function loadHistory(p) {
@@ -585,7 +595,7 @@ function renderHistory(el, d, p) {
       <td class="mono"><a class="tx" href="${STATE.explorer}/tx/${e.tx}" target="_blank">${e.tx.slice(0, 8)}…${e.tx.slice(-4)}</a></td></tr>`
   }).join('')
   el.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--text)">
-      存入 <b>$${d.deposits}</b> · 已领手续费 <b>$${d.fees}</b> · 已撤本金 <b>$${d.withdrawn}</b> · 未领手续费 <b>$${d.unclaimed}</b> · 现值 <b>$${d.value}</b>
+      存入 <b>${fmtUsd(Number(d.deposits))}</b> · 已领手续费 <b>${fmtUsd(Number(d.fees))}</b> · 已撤本金 <b>${fmtUsd(Number(d.withdrawn))}</b> · 未领手续费 <b>${fmtUsd(Number(d.unclaimed))}</b> · 现值 <b>${fmtUsd(Number(d.value))}</b>
       &nbsp;→&nbsp; 盈亏 <b style="color:${col}">${money(pnl)}</b>
       <span class="small">（现值 + 未领 + 已领 + 已撤 − 存入，都按各自当时的池价折算；不含进场换币的手续费/滑点）</span></div>
     <table style="background:rgba(255,255,255,.6);border-radius:8px"><thead><tr><th>时间</th><th>操作</th><th>数量（当时价值）</th><th>合计</th><th>当时池价</th><th>交易</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="small">没有找到这个仓位的交易</td></tr>'}</tbody></table>`
@@ -686,8 +696,8 @@ function renderCalendar() {
   if (sel) box.innerHTML = `<h4 style="margin:0 0 10px;font-size:11px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase">${mo + 1} 月 ${calSel} 日平仓 ${sel.length} 个，合计 <b style="color:${pnlCol(sel.reduce((s, c) => s + c.pnl, 0))}">${money(sel.reduce((s, c) => s + c.pnl, 0))}</b></h4>
     <table><thead><tr><th>平仓时间</th><th>仓位</th><th>交易对</th><th>存入</th><th>拿回本金</th><th>手续费</th><th>盈亏</th><th>持仓时间</th><th>交易</th></tr></thead><tbody>${[...sel].sort((a, b) => b.closedAt - a.closedAt).map((c) => `<tr>
       <td>${new Date(c.closedAt).toLocaleTimeString()}</td><td class="mono">#${c.id}</td><td>${esc(c.symbol)}/USDG ${c.fee}%</td>
-      <td>$${c.deposits.toFixed(2)}</td><td>$${c.withdrawn.toFixed(2)}</td><td>$${c.fees.toFixed(2)}</td>
-      <td style="color:${pnlCol(c.pnl)};font-weight:600">${money(c.pnl)}<br><span class="small" style="color:${pnlCol(c.pnl)}">${c.deposits > 0 ? `${c.pnl >= 0 ? '+' : '−'}${Math.abs((c.pnl / c.deposits) * 100).toFixed(1)}%` : ''}</span></td>
+      <td>${fmtUsd(c.deposits)}</td><td>${fmtUsd(c.withdrawn)}</td><td>${fmtUsd(c.fees)}</td>
+      <td style="color:${pnlCol(c.pnl)};font-weight:600">${money(c.pnl)}<br><span class="small" style="color:${pnlCol(c.pnl)}">${c.deposits > 0 ? signed((c.pnl / c.deposits) * 100) : ''}</span></td>
       <td>${c.openedAt ? fmtHold(c.closedAt - c.openedAt) : '—'}</td>
       <td class="mono"><a class="tx" href="${STATE.explorer}/tx/${c.closedTx}" target="_blank">${c.closedTx.slice(0, 8)}…${c.closedTx.slice(-4)}</a></td></tr>`).join('')}</tbody></table>`
 }
