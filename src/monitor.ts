@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { getAddress, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
-import { die, env, log, makeClients, p6, pct, sleep, tokenMeta, type Clients } from './common.ts'
+import { die, env, failFast, log, makeClients, p6, pct, sleep, tokenMeta, type Clients } from './common.ts'
 import { findPositions, same, withdraw, type Position } from './exit.ts'
 
 // positions 给了就只盯这些仓位、触发时也只撤这些（同一代币可以开多个进程各管各的）；否则盯钱包里该代币的全部仓位
@@ -78,6 +78,7 @@ export async function watchToken(o: WatchOptions) {
 
 // ---- 命令行入口 ----
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  failFast()
   const { values: opt } = parseArgs({
     options: {
       chain: { type: 'string' }, protocol: { type: 'string' },              // 链 / 协议（common.ts 里解析）

@@ -19,6 +19,24 @@ import { listTokenPools } from '../pools.ts'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const PORT = Number(env('UI_PORT', '3000'))
 const hasKey = !!process.env.PRIVATE_KEY
+
+// ---- 脱敏：子进程的 stdout/stderr 原样推到网页并存进 job.lines，未捕获的错误会把完整堆栈打进去。
+// viem 的错误信息里带 RPC 地址（errors/request.js），它只清洗 basic-auth 的用户名密码、不动 path，
+// 而 Alchemy 的 key 就在 path 里（/v2/<key>）——一次 RPC 失败就会把 key 印在页面上。所有出口统一过一遍这里。
+// 只按 .env 里的原值精确替换：不能用「0x+64 位十六进制」这类通配规则，那会把交易哈希一起抹掉。
+// RPC 变量名从 chains.ts 推导（RPC_URL / BSC_RPC_URL / …），以后加链不用再回来补这份名单。
+const SECRET_ENVS: [string, string][] = [
+  ...Object.values(CHAINS).map((c) => [c.rpcEnv, '<RPC>'] as [string, string]),
+  ['PRIVATE_KEY', '<私钥>'], ['UNISWAP_API_KEY', '<key>'], ['OKX_API_KEY', '<key>'], ['OKX_SECRET_KEY', '<key>'], ['OKX_API_PASSPHRASE', '<key>'],
+  // 代理只在带账号密码时才算秘密，否则 127.0.0.1:7897 这种被抹掉反而看不懂日志
+  ...['HTTPS_PROXY', 'HTTP_PROXY'].filter((k) => (process.env[k] ?? '').includes('@')).map((k) => [k, '<代理>'] as [string, string]),
+]
+const SECRETS = SECRET_ENVS.map(([k, tag]) => [process.env[k] ?? '', tag] as const).filter(([v]) => v.length >= 8)
+export const redact = (s: string) => {
+  for (const [v, tag] of SECRETS) if (s.includes(v)) s = s.split(v).join(tag)
+  return s.replace(/(alchemy\.com\/v2\/)[A-Za-z0-9_-]{8,}/gi, '$1<key>') // 没配 RPC_URL 时的兜底
+}
+
 const wallet = hasKey ? privateKeyToAccount(process.env.PRIVATE_KEY as `0x${string}`).address : null
 
 // ---- 任务：每个子进程一个任务，可同时跑多个（多个仓位各自监控、同时进场/撤退）。
@@ -47,7 +65,8 @@ function startJob(sel: Sel, kind: Job['kind'], label: string, script: string, ar
   const proc = spawn(process.execPath, ['--env-file=.env', '--env-file=params.env', '--import', 'tsx', script, ...full], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   job.proc = proc
   log(`任务 #${job.id} ${job.label}: ${script} ${full.join(' ')}`)
-  const line = (text: string) => {
+  const line = (raw: string) => {
+    const text = redact(raw)
     if (text.startsWith('@@plan ')) { try { job.plan = JSON.parse(text.slice(7)); emit({ type: 'plan', job: job.id, plan: job.plan }) } catch {} ; return }
     if (text.startsWith('@@positions ')) { // 进场组完 LP：记下仓位；带 --watch 的接下来进入监控阶段
       try { job.positions = JSON.parse(text.slice(12)) } catch {}
@@ -64,7 +83,7 @@ function startJob(sel: Sel, kind: Job['kind'], label: string, script: string, ar
     const parts = job.partial.split(/\r?\n/)
     job.partial = parts.pop()!
     for (const p of parts) line(p)
-    if (job.partial) emit({ type: 'partial', job: job.id, text: job.partial })
+    if (job.partial) emit({ type: 'partial', job: job.id, text: redact(job.partial) }) // 累加器保持原样，只脱敏推出去的那份
   }
   proc.stdout!.on('data', feed)
   proc.stderr!.on('data', feed)
@@ -356,9 +375,24 @@ const json = (res: ServerResponse, code: number, body: unknown) => { res.writeHe
 const readBody = (req: IncomingMessage) => new Promise<any>((resolve, reject) => { let s = ''; req.on('data', (c) => (s += c)); req.on('end', () => { try { resolve(s ? JSON.parse(s) : {}) } catch (e) { reject(e) } }); req.on('error', reject) })
 const needKey = () => { if (!hasKey) throw new Error('.env 里没有 PRIVATE_KEY') }
 
+// ---- 跨站防护。服务只听 127.0.0.1，但浏览器里任何网页都能往这里发请求：
+// readBody 不看 Content-Type，而 text/plain 属于 CORS 安全列表、不触发预检，
+// 所以一个恶意页面能直接 POST /api/launch 拿你的 USDG 去买它指定的币（响应读不到，但交易照发）。
+// 三道：Origin 必须是本机（页面自己的请求带的就是它）；自定义头强制跨站预检；Host 必须是本机（防 DNS rebinding）。
+const LOCAL = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`])
+function guard(req: IncomingMessage) {
+  const host = (req.headers.host ?? '').replace(/:\d+$/, '')
+  if (host !== '127.0.0.1' && host !== 'localhost') throw new Error('只接受本机访问')
+  if (req.method !== 'POST') return
+  const origin = req.headers.origin
+  if (origin && !LOCAL.has(origin)) throw new Error('跨站请求被拒绝')
+  if (req.headers['x-rh-ui'] !== '1') throw new Error('缺少 x-rh-ui 头（跨站请求被拒绝）')
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost')
   try {
+    guard(req)
     if (req.method === 'GET' && url.pathname === '/') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
       return res.end(readFileSync(join(ROOT, 'src', 'ui', 'index.html')))
@@ -377,7 +411,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/job') { // 某个任务的完整日志（页面切换查看时拉一次）
       const j = jobs.get(Number(url.searchParams.get('id')))
       if (!j) throw new Error('任务不存在')
-      return json(res, 200, { job: summary(j), lines: j.lines, partial: j.partial, plan: j.plan ?? null })
+      return json(res, 200, { job: summary(j), lines: j.lines, partial: redact(j.partial), plan: j.plan ?? null })
     }
     if (req.method === 'GET' && url.pathname === '/api/events') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })

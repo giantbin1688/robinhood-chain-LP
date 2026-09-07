@@ -274,7 +274,7 @@ const PROTOCOL_HINT = { infinity: 'PancakeSwap 的 v4（singleton + hook）；�
 const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 3500) }
 const api = async (path, body) => {
   if (!body) path += (path.includes('?') ? '&' : '?') + `chain=${SEL.chain}&protocol=${SEL.protocol}`
-  const r = await fetch(path, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chain: SEL.chain, protocol: SEL.protocol, ...body }) } : undefined)
+  const r = await fetch(path, body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-rh-ui': '1' }, body: JSON.stringify({ chain: SEL.chain, protocol: SEL.protocol, ...body }) } : undefined)
   const j = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`)
   return j

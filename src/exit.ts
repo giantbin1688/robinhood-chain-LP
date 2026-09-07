@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { formatEther, getAddress, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
-import { die, env, erc20Abi, feeText, log, makeClients, nativePriceUsd, positionsOf, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, prepareSwap, type Clients, type PositionRecord, type SwapOffer } from './common.ts'
+import { die, env, erc20Abi, failFast, feeText, log, makeClients, nativePriceUsd, positionsOf, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, prepareSwap, type Clients, type PositionRecord, type SwapOffer } from './common.ts'
 import type { Pool, RawPosition } from './lp.ts'
 
 export const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase() // 合约返回的是校验和大小写地址，比较时忽略大小写
@@ -248,6 +248,7 @@ export async function withdraw(o: WithdrawOptions) {
 
 // ---- 命令行入口 ----
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  failFast()
   const { values: opt } = parseArgs({
     options: {
       chain: { type: 'string' }, protocol: { type: 'string' },               // 链 / 协议（common.ts 里解析）

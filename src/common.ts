@@ -24,6 +24,17 @@ export const env = (k: string, d: string) => process.env[k] || d
 export const ts = () => new Date().toTimeString().slice(0, 8)
 export const log = (...a: unknown[]) => console.log(ts(), ...a)
 export function die(msg: string): never { console.error('错误:', msg); process.exit(1) }
+// 顶层 await 里抛出的错误默认打整段堆栈，而网页把子进程输出原样显示——又长又带着 RPC 地址。
+// viem 的网络/合约错误收敛成一行；没有 shortMessage 的多半是真的代码 bug，保留堆栈方便查。（网页那侧另有脱敏兜底）
+export const failFast = () => {
+  const bail = (e: any) => {
+    if (e?.shortMessage) die(String(e.shortMessage).slice(0, 300))
+    console.error(e)
+    process.exit(1)
+  }
+  process.on('unhandledRejection', bail)
+  process.on('uncaughtException', bail)
+}
 // 数字压缩显示：数量截到 6 位小数，价格 6 位有效数字
 export const trim = (x: bigint, dec: number) => { const [i, f = ''] = formatUnits(x, dec).split('.'); const ff = f.slice(0, 6).replace(/0+$/, ''); return ff ? `${i}.${ff}` : i }
 export const p6 = (n: number) => String(Number(n.toPrecision(6)))

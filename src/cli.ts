@@ -4,10 +4,12 @@ import { createInterface } from 'node:readline/promises'
 import { parseArgs } from 'node:util'
 import { formatEther, getAddress, parseUnits, type Address } from 'viem'
 import * as v4 from './v4.ts'
-import { abs, die, env, erc20Abi, feeText, log, makeClients, min, nativePriceUsd, now, p6, pct, savePosition, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, type SwapOffer } from './common.ts'
+import { abs, die, env, erc20Abi, failFast, feeText, log, makeClients, min, nativePriceUsd, now, p6, pct, savePosition, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, type SwapOffer } from './common.ts'
 import type { MintSpec, Pool } from './lp.ts'
 import { watchToken } from './monitor.ts'
 import { discoverQuotePools } from './pools.ts'
+
+failFast()
 
 // 默认值来自 params.env，命令行参数可临时覆盖
 const { values: opt } = parseArgs({
