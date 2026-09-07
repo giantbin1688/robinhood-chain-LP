@@ -453,7 +453,7 @@ function renderExitPlan(p) {
 
 // ---- 仓位 ----
 // 持仓时间：3天2小时 / 5小时12分 / 8分钟
-function fmtDur(ms) {
+function fmtHold(ms) {
   const m = Math.floor(ms / 60000), h = Math.floor(m / 60), d = Math.floor(h / 24)
   return d > 0 ? `${d}天${h % 24}小时` : h > 0 ? `${h}小时${m % 60}分` : `${Math.max(m, 0)}分钟`
 }
@@ -462,7 +462,7 @@ function pnlCell(p) {
   if (p.pnlUsd === null) return '<span class="small">—</span>'
   const v = Number(p.pnlUsd), pctv = Number(p.entryUsd) > 0 ? (v / Number(p.entryUsd)) * 100 : 0
   const sign = v >= 0 ? '+' : '−'
-  return `<span style="color:${v >= 0 ? '#1a7f37' : '#c62828'};font-weight:600">${sign}$${Math.abs(v).toFixed(2)}</span><br><span class="small" style="color:${v >= 0 ? '#1a7f37' : '#c62828'}">${sign}${Math.abs(pctv).toFixed(1)}%</span><br><span class="small" title="mint 时存入的币按当时池价折算，不含换币成本">入场 $${p.entryUsd}</span>`
+  return `<span style="color:${v >= 0 ? '#1a7f37' : '#c62828'};font-weight:600" title="现在的持仓价值 + 未领手续费 − 入场价值；已领取的手续费和进场换币成本都不计入">${sign}$${Math.abs(v).toFixed(2)}</span><br><span class="small" style="color:${v >= 0 ? '#1a7f37' : '#c62828'}">${sign}${Math.abs(pctv).toFixed(1)}%</span><br><span class="small" title="mint 时存入的币按当时池价折算，不含换币成本">入场 $${p.entryUsd}</span>`
 }
 let POS = [], posTimer = null
 const expanded = new Set() // 展开了深度图的仓位 id
@@ -491,7 +491,7 @@ async function loadPositions(full) {
       <td>$${p.value}</td>
       <td>$${p.feesUsd}<br><span class="small">${p.feesUsdg} USDG<br>${p.feesToken} ${esc(p.symbol)}</span><br><button class="btn sm" data-act="collect" data-id="${p.id}" data-fees="$${p.feesUsd}" ${Number(p.feesUsd) < 0.01 ? 'disabled' : ''} title="只领手续费，本金不动">领取</button></td>
       <td>${pnlCell(p)}</td>
-      <td title="${p.mintedAt ? new Date(p.mintedAt).toLocaleString() : ''}">${p.mintedAt ? fmtDur(Date.now() - p.mintedAt) : '—'}</td>
+      <td title="${p.mintedAt ? new Date(p.mintedAt).toLocaleString() : ''}">${p.mintedAt ? fmtHold(Date.now() - p.mintedAt) : '—'}</td>
       <td>${p.watchJob !== null
         ? `<span class="badge run" title="${esc(w?.label ?? '')}">监控中 #${p.watchJob}</span><br><button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button> <button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}">停止</button>`
         : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${esc(p.symbol)}">开始监控</button>`}</td>

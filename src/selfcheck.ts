@@ -1,6 +1,7 @@
 // Offline self-check of src/v4.ts against a real Robinhood Chain mint:
 // tx 0x233ae8d87ebcba63d9671dc909b428eb035b306a8f7d579e8bda658d35e31841 (GRACE/USDG 5% pool, tokenId 1981258).
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { keccak256 } from 'viem'
 import { amountsForLiquidity, encodeMintUnlockData, getSqrtRatioAtTick, liquidityForAmounts, makePoolKey, poolId } from './v4.ts'
 
@@ -30,5 +31,8 @@ assert.equal(amount1, 15702640868205473793213n, 'matches the GRACE Transfer in t
 
 const unlockData = encodeMintUnlockData(key, 334000, 349000, liquidity, 25_000_000n, 16487772911615747482873n, WALLET)
 assert.equal(keccak256(unlockData), '0x19e3852cd4d12f82843f099bf8d7c00dcce5caf72bad1bf06bb6b896b8154c78', 'byte-identical to on-chain unlockData')
+
+// 网页内联脚本只做语法解析（不执行）：一个重复声明就会让整个页面不动，右上角停在"连接中…"
+for (const [, src] of readFileSync(new URL('./ui/index.html', import.meta.url), 'utf8').matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)) new Function(src)
 
 console.log('selfcheck ok')
