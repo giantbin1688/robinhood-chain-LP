@@ -7,12 +7,13 @@ import * as v4 from './v4.ts'
 import { POSM, STATE_VIEW, die, env, log, makeClients, p6, pct, posmAbi, sleep, stateViewAbi, tokenMeta, type Clients } from './common.ts'
 import { findPositions, same, withdraw, type Position } from './exit.ts'
 
-export type WatchOptions = { token: Address; clients: Clients; interval: number; confirm: number; via: string; slippage: number; lpSlippage: number; dryRun: boolean }
+// positions 给了就只盯这些仓位、触发时也只撤这些（同一代币可以开多个进程各管各的）；否则盯钱包里该代币的全部仓位
+export type WatchOptions = { token: Address; positions?: bigint[]; clients: Clients; interval: number; confirm: number; via: string; slippage: number; lpSlippage: number; dryRun: boolean }
 export async function watchToken(o: WatchOptions) {
   const { pub, wallet } = o.clients
   const { symbol, decimals } = await tokenMeta(pub, o.token)
-  const all = await findPositions(o.clients, o.token)
-  if (all.length === 0) { log(`钱包名下没有 ${symbol}/USDG 的有效仓位，不监控`); return }
+  const all = await findPositions(o.clients, o.token, o.positions)
+  if (all.length === 0) { log(o.positions ? `仓位 ${o.positions.join(',')} 不在钱包名下或已没有流动性，不监控` : `钱包名下没有 ${symbol}/USDG 的有效仓位，不监控`); return }
   const tokenIs1 = same(all[0].key.currency1, o.token)
   const [dec0, dec1] = tokenIs1 ? [6, decimals] : [decimals, 6]
   const usdgPerTokenAtTick = (t: number) => { const h = v4.priceAtTick(t) * 10 ** (dec0 - dec1); return tokenIs1 ? 1 / h : h }
@@ -35,15 +36,18 @@ export async function watchToken(o: WatchOptions) {
       const inRange = (p: Position) => tickOf(p) >= p.tickLower && tickOf(p) < p.tickUpper
       for (const p of main) if (inRange(p)) armed.add(p.id)
       const out = main.filter((p) => !inRange(p) && armed.has(p.id))
-      const waiting = main.filter((p) => !inRange(p) && !armed.has(p.id))
-      const cur = usdgPerTokenAtTick(tickOf(main[0]))
-      const [lo, hi] = [Math.min(...main.map((p) => edges(p)[0])), Math.max(...main.map((p) => edges(p)[1]))]
-      const status = `价格 ${p6(cur)} USDG/${symbol}，区间 ${p6(lo)} .. ${p6(hi)}（距下沿 ${pct(lo / cur - 1)}，距上沿 ${pct(hi / cur - 1)}）${out.length ? `，仓位 ${out.map((p) => p.id).join(',')} 已跳出区间` : waiting.length ? `，等待进入区间（现价在区间${cur > hi ? '上' : '下'}方）` : '，区间内'}`
+      // 每个仓位各报各的区间和状态（多个仓位可能在不同池，价格也各取各池的）
+      const one = (p: Position) => {
+        const cur = usdgPerTokenAtTick(tickOf(p)), [lo, hi] = edges(p)
+        const state = inRange(p) ? '区间内' : armed.has(p.id) ? '已跳出区间' : `等待进入区间（现价在区间${cur > hi ? '上' : '下'}方）`
+        return `仓位 ${p.id} 区间 ${p6(lo)} .. ${p6(hi)}（距下沿 ${pct(lo / cur - 1)}，距上沿 ${pct(hi / cur - 1)}）${state}`
+      }
+      const status = `价格 ${p6(usdgPerTokenAtTick(tickOf(main[0])))} USDG/${symbol}；${main.map(one).join('；')}`
       if (status !== lastStatus || Date.now() - lastBeat > 5 * 60_000) { log(status); lastStatus = status; lastBeat = Date.now() }
       outStreak = out.length ? outStreak + 1 : 0
       if (outStreak >= o.confirm) {
         log(`触发撤退: 连续 ${outStreak} 次检查跳出区间`)
-        await withdraw({ token: o.token, via: o.via, slippage: o.slippage, lpSlippage: o.lpSlippage, keepTokens: false, yes: true, dryRun: o.dryRun, clients: o.clients })
+        await withdraw({ token: o.token, positions: o.positions, via: o.via, slippage: o.slippage, lpSlippage: o.lpSlippage, keepTokens: false, yes: true, dryRun: o.dryRun, clients: o.clients })
         return
       }
       // 每分钟核对一次仓位还在不在（手动撤了就停止监控）
@@ -72,6 +76,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { values: opt } = parseArgs({
     options: {
       token: { type: 'string' },
+      position: { type: 'string' },                                        // 只盯这些仓位 id（逗号分隔），触发时也只撤这些
       interval: { type: 'string', default: env('WATCH_INTERVAL', '10') },  // 检查间隔（秒）
       confirm: { type: 'string', default: env('WATCH_CONFIRM', '2') },     // 连续几次跳出区间才撤退
       via: { type: 'string', default: env('EXIT_SWAP_VIA', 'best') },
@@ -81,9 +86,10 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       from: { type: 'string' },
     },
   })
-  if (!opt.token) die('用法: npm run watch -- --token <代币地址> [--interval 10] [--confirm 2] [--via okx|uniswap|best] [--dry-run]')
+  if (!opt.token) die('用法: npm run watch -- --token <代币地址> [--position <仓位id,仓位id>] [--interval 10] [--confirm 2] [--via okx|uniswap|best] [--dry-run]')
   await watchToken({
-    token: getAddress(opt.token), clients: makeClients(opt.from, !opt['dry-run']), interval: Math.max(3, Number(opt.interval)), confirm: Math.max(1, Number(opt.confirm)),
+    token: getAddress(opt.token), positions: opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined,
+    clients: makeClients(opt.from, !opt['dry-run']), interval: Math.max(3, Number(opt.interval)), confirm: Math.max(1, Number(opt.confirm)),
     via: opt.via, slippage: Number(opt.slippage), lpSlippage: Number(opt['lp-slippage']), dryRun: opt['dry-run'],
   })
   await sleep(100); process.exit(0)

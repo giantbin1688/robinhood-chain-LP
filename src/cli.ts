@@ -79,12 +79,9 @@ async function bestBuy(amount: bigint, what: string) {
 }
 log(`钱包 ${wallet} | ${fmtU(usdgStart)} USDG, ${trim(ethBal, 18)} ETH | ETH $${ethPrice.toFixed(2)}`)
 log(`代币 ${symbol} (${name}) 精度=${decimals} 地址 ${token}`)
-if (usdgStart < usdgBudget) {
-  const msg = `预算 ${fmtU(usdgBudget)} USDG，钱包只有 ${fmtU(usdgStart)}`
-  dryRun ? log(`警告: ${msg}`) : die(msg)
-}
-// 本次已花掉的 USDG（卖币收回则为负）和本次拿到的代币
-const holdings = async () => { const [u, t] = await Promise.all([balanceOf(USDG), balanceOf(token)]); return { spent: usdgStart - u, held: t - tokenStart } }
+// 本次已花掉的 USDG（卖币收回则为负）和手里的代币。钱包里原有的代币（比如上次换完币没组成 LP）一并计入，
+// 按市场价折成 USDG 从预算里扣掉（见下方"计划"处），重跑时就不会再换一遍
+const holdings = async () => { const [u, t] = await Promise.all([balanceOf(USDG), balanceOf(token)]); return { spent: usdgStart - u, held: t } }
 
 const tokenIs1 = key.currency1 === token
 const [dec0, dec1] = tokenIs1 ? [6, decimals] : [decimals, 6]
@@ -232,13 +229,36 @@ let marketTick = tickFromProbe(probe.out)
 let marketPrice = usdgPerTokenAtTick(marketTick)
 const rate = Number(probe.out) / 1e6
 log(`市场价 ${p6(marketPrice)} USDG/${symbol}（${probe.via}）${initialized ? `，池价偏离 ${pct(deviation(tick, marketTick))}` : ''}`)
+// 钱包原有代币按市场价折算，算作预算里已经换好的那部分；超过预算就只用预算能装下的那部分（其余留在钱包），USDG 一侧按配比从钱包出
+let usdgSpend = usdgBudget // 本次可动用的 USDG（换币 + LP）
+let tokenCap = false       // 持有代币超过预算：组 LP 时代币侧按预算截断
+const tokenPart = (t: number) => { // 预算在 tick t 的区间配比下，代币侧应占多少（基础单位）
+  const need = usdgPerTokenNeeded(t, ...rangeFor(t)), p = 1 / rate // p = 每个代币基础单位值多少 USDG 基础单位
+  return need === Infinity ? 0n : BigInt(Math.floor(Number(usdgBudget) / (p + need)))
+}
+if (tokenStart > 0n) {
+  const heldValue = BigInt(Math.ceil(Number(tokenStart) / rate))
+  if (heldValue >= usdgBudget) {
+    tokenCap = true
+    const t = tokenPart(initialized ? tick : marketTick)
+    usdgSpend = usdgBudget - BigInt(Math.ceil(Number(t) / rate))
+    log(`钱包已有 ${fmtT(tokenStart)} ${symbol}（≈${fmtU(heldValue)} USDG）超过预算 ${fmtU(usdgBudget)}：只投入 ≈${fmtT(t)} ${symbol} + ≈${fmtU(usdgSpend)} USDG，其余留在钱包，不换币`)
+  } else {
+    usdgSpend = usdgBudget - heldValue
+    log(`钱包已有 ${fmtT(tokenStart)} ${symbol}（≈${fmtU(heldValue)} USDG），计入本次 LP，剩余 USDG 预算 ${fmtU(usdgSpend)}`)
+  }
+}
+if (usdgStart < usdgSpend) {
+  const msg = `需要 ${fmtU(usdgSpend)} USDG，钱包只有 ${fmtU(usdgStart)}`
+  dryRun ? log(`警告: ${msg}`) : die(msg)
+}
 const correction = initialized ? await planCorrection(marketTick, marketPrice) : null
 if (correction) {
-  if (correctionCost(correction, marketPrice) > usdgBudget) die(`池价偏离市场价 ${pct(correction.dev)}，校正约需 ${fmtU(correctionCost(correction, marketPrice))} USDG，超过预算，放弃`)
+  if (correctionCost(correction, marketPrice) > usdgSpend) die(`池价偏离市场价 ${pct(correction.dev)}，校正约需 ${fmtU(correctionCost(correction, marketPrice))} USDG，超过预算，放弃`)
   log(`计划: ${correctionText(correction)}`)
 }
 const refTick = correction ? v4.tickFromPrice(v4.priceFromSqrtX96(correction.sqrtNext)) : initialized ? tick : marketTick
-const estSwap = swapShare(usdgBudget, 0n, refTick, rate)
+const estSwap = swapShare(usdgSpend, tokenStart, refTick, rate)
 // 用真实数量报一次价：找不到路、或大单冲击太大，都在确认前拦住
 let planOffer: SwapOffer | null = null
 if (estSwap > 0n) {
@@ -247,7 +267,7 @@ if (estSwap > 0n) {
   if (impact < -0.2) die(`换 ${fmtU(estSwap)} USDG 的价格冲击 ${pct(impact)}（流动性太薄），把 USDG_AMOUNT 调小再试`)
   if (impact < -0.05) log(`警告: 换 ${fmtU(estSwap)} USDG 的价格冲击 ${pct(impact)}`)
 }
-log(`计划: ${planOffer ? `换币 ≈${fmtU(estSwap)} USDG -> ${planOffer.text}` : '无需换币'}，LP ≈${fmtU(usdgBudget - estSwap)} USDG + 全部拿到的 ${symbol}${correction ? '（校正开销另计）' : ''}`)
+log(`计划: ${planOffer ? `换币 ≈${fmtU(estSwap)} USDG -> ${planOffer.text}` : '无需换币'}，LP ≈${fmtU(usdgSpend - estSwap)} USDG + ${tokenCap ? '预算内的' : tokenStart > 0n ? '手里全部的' : '全部拿到的'} ${symbol}${correction ? '（校正开销另计）' : ''}`)
 log(`计划: 区间 ${rangeText(rangeFor(refTick))}，滑点 换币 ${swapSlippage}% / LP ${lpSlippage}%`)
 if (dryRun) { log('演练模式，到此为止'); await sleep(100); process.exit(0) } // 稍等让批量请求的句柄关闭，避免 Windows 上退出时的 libuv 断言
 if (!opt.yes) {
@@ -275,7 +295,8 @@ async function ensureTokens(need: bigint, label: string) {
   if (!o) die(`买不到 ${fmtT(short)} ${symbol}（找不到路由）`)
   log(`换币完成: 拿到 ${fmtT(await buy(o, label))} ${symbol}`)
 }
-// PositionManager.multicall([permit…, initializePool?, modifyLiquidities(MINT)])，返回仓位 id 并记录到 positions.json
+// PositionManager.multicall([permit…, initializePool?, modifyLiquidities(MINT)])，返回仓位 id 并记录到 positions.json；本次建的仓位 id 都收进 minted 供 --watch 只盯自己的
+const minted: bigint[] = []
 async function mint(label: string, kind: 'lp' | 'bridge', lo: number, hi: number, liquidity: bigint, max0: bigint, max1: bigint, init?: bigint) {
   const calls: Hex[] = []
   for (const [cur, max] of [[key.currency0, max0], [key.currency1, max1]] as const) {
@@ -289,10 +310,19 @@ async function mint(label: string, kind: 'lp' | 'bridge', lo: number, hi: number
   calls.push(encodeFunctionData({ abi: posmAbi, functionName: 'modifyLiquidities', args: [unlockData, BigInt(now() + 600)] }))
   const rc = await sendEstimated(label, { to: POSM, data: encodeFunctionData({ abi: posmAbi, functionName: 'multicall', args: [calls] }) })
   const positionId = parseEventLogs({ abi: posmAbi, eventName: 'Transfer', logs: rc.logs }).find((l) => l.address.toLowerCase() === POSM.toLowerCase())?.args.id
-  if (positionId !== undefined) savePosition({ id: positionId.toString(), token, symbol, poolId: id, kind, at: new Date().toISOString() })
+  if (positionId !== undefined) { minted.push(positionId); savePosition({ id: positionId.toString(), token, symbol, poolId: id, kind, at: new Date().toISOString() }) }
   return { rc, positionId }
 }
 const withHeadroom = (x: bigint, avail: bigint) => min((x * BigInt(Math.round((100 + lpSlippage) * 100))) / 10_000n, avail)
+// PositionManager 的 MaximumAmountExceeded(uint128 maximumAmount, uint128 amountRequested)，从 viem 错误链里取 revert data 解出来
+function slippageRevert(e: unknown): { max: bigint; need: bigint } | null {
+  for (let x: any = e; x; x = x.cause) {
+    const data: unknown = x.data
+    if (typeof data === 'string' && data.startsWith('0x31e30ad0') && data.length === 10 + 128)
+      return { max: BigInt('0x' + data.slice(10, 74)), need: BigInt('0x' + data.slice(74, 138)) }
+  }
+  return null
+}
 
 // 1) 池价校正（最多 3 轮，每轮重新探测市场价）
 if (correction) {
@@ -301,7 +331,7 @@ if (correction) {
     const c = round === 1 ? correction : await planCorrection(marketTick, marketPrice)
     if (!c) { log(`池价偏离 ${pct(deviation(tick, marketTick))}，已在阈值内`); break }
     if (round > 3) die(`3 轮校正后池价仍偏离 ${pct(c.dev)}，放弃`)
-    if (correctionCost(c, marketPrice) > usdgBudget - (await holdings()).spent) die(`校正约需 ${fmtU(correctionCost(c, marketPrice))} USDG，超过剩余预算，放弃`)
+    if (correctionCost(c, marketPrice) > usdgSpend - (await holdings()).spent) die(`校正约需 ${fmtU(correctionCost(c, marketPrice))} USDG，超过剩余预算，放弃`)
     const [cin, cout] = c.zeroForOne ? [key.currency0, key.currency1] : [key.currency1, key.currency0]
     const fmt = (x: bigint, cur: Address) => `${trim(x, cur === USDG ? 6 : decimals)} ${symOf(cur)}`
     if (c.kind === 'bridge') {
@@ -325,7 +355,7 @@ if (correction) {
 
 // 2) 按市价换币：先按探测汇率算份额报价（计划阶段的报价没过期就直接用）；大单实际汇率与探测价有差（价格冲击）就按新汇率重算再报一次，减少 LP 配比失衡留下的剩余
 let { spent, held } = await holdings()
-let budgetLeft = usdgBudget - spent
+let budgetLeft = usdgSpend - spent
 if (budgetLeft > 0n) {
   const ref = initialized ? tick : marketTick
   let swapAmount = swapShare(budgetLeft, held, ref, rate)
@@ -336,41 +366,57 @@ if (budgetLeft > 0n) {
     const got = await buy(o, '换币')
     log(`换币完成: ${fmtU(swapAmount)} USDG -> ${fmtT(got)} ${symbol}`)
     ;({ spent, held } = await holdings())
-    budgetLeft = usdgBudget - spent
+    budgetLeft = usdgSpend - spent
   }
 }
 if (budgetLeft < 0n) budgetLeft = 0n
 
 // 3) LP 价格：池子已存在用池价（重新读取），否则用换币后的市场探测价作为新池初始价
-;[sqrtP, tick] = await slot0(id)
-initialized = sqrtP !== 0n
-if (initialized) {
-  log(`LP 价格: 池 tick ${tick} = ${price(tick)}`)
-} else {
-  tick = tickFromProbe((await bestBuy(1_000_000n, '探测市场价')).out)
-  sqrtP = v4.getSqrtRatioAtTick(tick)
-  log(`LP 价格: 新池初始价 tick ${tick} = ${price(tick)}（市场探测价）`)
-}
-const [tickLower, tickUpper] = rangeFor(tick)
-
-// 4) 由预算算流动性；amountMax = 实际扣款 + 余量，且不超过持有量
-const [avail0, avail1] = tokenIs1 ? [budgetLeft, held] : [held, budgetLeft]
-const sqrtA = v4.getSqrtRatioAtTick(tickLower), sqrtB = v4.getSqrtRatioAtTick(tickUpper)
-const liquidity = v4.liquidityForAmounts(sqrtP, sqrtA, sqrtB, avail0, avail1)
-if (liquidity === 0n) die('算出的流动性为 0')
-const [amount0, amount1] = v4.amountsForLiquidity(sqrtP, sqrtA, sqrtB, liquidity)
-const [max0, max1] = [withHeadroom(amount0, avail0), withHeadroom(amount1, avail1)]
+// 换币本身会把池价推开，套利者随后又拉回来；按瞬时价算的流动性到上链时可能超出 amountMax（MaximumAmountExceeded），
+// 遇到就重读池价、按手里的币重算再试
 const f0 = (x: bigint) => trim(x, dec0), f1 = (x: bigint) => trim(x, dec1)
-log(`组LP: ticks [${tickLower}, ${tickUpper}]，liquidity ${liquidity}，投入 ${f0(amount0)} ${sym0} + ${f1(amount1)} ${sym1}（上限 ${f0(max0)} / ${f1(max1)}），剩余 ${f0(avail0 - amount0)} ${sym0} + ${f1(avail1 - amount1)} ${sym1}`)
+let mintResult: Awaited<ReturnType<typeof mint>> | undefined
+for (let attempt = 1; !mintResult; attempt++) {
+  ;[sqrtP, tick] = await slot0(id)
+  initialized = sqrtP !== 0n
+  if (initialized) {
+    log(`LP 价格: 池 tick ${tick} = ${price(tick)}`)
+  } else {
+    tick = tickFromProbe((await bestBuy(1_000_000n, '探测市场价')).out)
+    sqrtP = v4.getSqrtRatioAtTick(tick)
+    log(`LP 价格: 新池初始价 tick ${tick} = ${price(tick)}（市场探测价）`)
+  }
+  const [tickLower, tickUpper] = rangeFor(tick)
 
-// 5) 建池（如需）+ mint
-const { rc: mintRc, positionId } = await mint(initialized ? '组LP' : '建池+组LP', 'lp', tickLower, tickUpper, liquidity, max0, max1, initialized ? undefined : sqrtP)
+  // 4) 由预算算流动性；amountMax = 实际扣款 + 余量，且不超过持有量（持有代币超过预算时代币侧按预算截断）
+  const heldUse = tokenCap ? min(held, tokenPart(tick)) : held
+  const [avail0, avail1] = tokenIs1 ? [budgetLeft, heldUse] : [heldUse, budgetLeft]
+  const sqrtA = v4.getSqrtRatioAtTick(tickLower), sqrtB = v4.getSqrtRatioAtTick(tickUpper)
+  const liquidity = v4.liquidityForAmounts(sqrtP, sqrtA, sqrtB, avail0, avail1)
+  if (liquidity === 0n) die('算出的流动性为 0')
+  const [amount0, amount1] = v4.amountsForLiquidity(sqrtP, sqrtA, sqrtB, liquidity)
+  const [max0, max1] = [withHeadroom(amount0, avail0), withHeadroom(amount1, avail1)]
+  log(`组LP: ticks [${tickLower}, ${tickUpper}]，liquidity ${liquidity}，投入 ${f0(amount0)} ${sym0} + ${f1(amount1)} ${sym1}（上限 ${f0(max0)} / ${f1(max1)}），剩余 ${f0(avail0 - amount0)} ${sym0} + ${f1(avail1 - amount1)} ${sym1}`)
+
+  // 5) 建池（如需）+ mint
+  try {
+    mintResult = await mint(initialized ? '组LP' : '建池+组LP', 'lp', tickLower, tickUpper, liquidity, max0, max1, initialized ? undefined : sqrtP)
+  } catch (e) {
+    const exceeded = slippageRevert(e)
+    if (!exceeded || attempt >= 5) throw e
+    const cur = exceeded.max === max0 ? key.currency0 : key.currency1
+    const f = cur === key.currency0 ? f0 : f1
+    log(`组LP 回滚: 池价变动，需要 ${f(exceeded.need)} ${symOf(cur)} 超过上限 ${f(exceeded.max)}，等 3 秒按新池价重算（第 ${attempt} 次）`)
+    await sleep(3000)
+  }
+}
+const { rc: mintRc, positionId } = mintResult
 log(`完成: 仓位 ${positionId ?? '?'}，池 ${id}（已记录到 positions.json，撤退: npm run exit -- --token ${token}）`)
 log(`      ${EXPLORER}/tx/${mintRc.transactionHash}`)
 log(`gas 合计: ${stats.txCount} 笔，${trim(stats.gasTotal, 18)} ETH ($${usd(stats.gasTotal)})`)
 
-// 6) 可选：继续监控，跳出区间自动撤退
+// 6) 可选：继续监控本次建的仓位，跳出区间自动撤退（同一代币的其他仓位不管，可以再开一个进程做别的区间）
 if (opt.watch) await watchToken({
-  token, clients, interval: Math.max(3, Number(env('WATCH_INTERVAL', '10'))), confirm: Math.max(1, Number(env('WATCH_CONFIRM', '2'))),
+  token, positions: minted.length ? minted : undefined, clients, interval: Math.max(3, Number(env('WATCH_INTERVAL', '10'))), confirm: Math.max(1, Number(env('WATCH_CONFIRM', '2'))),
   via: env('EXIT_SWAP_VIA', 'best'), slippage: swapSlippage, lpSlippage, dryRun: false,
 })

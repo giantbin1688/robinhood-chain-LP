@@ -12,15 +12,15 @@ import {
 
 export const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase() // 合约返回的是校验和大小写地址，比较时忽略大小写
 
-// 钱包名下、属于 代币/USDG 池、还有流动性的仓位：--position 指定的 + positions.json 记录的 + 链上扫描
+// 钱包名下、属于 代币/USDG 池、还有流动性的仓位：只给了 explicit 就只看这些 id；否则 positions.json 记录的 + 链上扫描
 // （PositionManager 转给钱包的 NFT，扫描走公共节点，Alchemy 免费版限制 getLogs 区间）
-export async function findPositions(c: Clients, token: Address, explicit?: bigint) {
+export async function findPositions(c: Clients, token: Address, explicit?: bigint[]) {
   const { wallet, pub } = c
   const posInfo = (id: bigint) => pub.readContract({ address: POSM, abi: posmAbi, functionName: 'getPoolAndPositionInfo', args: [id] })
-  const candidates = new Set<bigint>(explicit !== undefined ? [explicit] : [])
+  const candidates = new Set<bigint>(explicit ?? [])
   const kinds = new Map<string, string>()
-  for (const p of loadPositions()) if (same(p.token, token)) { candidates.add(BigInt(p.id)); kinds.set(p.id, p.kind) }
-  if (explicit === undefined) {
+  for (const p of loadPositions()) if (same(p.token, token)) { if (!explicit) candidates.add(BigInt(p.id)); kinds.set(p.id, p.kind) }
+  if (!explicit) {
     const scan = createPublicClient({ chain, transport: http(PUBLIC_RPC) })
     const logs = await scan.getLogs({ address: POSM, event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 indexed id)'), args: { to: wallet }, fromBlock: 0n })
     for (const l of logs) candidates.add(l.args.id!)
@@ -40,23 +40,25 @@ export async function findPositions(c: Clients, token: Address, explicit?: bigin
 }
 export type Position = Awaited<ReturnType<typeof findPositions>>[number]
 
+// positions 给了就只撤这些仓位、只卖撤出来的币（同一代币可能还有别的进程在管的仓位）；否则撤该代币全部仓位、卖光钱包里的币
 export type WithdrawOptions = {
-  token?: Address; position?: bigint; via: string; slippage: number; lpSlippage: number; keepTokens: boolean; yes: boolean; dryRun: boolean; clients: Clients
+  token?: Address; positions?: bigint[]; via: string; slippage: number; lpSlippage: number; keepTokens: boolean; yes: boolean; dryRun: boolean; clients: Clients
 }
 export async function withdraw(o: WithdrawOptions) {
   const { wallet, pub } = o.clients
   const balanceOf = (t: Address) => pub.readContract({ address: t, abi: erc20Abi, functionName: 'balanceOf', args: [wallet] })
   const token: Address = o.token ?? await (async () => {
-    const [k] = await pub.readContract({ address: POSM, abi: posmAbi, functionName: 'getPoolAndPositionInfo', args: [o.position!] })
-    if (BigInt(k.currency1) === 0n) die(`仓位 ${o.position} 不存在或已被撤销`)
+    const [k] = await pub.readContract({ address: POSM, abi: posmAbi, functionName: 'getPoolAndPositionInfo', args: [o.positions![0]] })
+    if (BigInt(k.currency1) === 0n) die(`仓位 ${o.positions![0]} 不存在或已被撤销`)
     return same(k.currency0, USDG) ? k.currency1 : k.currency0
   })()
-  const [{ symbol, decimals }, ethPrice, usdgStart, tokenStart, positions] = await Promise.all([tokenMeta(pub, token), ethPriceUsd(pub), balanceOf(USDG), balanceOf(token), findPositions(o.clients, token, o.position)])
+  const [{ symbol, decimals }, ethPrice, usdgStart, tokenStart, positions] = await Promise.all([tokenMeta(pub, token), ethPriceUsd(pub), balanceOf(USDG), balanceOf(token), findPositions(o.clients, token, o.positions)])
   const usd = (wei: bigint) => (Number(formatEther(wei)) * ethPrice).toFixed(2)
   const fmtU = (x: bigint) => trim(x, 6), fmtT = (x: bigint) => trim(x, decimals)
   const symOf = (t: Address) => (same(t, USDG) ? 'USDG' : symbol)
   log(`钱包 ${wallet} | ${fmtU(usdgStart)} USDG, ${fmtT(tokenStart)} ${symbol} | ETH $${ethPrice.toFixed(2)}`)
-  if (positions.length === 0) die(`钱包名下没有 ${symbol}/USDG 的有效仓位`)
+  if (positions.length === 0) die(o.positions ? `仓位 ${o.positions.join(',')} 不在钱包名下或已没有流动性` : `钱包名下没有 ${symbol}/USDG 的有效仓位`)
+  const sellHeld = o.positions ? 0n : tokenStart // 钱包里原有的币要不要一起卖
 
   // ---- 计划 ----
   let expectUsdg = 0n, expectToken = 0n
@@ -67,7 +69,7 @@ export async function withdraw(o: WithdrawOptions) {
     groups.set(v4.poolId(p.key), [...(groups.get(v4.poolId(p.key)) ?? []), p])
     log(`仓位 ${p.id}: ${symbol}/USDG ${p.key.fee / 10000}% ticks [${p.tickLower}, ${p.tickUpper}]，≈${fmtU(u)} USDG + ${fmtT(t)} ${symbol}`)
   }
-  const sellAmount = tokenStart + expectToken
+  const sellAmount = sellHeld + expectToken
   log(`计划: 撤 ${positions.length} 个仓位（${groups.size} 笔交易），拿回 ≈${fmtU(expectUsdg)} USDG + ${fmtT(expectToken)} ${symbol}`)
 
   // 卖币报价：Uniswap 和 OKX 同时报价，能换回更多 USDG 的排前面
@@ -104,10 +106,11 @@ export async function withdraw(o: WithdrawOptions) {
   log(`撤仓完成: 拿回 ${fmtU(usdgAfterBurn - usdgStart)} USDG + ${fmtT(tokenBal - tokenStart)} ${symbol}（含手续费）`)
 
   // ---- 2) 卖币：按实际余额重新报价，走更好的一家 ----
-  if (!o.keepTokens && tokenBal > 0n) {
-    const [best] = await offers(tokenBal)
+  const toSell = sellHeld + (tokenBal - tokenStart)
+  if (!o.keepTokens && toSell > 0n) {
+    const [best] = await offers(toSell)
     if (!best) die('卖币报价失败，代币留在钱包里')
-    log(`卖出 ${fmtT(tokenBal)} ${symbol} -> ${best.text}`)
+    log(`卖出 ${fmtT(toSell)} ${symbol} -> ${best.text}`)
     await executeSwap(best, deps, kit, o.clients, token, USDG, '卖币')
   }
   const [usdgEnd, tokenEnd] = await Promise.all([balanceOf(USDG), balanceOf(token)])
@@ -121,7 +124,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { values: opt } = parseArgs({
     options: {
       token: { type: 'string' },                                            // 代币地址：撤掉它的全部仓位
-      position: { type: 'string' },                                         // 只撤这一个仓位 id（可代替 --token）
+      position: { type: 'string' },                                         // 只撤这些仓位 id（逗号分隔，可代替 --token），只卖撤出来的币
       via: { type: 'string', default: env('EXIT_SWAP_VIA', 'best') },       // 卖币走哪家: okx | uniswap | best（两边报价取高者）
       slippage: { type: 'string', default: env('SWAP_SLIPPAGE', '5') },     // 卖币滑点 %
       'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },  // 撤仓最少拿回量的余量 %
@@ -131,10 +134,10 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       from: { type: 'string' },
     },
   })
-  if (!opt.token && !opt.position) die('用法: npm run exit -- --token <代币地址> [--position <仓位id>] [--via okx|uniswap|best] [--keep-tokens] [--yes] [--dry-run]')
+  if (!opt.token && !opt.position) die('用法: npm run exit -- --token <代币地址> [--position <仓位id,仓位id>] [--via okx|uniswap|best] [--keep-tokens] [--yes] [--dry-run]')
   if (!['okx', 'uniswap', 'best'].includes(opt.via)) die('--via 只能是 okx / uniswap / best')
   await withdraw({
-    token: opt.token ? getAddress(opt.token) : undefined, position: opt.position ? BigInt(opt.position) : undefined, via: opt.via,
+    token: opt.token ? getAddress(opt.token) : undefined, positions: opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined, via: opt.via,
     slippage: Number(opt.slippage), lpSlippage: Number(opt['lp-slippage']), keepTokens: opt['keep-tokens'], yes: opt.yes, dryRun: opt['dry-run'],
     clients: makeClients(opt.from, !opt['dry-run']),
   })
