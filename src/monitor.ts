@@ -8,7 +8,7 @@ import { POSM, STATE_VIEW, die, env, log, makeClients, p6, pct, posmAbi, sleep, 
 import { findPositions, same, withdraw, type Position } from './exit.ts'
 
 // positions 给了就只盯这些仓位、触发时也只撤这些（同一代币可以开多个进程各管各的）；否则盯钱包里该代币的全部仓位
-export type WatchOptions = { token: Address; positions?: bigint[]; clients: Clients; interval: number; confirm: number; upperGrace: number; via: string; slippage: number; lpSlippage: number; dryRun: boolean }
+export type WatchOptions = { token: Address; positions?: bigint[]; clients: Clients; interval: number; confirm: number; upperGrace: number; via: string; slippage: number; lpSlippage: number; dryRun: boolean; json?: boolean }
 export async function watchToken(o: WatchOptions) {
   const { pub, wallet } = o.clients
   const { symbol, decimals } = await tokenMeta(pub, o.token)
@@ -55,7 +55,7 @@ export async function watchToken(o: WatchOptions) {
       if (status !== lastStatus || Date.now() - lastBeat > 5 * 60_000) { log(status); lastStatus = status; lastBeat = Date.now() }
       if (outStreak >= o.confirm && (outBelow.length > 0 || graceLeft <= 0)) {
         log(`触发撤退: 连续 ${outStreak} 次检查跳出区间${outBelow.length ? '' : `，涨破上沿已超过 ${Math.round(o.upperGrace / 60)} 分钟`}`)
-        await withdraw({ token: o.token, positions: o.positions, via: o.via, slippage: o.slippage, lpSlippage: o.lpSlippage, keepTokens: false, yes: true, dryRun: o.dryRun, clients: o.clients })
+        await withdraw({ token: o.token, positions: o.positions, via: o.via, slippage: o.slippage, lpSlippage: o.lpSlippage, keepTokens: false, yes: true, dryRun: o.dryRun, clients: o.clients, json: o.json })
         return
       }
       // 每分钟核对一次仓位还在不在（手动撤了就停止监控）
@@ -93,13 +93,14 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },
       'dry-run': { type: 'boolean', default: false },                      // 触发时只演练撤退，不发交易
       from: { type: 'string' },
+      json: { type: 'boolean', default: false },                           // 给网页界面用：触发撤退时打印一行 "@@plan {json}"
     },
   })
   if (!opt.token) die('用法: npm run watch -- --token <代币地址> [--position <仓位id,仓位id>] [--interval 10] [--confirm 2] [--upper-grace 600] [--via okx|uniswap|best] [--dry-run]')
   await watchToken({
     token: getAddress(opt.token), positions: opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined,
     clients: makeClients(opt.from, !opt['dry-run']), interval: Math.max(3, Number(opt.interval)), confirm: Math.max(1, Number(opt.confirm)),
-    upperGrace: Math.max(0, Number(opt['upper-grace'])), via: opt.via, slippage: Number(opt.slippage), lpSlippage: Number(opt['lp-slippage']), dryRun: opt['dry-run'],
+    upperGrace: Math.max(0, Number(opt['upper-grace'])), via: opt.via, slippage: Number(opt.slippage), lpSlippage: Number(opt['lp-slippage']), dryRun: opt['dry-run'], json: opt.json,
   })
   await sleep(100); process.exit(0)
 }

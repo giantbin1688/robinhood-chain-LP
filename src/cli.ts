@@ -27,6 +27,7 @@ const { values: opt } = parseArgs({
     yes: { type: 'boolean', default: false },
     'dry-run': { type: 'boolean', default: false },   // 只看计划，不发交易
     from: { type: 'string' },                         // --dry-run 时可用地址代替私钥
+    json: { type: 'boolean', default: false },        // 计划确定后额外打印一行 "@@plan {json}" 给网页界面用
   },
 })
 if (!opt.token) die('用法: npm run launch -- --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--range="-50%,+100%" | --price-range="0.006,0.01"] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
@@ -94,6 +95,9 @@ const price = (t: number) => `${p6(usdgPerTokenAtTick(t))} USDG/${symbol}`
 const deviation = (poolTick: number, marketTick: number) => usdgPerTokenAtTick(poolTick) / usdgPerTokenAtTick(marketTick) - 1 // 池价相对市场价
 let [sqrtP, tick] = poolSlot
 let initialized = sqrtP !== 0n
+if (initialized && (tick <= v4.MIN_TICK || tick >= v4.MAX_TICK)) {
+  die(`池子处于不可用边界 tick ${tick}；请更换 fee/spacing 创建新池，或先在原池补回覆盖现价的流动性`)
+}
 // 配置的池不存在：看看这个币已有哪些 USDG 池。同费率的直接复用（间距以链上为准）；否则选流动性够、成交量最大的；都没有才新建
 if (!initialized && opt['pool-select'] === 'auto') {
   const pools = (await discoverUsdgPools(token)).sort((a, b) => b.volume24h - a.volume24h)
@@ -269,6 +273,21 @@ if (estSwap > 0n) {
 }
 log(`计划: ${planOffer ? `换币 ≈${fmtU(estSwap)} USDG -> ${planOffer.text}` : '无需换币'}，LP ≈${fmtU(usdgSpend - estSwap)} USDG + ${tokenCap ? '预算内的' : tokenStart > 0n ? '手里全部的' : '全部拿到的'} ${symbol}${correction ? '（校正开销另计）' : ''}`)
 log(`计划: 区间 ${rangeText(rangeFor(refTick))}，滑点 换币 ${swapSlippage}% / LP ${lpSlippage}%`)
+if (opt.json) {
+  const [lo, hi] = rangeFor(refTick)
+  const [a, b] = [usdgPerTokenAtTick(lo), usdgPerTokenAtTick(hi)].sort((x, y) => x - y)
+  console.log('@@plan ' + JSON.stringify({
+    kind: 'launch', wallet, usdg: fmtU(usdgStart), eth: trim(ethBal, 18), ethPrice: ethPrice.toFixed(2),
+    token: { address: token, symbol, name, decimals },
+    pool: { id, fee: fee / 10000, spacing, state: initialized ? 'reuse' : 'create', price: initialized ? p6(usdgPerTokenAtTick(tick)) : null, deviation: initialized ? pct(deviation(tick, marketTick)) : null },
+    market: { price: p6(marketPrice), via: probe.via },
+    correction: correction ? correctionText(correction) : null,
+    swap: planOffer ? { usdgIn: fmtU(estSwap), out: fmtT(planOffer.out), via: planOffer.via, text: planOffer.text } : null,
+    lp: { usdg: fmtU(usdgSpend - estSwap), token: tokenCap ? '预算内的' : tokenStart > 0n ? '手里全部的' : '全部换到的', held: fmtT(tokenStart) },
+    range: { tickLower: lo, tickUpper: hi, lo: p6(a), hi: p6(b), label: rangeLabel },
+    slippage: { swap: swapSlippage, lp: lpSlippage }, watch: opt.watch,
+  }))
+}
 if (dryRun) { log('演练模式，到此为止'); await sleep(100); process.exit(0) } // 稍等让批量请求的句柄关闭，避免 Windows 上退出时的 libuv 断言
 if (!opt.yes) {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
@@ -405,10 +424,11 @@ const { rc: mintRc, positionId } = mintResult
 log(`完成: 仓位 ${positionId ?? '?'}，池 ${id}（已记录到 positions.json，撤退: npm run exit -- --token ${token}）`)
 log(`      ${EXPLORER}/tx/${mintRc.transactionHash}`)
 log(`gas 合计: ${stats.txCount} 笔，${trim(stats.gasTotal, 18)} ETH ($${usd(stats.gasTotal)})`)
+if (opt.json) console.log('@@positions ' + JSON.stringify(minted.map(String))) // 网页界面：本次建的仓位（--watch 时接下来就盯这些）
 
 // 6) 可选：继续监控本次建的仓位，跳出区间自动撤退（同一代币的其他仓位不管，可以再开一个进程做别的区间）
 if (opt.watch) await watchToken({
   token, positions: minted.length ? minted : undefined, clients, interval: Math.max(3, Number(env('WATCH_INTERVAL', '10'))), confirm: Math.max(1, Number(env('WATCH_CONFIRM', '2'))),
   upperGrace: Math.max(0, Number(env('WATCH_UPPER_GRACE', '600'))),
-  via: env('EXIT_SWAP_VIA', 'best'), slippage: swapSlippage, lpSlippage, dryRun: false,
+  via: env('EXIT_SWAP_VIA', 'best'), slippage: swapSlippage, lpSlippage, dryRun: false, json: opt.json,
 })

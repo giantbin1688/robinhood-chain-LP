@@ -161,6 +161,16 @@ export function encodeBurnUnlockData(key: PoolKey, positions: { id: bigint; amou
   return encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [actions, [...burns, take]])
 }
 
+// unlockData for collecting fees only: DECREASE_LIQUIDITY (0x01) with liquidity 0 per position (fees accrue as the delta) + TAKE_PAIR (0x11)
+export function encodeCollectUnlockData(key: PoolKey, ids: bigint[], recipient: Address): Hex {
+  const decreases = ids.map((id) => encodeAbiParameters(
+    [{ type: 'uint256' }, { type: 'uint256' }, { type: 'uint128' }, { type: 'uint128' }, { type: 'bytes' }], [id, 0n, 0n, 0n, '0x'],
+  ))
+  const take = encodeAbiParameters([{ type: 'address' }, { type: 'address' }, { type: 'address' }], [key.currency0, key.currency1, recipient])
+  const actions = ('0x' + '01'.repeat(ids.length) + '11') as Hex
+  return encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [actions, [...decreases, take]])
+}
+
 // PositionInfo packing (v4-periphery PositionInfoLibrary): poolId (200 bits) | tickUpper (24) | tickLower (24) | hasSubscriber (8)
 export function decodePositionInfo(info: bigint) {
   const int24 = (x: bigint) => { const n = Number(x & 0xffffffn); return n >= 0x800000 ? n - 0x1000000 : n }

@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rh-uni</title>
+<style>
+  :root { --bg:#f7f6f2; --card:rgba(255,255,255,.78); --line:#deddd7; --line-soft:#ebe9e3; --text:#191918; --muted:#77756f; --accent:#d97757; --accent-dark:#bd5e40; --blue:#3565a8; --red:#c6534f; --green:#417a5b; --amber:#9a6a2c; --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace; --shadow:0 1px 2px rgba(32,30,26,.04),0 12px 32px rgba(32,30,26,.055) }
+  * { box-sizing:border-box }
+  html { min-width:720px; background:var(--bg) }
+  body { margin:0; min-height:100vh; background:radial-gradient(circle at 8% 0%,rgba(217,119,87,.09),transparent 28rem),radial-gradient(circle at 92% 8%,rgba(53,101,168,.06),transparent 24rem),var(--bg); color:var(--text); font:13px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; letter-spacing:-.005em }
+  header { display:flex; align-items:center; gap:5px; height:60px; padding:0 max(24px,calc((100vw - 1440px)/2)); background:rgba(247,246,242,.82); border-bottom:1px solid rgba(222,221,215,.8); backdrop-filter:blur(18px); position:sticky; top:0; z-index:5 }
+  header .brand { display:flex; align-items:center; gap:10px; font-size:15px; font-weight:650; margin-right:22px; letter-spacing:-.03em }
+  header .brand:before { content:"R"; display:grid; place-items:center; width:28px; height:28px; border-radius:9px; background:var(--text); color:#fff; font:600 13px/1 Georgia,serif; box-shadow:0 4px 12px rgba(25,25,24,.16) }
+  header a.tab { padding:7px 12px; border-radius:9px; color:var(--muted); text-decoration:none; cursor:pointer; transition:.16s ease }
+  header a.tab:hover { color:var(--text); background:rgba(255,255,255,.6) }
+  header a.tab.on { background:#fff; color:var(--text); box-shadow:0 1px 3px rgba(30,28,24,.09) }
+  header .wallet { margin-left:auto; padding:7px 11px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,.65); font-family:var(--mono); font-size:11px; color:var(--muted) }
+  header .wallet b { color:var(--text); font-weight:550 }
+  main { max-width:1488px; margin:auto; padding:26px 24px 42px }
+  .page { display:none } .page.on { display:block; animation:reveal .25s ease-out }
+  @keyframes reveal { from { opacity:0; transform:translateY(3px) } }
+  .grid { display:grid; grid-template-columns:minmax(360px,410px) minmax(0,1fr); gap:18px; align-items:start }
+  .card { background:var(--card); border:1px solid rgba(222,221,215,.9); border-radius:14px; padding:16px 18px; box-shadow:var(--shadow); backdrop-filter:blur(12px) }
+  .section { margin-bottom:20px }
+  .section:last-of-type { margin-bottom:8px }
+  .section h4,.cards .card h4,.run .head h4 { margin:0 0 10px; font-size:10px; font-weight:700; letter-spacing:.11em; color:#929089; text-transform:uppercase }
+  .row { display:grid; grid-template-columns:132px 1fr; gap:7px 12px; align-items:center; margin:9px 0 }
+  .row label { color:#393835; font-weight:480 }
+  .row .hint { grid-column:2; font-size:11px; line-height:1.45; color:#98958e; margin-top:-3px }
+  input[type=text],select { width:100%; min-height:35px; padding:7px 10px; border:1px solid #d9d7d0; border-radius:9px; color:var(--text); font:inherit; background:rgba(255,255,255,.85); transition:border-color .15s,box-shadow .15s }
+  input[type=text]:hover,select:hover { border-color:#c7c4bc }
+  input[type=text]:focus,select:focus { outline:none; border-color:#b76f57; box-shadow:0 0 0 3px rgba(217,119,87,.12) }
+  input[type=checkbox] { accent-color:var(--accent-dark) }
+  .btn { min-height:35px; padding:7px 13px; border:1px solid #d7d5cf; border-radius:9px; background:rgba(255,255,255,.82); color:var(--text); font:600 12px/1.3 inherit; cursor:pointer; white-space:nowrap; box-shadow:0 1px 2px rgba(25,25,24,.04); transition:.15s ease }
+  .btn:hover { background:#fff; border-color:#c7c4bd; transform:translateY(-1px) }
+  .btn:active { transform:translateY(0) }
+  .btn.primary { background:var(--text); color:#fff; border-color:var(--text) }
+  .btn.primary:hover { background:#33322f }
+  .btn.danger { background:var(--accent); color:#fff; border-color:var(--accent) }
+  .btn.danger:hover { background:var(--accent-dark); border-color:var(--accent-dark) }
+  .btn.sm { min-height:28px; padding:4px 9px; font-size:11px }
+  .btn:disabled { opacity:.4; cursor:not-allowed; transform:none }
+  .actions { display:flex; gap:8px; align-items:center; margin-top:14px; flex-wrap:wrap }
+  .cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:14px }
+  .cards .card { min-height:112px }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:5px 11px; font-size:12px }
+  .kv .k { color:var(--muted); white-space:nowrap } .kv .v { word-break:break-all; font-weight:510 }
+  .badge { display:inline-flex; align-items:center; padding:2px 7px; border-radius:999px; font-size:10px; line-height:17px; font-weight:650; white-space:nowrap }
+  .badge.ok { background:#e7f0e9; color:var(--green) } .badge.warn { background:#f6e8e5; color:var(--red) } .badge.wait { background:#efeee9; color:var(--muted) } .badge.run { background:#e7ecf4; color:var(--blue) } .badge.amber { background:#f4ecdd; color:var(--amber) }
+  .run { margin-bottom:14px }
+  .run .head { display:flex; align-items:center; gap:10px; margin-bottom:10px }
+  .run .head h4 { margin:0 }
+  .run .phase { color:var(--muted); font-size:12px }
+  .sp { flex:1 }
+  table { width:100%; border-collapse:separate; border-spacing:0; font-size:12px }
+  th { text-align:left; color:#85827b; font-weight:580; padding:8px 9px; border-bottom:1px solid var(--line) }
+  td { padding:9px; border-bottom:1px solid var(--line-soft); vertical-align:top }
+  tbody tr:last-child td { border-bottom:0 }
+  tbody tr { transition:background .12s }
+  tbody tr:hover td { background:rgba(255,255,255,.55) }
+  tr.sel td { background:#f2eee8 }
+  a.tx,.exp { color:var(--blue); text-decoration:none }
+  a.tx { font-family:var(--mono) }
+  pre.log { margin:0; background:#20201e; color:#deddd8; font:11.5px/1.65 var(--mono); padding:15px 17px; border:1px solid #292926; border-radius:11px; height:340px; overflow:auto; white-space:pre-wrap; word-break:break-all; box-shadow:inset 0 1px 0 rgba(255,255,255,.04) }
+  pre.log .err { color:#ef9388 } pre.log .ok { color:#93c6a2 } pre.log .dim { color:#8d8c87 }
+  .placeholder { margin:0 0 14px; padding:42px 24px; border:1px dashed #d4d1c9; border-radius:14px; color:var(--muted); text-align:center; background:rgba(255,255,255,.3) }
+  .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:14px; padding:12px 14px; border:1px solid var(--line); border-radius:13px; background:rgba(255,255,255,.5); flex-wrap:wrap }
+  .toolbar select { width:auto; min-height:30px; padding:4px 28px 4px 8px }
+  .rangebar { position:relative; height:7px; background:#e5e3dc; border-radius:99px; margin:8px 0 3px; width:220px; overflow:visible }
+  .rangebar .in { position:absolute; top:0; bottom:0; background:#dca58f; border-radius:99px }
+  .rangebar .now { position:absolute; top:-3px; width:2px; height:13px; background:var(--red); border-radius:2px }
+  .rangebar .now.ok { background:var(--green) }
+  .small { font-size:11px; color:var(--muted) }
+  .mono { font-family:var(--mono) }
+  .toast { position:fixed; right:22px; bottom:22px; background:#252522; color:#fff; padding:10px 14px; border:1px solid rgba(255,255,255,.1); border-radius:10px; font-size:12px; opacity:0; transform:translateY(8px); transition:.2s ease; pointer-events:none; max-width:420px; box-shadow:0 12px 36px rgba(0,0,0,.18) }
+  .toast.show { opacity:1; transform:translateY(0) }
+  .exp { cursor:pointer; display:inline-block; user-select:none; padding:2px 4px; margin-left:-4px; border-radius:5px }
+  .exp:hover { background:#ede9e2 }
+  tr.depthrow td { background:#f5f3ee; padding:10px 14px 14px }
+  .depth svg { width:100%; display:block }
+  .depth .legend { display:flex; gap:16px; font-size:11px; color:var(--muted); margin-top:5px }
+  .depth .legend i { display:inline-block; width:9px; height:9px; border-radius:3px; margin-right:5px; vertical-align:-1px }
+  ::selection { background:rgba(217,119,87,.2) }
+  ::-webkit-scrollbar { width:9px; height:9px } ::-webkit-scrollbar-thumb { background:#c9c7c0; border:3px solid transparent; border-radius:9px; background-clip:padding-box }
+  @media(max-width:1050px) { .grid { grid-template-columns:1fr } .cards { grid-template-columns:repeat(2,1fr) } }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">rh-uni</span>
+  <a class="tab on" data-page="launch">进场</a>
+  <a class="tab" data-page="positions">仓位</a>
+  <a class="tab" data-page="tasks">任务 <span class="badge run" id="jobCount" style="display:none">0</span></a>
+  <span class="wallet" id="walletChip">连接中…</span>
+</header>
+
+<main>
+<!-- ===================== 进场 ===================== -->
+<section class="page on" id="page-launch">
+<div class="grid">
+  <div>
+    <div class="card">
+      <div class="section">
+        <h4>代币与预算</h4>
+        <div class="row"><label>代币地址</label><input type="text" id="f-token" placeholder="0x…" spellcheck="false"></div>
+        <div class="row"><label>预算（USDG）</label><input type="text" id="f-usdg"><div class="hint">LP 总预算；换多少币、剩多少 USDG 自动算</div></div>
+      </div>
+      <div class="section">
+        <h4>池子</h4>
+        <div class="row"><label>池选择</label><select id="f-poolSelect"><option value="auto">auto：配置的池不存在就复用已有的 USDG 池</option><option value="exact">exact：只用下面的费率/间距</option></select></div>
+        <div class="row"><label>费率（%）</label><input type="text" id="f-fee"><div class="hint">5 = 5%，3.9999 = 3.9999%，0.3 = 0.3%</div></div>
+        <div class="row"><label>tick 间距</label><input type="text" id="f-spacing" placeholder="留空 = 费率/50"><div class="hint">只在建新池时生效；复用已有池以链上为准</div></div>
+        <div class="row"><label>最大偏离（%）</label><input type="text" id="f-maxDeviation"><div class="hint">池价与市场价偏离超过这个值先校正池价</div></div>
+      </div>
+      <div class="section">
+        <h4>区间</h4>
+        <div class="row"><label>区间写法</label><select id="f-rangeMode"><option value="pct">相对现价（百分比）</option><option value="price">绝对价格（USDG/代币）</option></select></div>
+        <div class="row" id="row-range"><label>区间（%）</label><input type="text" id="f-range" placeholder="-50%,+100%"><div class="hint">-50%,+100% 双边；只填 -50% = 只做下方（全 USDG）；只填 +100% = 只做上方（全代币）</div></div>
+        <div class="row" id="row-priceRange" style="display:none"><label>最低价,最高价</label><input type="text" id="f-priceRange" placeholder="0.006,0.01"><div class="hint">整体在现价下方 = 纯 USDG 等跌；整体在上方 = 全换成代币等涨</div></div>
+      </div>
+      <div class="section">
+        <h4>滑点</h4>
+        <div class="row"><label>换币滑点（%）</label><input type="text" id="f-slippage"></div>
+        <div class="row"><label>LP 余量（%）</label><input type="text" id="f-lpSlippage"><div class="hint">组 LP 时 amountMax 的余量</div></div>
+      </div>
+      <div class="section">
+        <h4>执行后</h4>
+        <div class="row"><label>继续监控</label><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="f-watch"> 组完 LP 后盯着池价，跳出区间自动撤退</label><div class="hint">监控参数（间隔 / 确认次数 / 上沿宽限）来自 params.env；也可以之后在仓位页单独开监控</div></div>
+      </div>
+      <div class="actions">
+        <button class="btn primary" id="btn-plan">计划（演练，不发交易）</button>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card" id="pools-card" style="display:none;margin-bottom:10px">
+      <h4 style="margin:0 0 6px;font-size:11px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase">该代币的全部池子 <span class="small" id="pools-note" style="text-transform:none;letter-spacing:0"></span></h4>
+      <table id="pools-table"><thead><tr><th>池子</th><th>费率 / 间距</th><th>池价（USDG/代币）</th><th>流动性</th><th>24h 成交</th><th>状态</th><th>pool id</th><th></th></tr></thead><tbody></tbody></table>
+    </div>
+    <div id="launch-empty" class="placeholder">填好代币地址，点"计划"先看方案；计划无误再执行。</div>
+    <div id="launch-plan" style="display:none">
+      <div class="cards">
+        <div class="card"><h4>换币</h4><div class="kv" id="card-swap"></div></div>
+        <div class="card"><h4>池子</h4><div class="kv" id="card-pool"></div></div>
+        <div class="card"><h4>仓位</h4><div class="kv" id="card-pos"></div></div>
+        <div class="card"><h4>钱包</h4><div class="kv" id="card-wallet"></div></div>
+      </div>
+      <div class="actions" style="margin:0 0 10px; justify-content:flex-end">
+        <span class="small" id="exec-hint"></span>
+        <button class="btn danger" id="btn-exec" disabled>执行这个计划</button>
+      </div>
+    </div>
+    <div class="card run">
+      <div class="head"><h4>运行</h4><span class="phase" id="phase-launch">空闲</span><span class="sp"></span><button class="btn sm" id="view-launch" style="display:none">在任务中查看</button><button class="btn sm" id="toggle-launch" style="display:none">展开日志</button><button class="btn sm" id="stop-launch" style="display:none">停止任务</button></div>
+      <div id="detail-launch" style="display:none">
+        <table id="run-table"><thead><tr><th style="width:45%">步骤</th><th>交易</th><th style="width:22%">gas</th></tr></thead><tbody></tbody></table>
+        <pre class="log" id="log-launch" style="margin-top:10px"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ===================== 仓位 ===================== -->
+<section class="page" id="page-positions">
+  <div class="toolbar">
+    <button class="btn" id="btn-rescan">重新扫描链上仓位</button>
+    <button class="btn" id="btn-refresh">刷新价格</button>
+    <label>自动刷新 <select id="p-auto"><option value="0">关</option><option value="5">5 秒</option><option value="15" selected>15 秒</option><option value="60">60 秒</option></select></label>
+    <span class="sp"></span>
+    <label>卖币走 <select id="p-via"><option value="best">best（Uniswap / OKX 取高者）</option><option value="uniswap">uniswap</option><option value="okx">okx</option></select></label>
+    <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="p-keep"> 只撤仓位，不卖币</label>
+  </div>
+  <div class="card">
+    <div id="pos-summary" class="small" style="margin-bottom:6px">加载中…</div>
+    <table id="pos-table">
+      <thead><tr><th>id</th><th>交易对</th><th>费率</th><th>状态</th><th>区间（USDG/代币）</th><th>持仓</th><th>价值</th><th>未领手续费</th><th>监控</th><th style="width:250px">撤退</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="card run" style="margin-top:12px">
+    <div class="head"><h4>运行</h4><span class="phase" id="phase-pos">空闲</span><span class="sp"></span><button class="btn sm" id="view-pos" style="display:none">在任务中查看</button><button class="btn sm" id="toggle-pos" style="display:none">展开日志</button><button class="btn sm" id="stop-pos" style="display:none">停止任务</button></div>
+    <div class="kv" id="card-exit"></div>
+    <div id="detail-pos" style="display:none"><pre class="log" id="log-pos" style="height:260px;margin-top:8px"></pre></div>
+  </div>
+</section>
+
+<!-- ===================== 任务 ===================== -->
+<section class="page" id="page-tasks">
+  <div class="card">
+    <table id="task-table">
+      <thead><tr><th>#</th><th>任务</th><th>类型</th><th>状态</th><th>仓位</th><th>开始</th><th>时长</th><th style="width:150px"></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="card run" style="margin-top:12px">
+    <div class="head"><h4>日志</h4><span class="phase" id="phase-task">选择一个任务</span><span class="sp"></span><button class="btn sm" id="stop-task" style="display:none">停止任务</button></div>
+    <pre class="log" id="log-task" style="height:420px"></pre>
+  </div>
+</section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s)
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+let STATE = {}
+const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 3500) }
+const api = async (path, body) => {
+  const r = await fetch(path, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : undefined)
+  const j = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`)
+  return j
+}
+
+// ---- 任务：id -> { meta, lines, partial, plan, loaded }。日志只保存在页面看过的任务上，其余按需从 /api/job 拉 ----
+const JOBS = new Map()
+const job = (id) => { if (!JOBS.has(id)) JOBS.set(id, { meta: null, lines: [], partial: '', plan: null, loaded: false }); return JOBS.get(id) }
+const running = () => [...JOBS.values()].filter((j) => j.meta && j.meta.running)
+async function ensureLoaded(id) {
+  const j = job(id)
+  if (j.loaded) return j
+  const r = await api('/api/job?id=' + id)
+  j.meta = r.job; j.lines = r.lines; j.partial = r.partial; j.plan = r.plan; j.loaded = true
+  return j
+}
+
+// ---- 日志面板：每个页面一个，各自盯着一个任务 ----
+const txRe = /^(\d\d:\d\d:\d\d) (.+?) (0x[0-9a-fA-F]{64}) \.\.\.(?: (成功)，(\d+) gas \$([\d.]+)| (失败\(revert\)))?$/
+class Pane {
+  constructor(name, opts = {}) {
+    this.log = $('#log-' + name); this.phase = $('#phase-' + name); this.stop = $('#stop-' + name); this.opts = opts; this.jobId = null; this.partialEl = null
+    this.stop.onclick = () => stopJob(this.jobId)
+    // 进场 / 仓位页只显示一行状态；日志默认折叠，可展开或跳到任务页看
+    this.view = $('#view-' + name); this.toggle = $('#toggle-' + name); this.detail = $('#detail-' + name)
+    if (this.view) this.view.onclick = () => { if (this.jobId !== null) { showPage('tasks'); selectTask(this.jobId) } }
+    if (this.toggle) this.toggle.onclick = () => { const open = this.detail.style.display === 'none'; this.detail.style.display = open ? '' : 'none'; this.toggle.textContent = open ? '收起日志' : '展开日志'; if (open) this.log.scrollTop = this.log.scrollHeight }
+  }
+  async show(id) {
+    this.jobId = id; this.log.textContent = ''; this.partialEl = null
+    if (this.opts.table) this.opts.table.innerHTML = ''
+    if (this.view) this.view.style.display = id === null ? 'none' : ''
+    if (this.toggle) this.toggle.style.display = id === null ? 'none' : ''
+    if (id === null) { this.phase.textContent = '空闲'; this.stop.style.display = 'none'; return }
+    const j = await ensureLoaded(id)
+    for (const t of j.lines) this.append(t, false, true)
+    if (j.partial) this.append(j.partial, true, true)
+    if (j.plan && this.opts.onPlan) this.opts.onPlan(j.plan, id)
+    this.log.scrollTop = this.log.scrollHeight
+    this.status()
+  }
+  append(text, partial, silent) {
+    if (this.partialEl) { this.partialEl.remove(); this.partialEl = null }
+    const el = document.createElement('span')
+    el.className = /错误[:：]|失败|回滚|放弃|触发撤退/.test(text) ? 'err' : /完成:|成功/.test(text) ? 'ok' : partial ? 'dim' : ''
+    el.textContent = text + (partial ? '' : '\n')
+    this.log.appendChild(el)
+    if (partial) this.partialEl = el
+    if (!silent) { this.log.scrollTop = this.log.scrollHeight; if (this.detail) this.status() }
+    const m = this.opts.table && text.match(txRe)
+    if (m) this.tx(m)
+  }
+  tx([, , label, hash, ok, gas, usd, fail]) {
+    let tr = this.opts.table.querySelector(`tr[data-hash="${hash}"]`)
+    if (!tr) { tr = document.createElement('tr'); tr.dataset.hash = hash; this.opts.table.appendChild(tr) }
+    const st = ok ? `<span class="badge ok">成功</span>` : fail ? `<span class="badge warn">回滚</span>` : `<span class="badge wait">等待确认…</span>`
+    tr.innerHTML = `<td>${esc(label)}</td><td><a class="tx" target="_blank" href="${STATE.explorer}/tx/${hash}">${hash.slice(0, 10)}…${hash.slice(-6)}</a> ${st}</td><td>${gas ? `${Number(gas).toLocaleString()} · $${usd}` : ''}</td>`
+  }
+  status() {
+    const j = job(this.jobId), m = j.meta; if (!m) return
+    const failed = !m.running && m.exitCode !== 0
+    const last = !this.detail ? '' : failed ? ([...j.lines].reverse().find((l) => /错误|Error|失败|回滚/.test(l)) ?? j.lines[j.lines.length - 1] ?? '') : (j.partial || j.lines[j.lines.length - 1] || '')
+    this.phase.innerHTML = `#${m.id} ${esc(m.label)}：${statusText(m)}` + (last ? ` <span class="small mono" style="margin-left:8px">${esc(last.length > 110 ? last.slice(0, 110) + '…' : last)}</span>` : '')
+    this.stop.style.display = m.running ? '' : 'none'
+  }
+}
+const statusText = (m) => m.running ? (m.phase === 'watch' ? '监控中' : '运行中') : m.exitCode === 0 ? '完成' : m.exitCode === null ? '已停止' : `失败（退出码 ${m.exitCode}）`
+const panes = {}
+
+// ---- 事件流 ----
+function connectEvents() {
+  const es = new EventSource('/api/events')
+  es.onmessage = (e) => {
+    const ev = JSON.parse(e.data)
+    const j = job(ev.job?.id ?? ev.job)
+    if (ev.type === 'status') { const was = j.meta; j.meta = ev.job; if (!was) j.loaded = true; onStatus(ev.job, was) }
+    else if (ev.type === 'log') { j.lines.push(ev.text); j.partial = ''; for (const p of Object.values(panes)) if (p.jobId === ev.job) p.append(ev.text, false) }
+    else if (ev.type === 'partial') { j.partial = ev.text; for (const p of Object.values(panes)) if (p.jobId === ev.job) p.append(ev.text, true) }
+    else if (ev.type === 'plan') { j.plan = ev.plan; if (panes.launch.jobId === ev.job) renderLaunchPlan(ev.plan, ev.job); if (panes.pos.jobId === ev.job) renderExitPlan(ev.plan) }
+  }
+  es.onerror = () => setTimeout(() => { es.close(); connectEvents() }, 3000)
+}
+function onStatus(m, was) {
+  for (const p of Object.values(panes)) if (p.jobId === m.id) p.status()
+  renderTasks(); updateExecButton()
+  const n = running().length
+  $('#jobCount').style.display = n ? '' : 'none'; $('#jobCount').textContent = n
+  // 任务结束 / 进入监控阶段：仓位和余额可能变了
+  if ((was && was.running && !m.running) || (m.phase === 'watch' && (!was || was.phase !== 'watch'))) { loadState(false); if ($('#page-positions').classList.contains('on')) loadPositions(m.kind !== 'watch' && !m.dryRun) }
+}
+async function stopJob(id) {
+  const m = job(id).meta
+  if (!m || !confirm(`停止任务 #${id}「${m.label}」？已发出的交易不受影响${m.kind === 'watch' || m.phase === 'watch' ? '；停止后该仓位不再自动撤退' : ''}。`)) return
+  try { await api('/api/stop', { id }) } catch (e) { toast(e.message) }
+}
+
+// ---- 页面切换 ----
+document.querySelectorAll('a.tab').forEach((a) => a.onclick = () => showPage(a.dataset.page))
+function showPage(p) {
+  document.querySelectorAll('a.tab').forEach((x) => x.classList.toggle('on', x.dataset.page === p))
+  document.querySelectorAll('.page').forEach((x) => x.classList.toggle('on', x.id === 'page-' + p))
+  if (p === 'positions') loadPositions(false)
+  if (p === 'tasks') renderTasks()
+}
+
+// ---- 钱包 / 默认值 ----
+async function loadState(fillForm) {
+  try { STATE = await api('/api/state') } catch (e) { $('#walletChip').textContent = '服务不可用: ' + e.message; return }
+  const w = STATE.wallet
+  $('#walletChip').innerHTML = w ? `<b>${w.slice(0, 6)}…${w.slice(-4)}</b> · ${STATE.usdg} USDG · ${STATE.eth} ETH · ETH $${STATE.ethPrice}` : '.env 里没有 PRIVATE_KEY，只能看不能操作'
+  for (const m of STATE.jobs) { const j = job(m.id); const was = j.meta; j.meta = m; if (was?.running !== m.running) onStatus(m, was) }
+  if (fillForm) {
+    const p = STATE.params
+    $('#f-usdg').value = p.USDG_AMOUNT || '25'; $('#f-fee').value = p.POOL_FEE || '5'; $('#f-spacing').value = p.TICK_SPACING || ''
+    $('#f-poolSelect').value = p.POOL_SELECT || 'auto'; $('#f-maxDeviation').value = p.MAX_DEVIATION || '10'
+    $('#f-range').value = p.RANGE || '-50%,+100%'; $('#f-priceRange').value = p.PRICE_RANGE || ''
+    $('#f-rangeMode').value = p.PRICE_RANGE ? 'price' : 'pct'; onRangeMode()
+    $('#f-slippage').value = p.SWAP_SLIPPAGE || '5'; $('#f-lpSlippage').value = p.LP_SLIPPAGE || '5'
+    $('#p-via').value = p.EXIT_SWAP_VIA || 'best'
+    $('#btn-plan').disabled = !w
+    if (!STATE.uniswapKey) toast('.env 里没有 UNISWAP_API_KEY，进场/撤退会失败')
+    renderTasks()
+  }
+}
+function onRangeMode() { const m = $('#f-rangeMode').value; $('#row-range').style.display = m === 'pct' ? '' : 'none'; $('#row-priceRange').style.display = m === 'price' ? '' : 'none' }
+$('#f-rangeMode').onchange = onRangeMode
+
+// ---- 进场：计划（演练任务）-> 执行（真实任务）。执行按钮只在"当前参数的演练成功"后可用 ----
+let plannedJob = null, plannedSig = null
+const form = (dryRun) => ({
+  token: $('#f-token').value.trim(), usdg: $('#f-usdg').value, fee: $('#f-fee').value, spacing: $('#f-spacing').value, poolSelect: $('#f-poolSelect').value,
+  maxDeviation: $('#f-maxDeviation').value, rangeMode: $('#f-rangeMode').value, range: $('#f-range').value, priceRange: $('#f-priceRange').value,
+  slippage: $('#f-slippage').value, lpSlippage: $('#f-lpSlippage').value, watch: $('#f-watch').checked, dryRun,
+})
+const sig = (b) => JSON.stringify({ ...b, dryRun: undefined, watch: undefined })
+document.querySelectorAll('#page-launch input, #page-launch select').forEach((el) => el.addEventListener('input', updateExecButton))
+function updateExecButton() {
+  const j = plannedJob !== null ? job(plannedJob) : null
+  const ok = j && j.meta && !j.meta.running && j.meta.exitCode === 0 && j.plan && plannedSig === sig(form(true))
+  $('#btn-exec').disabled = !ok || !STATE.wallet
+  $('#exec-hint').textContent = !j ? '' : j.meta?.running ? '演练进行中…' : ok ? '' : j.meta && j.meta.exitCode !== 0 ? '演练失败，修改参数后重新计划' : '参数改过了，请重新计划'
+}
+$('#btn-plan').onclick = async () => {
+  const b = form(true)
+  if (!/^0x[0-9a-fA-F]{40}$/.test(b.token)) return toast('请填写代币地址')
+  try {
+    const r = await api('/api/launch', b)
+    plannedJob = r.job.id; plannedSig = sig(b)
+    $('#launch-plan').style.display = 'none'; $('#launch-empty').style.display = ''
+    job(r.job.id).meta = r.job; panes.launch.show(r.job.id); updateExecButton()
+  } catch (e) { toast(e.message) }
+}
+$('#btn-exec').onclick = async () => {
+  const b = form(false), P = job(plannedJob).plan
+  if (!P || sig(b) !== plannedSig) return toast('请先计划')
+  const s = P.swap ? `换币 ≈${P.swap.usdgIn} USDG -> ≈${P.swap.out} ${P.token.symbol}（${P.swap.via}）\n` : '无需换币\n'
+  const msg = `将在主网发送交易：\n\n${s}LP ≈${P.lp.usdg} USDG + ${P.lp.token} ${P.token.symbol}\n区间 ${P.range.lo} .. ${P.range.hi} USDG/${P.token.symbol}（${P.range.label}）\n池 ${P.pool.fee}% / ${P.pool.spacing}（${P.pool.state === 'reuse' ? '复用' : '新建'}）${P.correction ? '\n\n注意：' + P.correction : ''}${b.watch ? '\n\n执行完成后继续监控，跳出区间自动撤退。' : ''}\n\n确认执行？`
+  if (!confirm(msg)) return
+  try {
+    const r = await api('/api/launch', b)
+    plannedJob = null; plannedSig = null
+    job(r.job.id).meta = r.job; panes.launch.show(r.job.id); updateExecButton()
+  } catch (e) { toast(e.message) }
+}
+const kv = (pairs) => pairs.filter((p) => p[1] !== undefined && p[1] !== null && p[1] !== '').map(([k, v]) => `<span class="k">${esc(k)}</span><span class="v">${v}</span>`).join('')
+// 输入代币地址后列出它已有的 USDG 池（GeckoTerminal 列表 + 链上池价），可一键选用
+let poolsTimer = null, poolsToken = ''
+$('#f-token').addEventListener('input', () => { clearTimeout(poolsTimer); poolsTimer = setTimeout(loadPools, 600) })
+async function loadPools() {
+  const t = $('#f-token').value.trim()
+  if (!/^0x[0-9a-fA-F]{40}$/.test(t)) { $('#pools-card').style.display = 'none'; poolsToken = ''; return }
+  if (t.toLowerCase() === poolsToken) return
+  poolsToken = t.toLowerCase()
+  const tb = $('#pools-table tbody'); tb.innerHTML = ''
+  $('#pools-card').style.display = ''; $('#pools-note').textContent = '查询中…'
+  try {
+    const r = await api('/api/pools?token=' + t)
+    if (poolsToken !== t.toLowerCase()) return
+    $('#pools-note').textContent = r.pools.length ? `${r.symbol}：${r.pools.length} 个（按流动性排序，数据来自 GeckoTerminal）` : `${r.symbol}：GeckoTerminal 上没有这个代币的池子，会按下面的费率/间距新建`
+    r.pools.forEach((p, i) => {
+      const tr = document.createElement('tr')
+      if (!p.usable) tr.style.color = 'var(--muted)'
+      if (i >= 10) { tr.className = 'pool-more'; tr.style.display = 'none' } // 只展示流动性前 10 个，其余折叠
+      tr.innerHTML = `<td>${esc(p.name)}<br><span class="small">${esc(p.dex)}</span></td><td>${p.fee ? p.fee + '%' : '—'}${p.spacing ? ' / ' + p.spacing : ''}</td><td>${p.price ?? '—'}</td><td>$${p.liquidityUsd.toLocaleString('en-US')}</td><td>$${p.volume24h.toLocaleString('en-US')}</td>
+        <td><span class="badge ${p.usable ? 'ok' : 'wait'}">${esc(p.status)}</span></td>
+        <td class="mono small" title="${p.id}">${p.id.slice(0, 10)}…${p.id.slice(-6)}</td><td>${p.usable ? `<button class="btn sm" data-fee="${p.fee}" data-spacing="${p.spacing}">用这个池</button>` : ''}</td>`
+      tb.appendChild(tr)
+    })
+    if (r.pools.length > 10) {
+      const tr = document.createElement('tr')
+      tr.innerHTML = `<td colspan="8" style="text-align:center"><a href="#" id="pools-more" style="color:var(--blue)">显示其余 ${r.pools.length - 10} 个</a></td>`
+      tr.querySelector('a').onclick = (e) => { e.preventDefault(); const rows = tb.querySelectorAll('.pool-more'); const hidden = rows[0].style.display === 'none'; rows.forEach((x) => (x.style.display = hidden ? '' : 'none')); e.target.textContent = hidden ? '只看前 10 个' : `显示其余 ${r.pools.length - 10} 个` }
+      tb.appendChild(tr)
+    }
+  } catch (e) { $('#pools-note').textContent = '查询失败: ' + e.message }
+}
+$('#pools-table').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return
+  $('#f-fee').value = b.dataset.fee; $('#f-spacing').value = b.dataset.spacing; $('#f-poolSelect').value = 'exact'
+  updateExecButton(); toast(`已选用 ${b.dataset.fee}% / ${b.dataset.spacing} 池（池选择 = exact）`)
+}
+function renderLaunchPlan(p, id) {
+  if (p.kind !== 'launch') return
+  $('#launch-empty').style.display = 'none'; $('#launch-plan').style.display = ''
+  $('#launch-plan').dataset.job = id
+  const sym = p.token.symbol
+  $('#card-swap').innerHTML = kv([
+    ['动作', p.swap ? `${p.swap.usdgIn} USDG → ≈${p.swap.out} ${sym}` : '无需换币'],
+    ['路由', p.swap ? `${p.swap.via}（${esc(p.swap.text)}）` : ''],
+    ['市场价', `${p.market.price} USDG/${sym}（${p.market.via}）`],
+    ['校正', p.correction ? `<span style="color:var(--red)">${esc(p.correction)}</span>` : ''],
+  ])
+  $('#card-pool').innerHTML = kv([
+    ['交易对', `${sym}/USDG`], ['费率 / 间距', `${p.pool.fee}% / ${p.pool.spacing}`],
+    ['状态', p.pool.state === 'reuse' ? `复用已有池，池价 ${p.pool.price}（偏离市场 ${p.pool.deviation}）` : '新建（初始价 = 市场价）'],
+    ['pool id', `<span class="mono small">${p.pool.id}</span>`],
+  ])
+  $('#card-pos').innerHTML = kv([
+    ['区间', `${p.range.lo} .. ${p.range.hi} USDG/${sym}<br><span class="small">${esc(p.range.label)}，ticks [${p.range.tickLower}, ${p.range.tickUpper}]</span>`],
+    ['LP 投入', `≈${p.lp.usdg} USDG + ${p.lp.token} ${sym}${p.lp.held !== '0' ? `<br><span class="small">钱包已持有 ${p.lp.held} ${sym}</span>` : ''}`],
+    ['滑点', `换币 ${p.slippage.swap}% / LP ${p.slippage.lp}%`],
+  ])
+  $('#card-wallet').innerHTML = kv([
+    ['地址', `<span class="mono small">${p.wallet}</span>`], ['余额', `${p.usdg} USDG · ${p.eth} ETH`], ['ETH 价', `$${p.ethPrice}`],
+    ['代币', `${esc(p.token.name)}（${sym}，精度 ${p.token.decimals}）`],
+  ])
+  updateExecButton()
+}
+function renderExitPlan(p) {
+  if (p.kind === 'collect') {
+    $('#card-exit').innerHTML = kv([['领手续费', `仓位 ${p.positions.map((x) => '#' + x).join(', ')}，${p.txCount} 笔交易，≈${p.expectUsdg} USDG + ${p.expectToken} ${p.token.symbol}，本金不动`]])
+    return
+  }
+  if (p.kind !== 'exit') return
+  $('#card-exit').innerHTML = kv([
+    ['仓位', p.positions.map((x) => `#${x.id} ${p.token.symbol}/USDG ${x.fee}% ≈${x.usdg} USDG + ${x.token} ${p.token.symbol}${x.kind === 'bridge' ? '（过渡）' : ''}`).join('<br>')],
+    ['撤仓', `${p.positions.length} 个仓位，${p.txCount} 笔交易，拿回 ≈${p.expectUsdg} USDG + ${p.expectToken} ${p.token.symbol}`],
+    ['卖币', p.keepTokens ? '不卖，代币留在钱包' : p.offers.length ? `≈${p.sellAmount} ${p.token.symbol}：${p.offers.map((o) => esc(o.text)).join('；')}，走 ${p.offers[0].via}` : '无'],
+  ])
+}
+
+// ---- 仓位 ----
+let POS = [], posTimer = null
+const expanded = new Set() // 展开了深度图的仓位 id
+async function loadPositions(full) {
+  const sum = $('#pos-summary')
+  if (full) sum.textContent = '扫描链上仓位中（首次几秒）…'
+  try { POS = (await api('/api/positions' + (full ? '?full=1' : ''))).positions } catch (e) { sum.textContent = '加载失败: ' + e.message; return }
+  const total = POS.reduce((s, p) => s + Number(p.value), 0), fees = POS.reduce((s, p) => s + Number(p.feesUsd), 0)
+  sum.textContent = `${POS.length} 个仓位，本金按当前池价折合 ≈$${total.toFixed(2)}，未领手续费 ≈$${fees.toFixed(2)} · ${new Date().toLocaleTimeString()}`
+  const tb = $('#pos-table tbody'); tb.innerHTML = ''
+  for (const p of POS) {
+    const lo = Math.log(Number(p.lo)), hi = Math.log(Number(p.hi)), cur = Math.log(Number(p.price))
+    const span = (hi - lo) * 1.6, left = lo - (hi - lo) * 0.3
+    const pos = (x) => Math.max(0, Math.min(100, ((x - left) / span) * 100))
+    const w = p.watchJob !== null ? job(p.watchJob).meta : null
+    const open = expanded.has(p.id)
+    const tr = document.createElement('tr')
+    tr.innerHTML = `
+      <td class="mono"><span class="exp" data-act="toggle" data-id="${p.id}" title="展开/收起池子流动性分布">${open ? '▾' : '▸'} #${p.id}</span>${p.kind === 'bridge' ? '<br><span class="small">过渡仓位</span>' : ''}</td>
+      <td>${esc(p.symbol)}/USDG</td><td>${p.fee}%</td>
+      <td><span class="badge ${p.inRange ? 'ok' : 'warn'}">${p.inRange ? '区间内' : Number(p.price) > Number(p.hi) ? '涨破上沿' : '跌破下沿'}</span></td>
+      <td>${p.lo} – ${p.hi}<br><span class="small">现价 ${p.price}</span>
+        <div class="rangebar" title="竖线 = 现价"><div class="in" style="left:${pos(lo)}%;width:${pos(hi) - pos(lo)}%"></div><div class="now ${p.inRange ? 'ok' : ''}" style="left:${pos(cur)}%"></div></div></td>
+      <td>${p.usdg} USDG<br>${p.tokenAmount} ${esc(p.symbol)}</td>
+      <td>$${p.value}</td>
+      <td>$${p.feesUsd}<br><span class="small">${p.feesUsdg} USDG<br>${p.feesToken} ${esc(p.symbol)}</span><br><button class="btn sm" data-act="collect" data-id="${p.id}" data-fees="$${p.feesUsd}" ${Number(p.feesUsd) < 0.01 ? 'disabled' : ''} title="只领手续费，本金不动">领取</button></td>
+      <td>${p.watchJob !== null
+        ? `<span class="badge run" title="${esc(w?.label ?? '')}">监控中 #${p.watchJob}</span><br><button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button> <button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}">停止</button>`
+        : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${esc(p.symbol)}">开始监控</button>`}</td>
+      <td><button class="btn sm" data-act="dry" data-id="${p.id}">预览</button>
+          <button class="btn sm danger" data-act="exit" data-id="${p.id}">撤退</button>
+          <button class="btn sm" data-act="exit-token" data-token="${p.token}" data-sym="${esc(p.symbol)}" title="撤掉该代币全部仓位并卖光钱包里的币">撤全部 ${esc(p.symbol)}</button></td>`
+    tb.appendChild(tr)
+    if (open) {
+      const dr = document.createElement('tr'); dr.className = 'depthrow'
+      dr.innerHTML = `<td colspan="10"><div class="depth" id="depth-${p.id}">加载池子流动性分布…</div></td>`
+      tb.appendChild(dr)
+      loadDepth(p)
+    }
+  }
+  if (!POS.length) tb.innerHTML = '<tr><td colspan="10" class="placeholder">钱包名下没有 USDG 池的仓位</td></tr>'
+}
+async function loadDepth(p) {
+  const el = $('#depth-' + p.id); if (!el) return
+  try { renderDepth(el, await api('/api/depth?id=' + p.id), p) } catch (e) { el.textContent = '深度图加载失败: ' + e.message }
+}
+// 池子流动性分布：横轴对数价格（USDG/代币），柱高 = 该价格段的流动性按现价折算的美元价值；蓝 = 现价下方（USDG 侧），绿 = 现价上方（代币侧）；淡色 = 你的区间外
+const fmtP = (x) => String(Number(Number(x).toPrecision(6)))
+const fmtN = (x) => x >= 1000 ? Math.round(x).toLocaleString('en-US') : Number(x.toPrecision(4)).toString()
+function renderDepth(el, d, p) {
+  if (!d.bars.length) { el.textContent = '这个价格范围内没有流动性'; return }
+  const W = Math.max(600, el.clientWidth - 8), H = 210, top = 22, bottom = 44, base = H - bottom
+  const lnMin = Math.log(d.bars[0].pLo), lnMax = Math.log(d.bars[d.bars.length - 1].pHi)
+  const x = (price) => ((Math.log(price) - lnMin) / (lnMax - lnMin)) * W
+  const maxUsd = Math.max(...d.bars.map((b) => b.usd)) || 1
+  const h = (v) => (v / maxUsd) * (base - top)
+  const t = (str, px, py, extra = '') => `<text x="${px}" y="${py}" font-size="11" fill="#6b7280" ${extra}>${esc(str)}</text>`
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="system-ui,sans-serif">`
+  s += `<rect x="${x(d.posLo)}" y="${top}" width="${x(d.posHi) - x(d.posLo)}" height="${base - top}" fill="#e2f5e9"/>`
+  for (const b of d.bars) {
+    const x0 = x(b.pLo), w = Math.max(1, x(b.pHi) - x0 - 1), hu = h(b.usdgUsd), ht = h(b.tokenUsd), op = b.inPos ? 1 : 0.35
+    s += `<g opacity="${op}"><title>${esc(`${fmtP(b.pLo)} ~ ${fmtP(b.pHi)} USDG/${d.symbol}\n${fmtN(b.token)} ${d.symbol} + ${fmtN(b.usdg)} USDG\n≈ $${fmtN(b.usd)}`)}</title>`
+    if (hu > 0) s += `<rect x="${x0}" y="${base - hu}" width="${w}" height="${hu}" fill="#2f6fed"/>`
+    if (ht > 0) s += `<rect x="${x0}" y="${base - hu - ht}" width="${w}" height="${ht}" fill="#1f9d55"/>`
+    s += `</g>`
+  }
+  const xc = x(d.price)
+  s += `<line x1="${xc}" y1="${top - 6}" x2="${xc}" y2="${base}" stroke="#1d2129" stroke-dasharray="3,3"/>`
+  s += t(`现价 ${fmtP(d.price)} USDG`, Math.min(xc + 4, W - 130), top - 8, 'fill="#1d2129"')
+  for (let k = 0; k <= 4; k++) { const price = Math.exp(lnMin + ((lnMax - lnMin) * k) / 4); s += t(fmtP(price), x(price), base + 14, `text-anchor="${k === 0 ? 'start' : k === 4 ? 'end' : 'middle'}"`) }
+  s += t(`MIN ${fmtP(d.posLo)}`, x(d.posLo), base + 32, 'fill="#1f9d55" font-weight="600"') + t(`MAX ${fmtP(d.posHi)}`, x(d.posHi), base + 32, 'fill="#1f9d55" font-weight="600" text-anchor="end"')
+  s += `</svg>`
+  el.innerHTML = s + `<div class="legend"><span><i style="background:#1f9d55"></i>${esc(d.symbol)}（现价上方）</span><span><i style="background:#2f6fed"></i>USDG（现价下方）</span><span><i style="background:#c8d3e6"></i>你的区间外</span><span>池内活跃流动性 ${d.initializedTicks} 个已初始化 tick · 鼠标悬停看每段数量</span></div>`
+}
+$('#pos-table').onclick = async (e) => {
+  const tg = e.target.closest('[data-act=toggle]')
+  if (tg) { const id = tg.dataset.id; expanded.has(id) ? expanded.delete(id) : expanded.add(id); loadPositions(false); return }
+  const b = e.target.closest('button'); if (!b) return
+  const d = b.dataset, via = $('#p-via').value, keepTokens = $('#p-keep').checked
+  try {
+    if (d.act === 'watch-log') { showPage('tasks'); selectTask(Number(d.job)); return }
+    if (d.act === 'watch-stop') { await stopJob(Number(d.job)); return }
+    let r
+    if (d.act === 'watch') r = await api('/api/watch', { token: d.token, positions: d.id, symbol: d.sym })
+    else if (d.act === 'collect') { if (!confirm(`领取仓位 #${d.id} 的未领手续费（≈${d.fees}），本金不动，1 笔交易。\n\n确认在主网发送交易？`)) return; $('#card-exit').innerHTML = ''; r = await api('/api/collect', { positions: d.id, dryRun: false }) }
+    else if (d.act === 'dry') { $('#card-exit').innerHTML = ''; r = await api('/api/exit', { positions: d.id, via, keepTokens, dryRun: true }) }
+    else if (d.act === 'exit') { if (!confirm(`撤退仓位 #${d.id}：撤仓 + 领手续费${keepTokens ? '' : ' + 把撤出来的币卖成 USDG'}。\n\n确认在主网发送交易？`)) return; $('#card-exit').innerHTML = ''; r = await api('/api/exit', { positions: d.id, via, keepTokens, dryRun: false }) }
+    else if (d.act === 'exit-token') { if (!confirm(`撤掉 ${d.sym} 的全部仓位${keepTokens ? '' : '，并把钱包里全部 ' + d.sym + ' 卖成 USDG'}。\n\n确认在主网发送交易？`)) return; $('#card-exit').innerHTML = ''; r = await api('/api/exit', { token: d.token, symbol: d.sym, via, keepTokens, dryRun: false }) }
+    if (r) { job(r.job.id).meta = r.job; panes.pos.show(r.job.id); setTimeout(() => loadPositions(false), 800) }
+  } catch (err) { toast(err.message) }
+}
+$('#btn-rescan').onclick = () => loadPositions(true)
+$('#btn-refresh').onclick = () => loadPositions(false)
+function setAuto() { clearInterval(posTimer); const s = Number($('#p-auto').value); if (s > 0) posTimer = setInterval(() => { if ($('#page-positions').classList.contains('on')) loadPositions(false) }, s * 1000) }
+$('#p-auto').onchange = setAuto
+
+// ---- 任务列表 ----
+const fmtDur = (ms) => ms < 60000 ? `${Math.round(ms / 1000)}s` : ms < 3600000 ? `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s` : `${(ms / 3600000).toFixed(1)}h`
+function renderTasks() {
+  const tb = $('#task-table tbody'); tb.innerHTML = ''
+  const list = [...JOBS.values()].filter((j) => j.meta).map((j) => j.meta).sort((a, b) => (a.running === b.running ? b.id - a.id : a.running ? -1 : 1))
+  for (const m of list) {
+    const tr = document.createElement('tr')
+    if (panes.task?.jobId === m.id) tr.className = 'sel'
+    const st = m.running ? (m.phase === 'watch' ? 'run' : 'amber') : m.exitCode === 0 ? 'ok' : 'warn'
+    tr.innerHTML = `<td class="mono">${m.id}</td><td>${esc(m.label)}</td><td>${{ launch: '进场', exit: '撤退', watch: '监控' }[m.kind]}${m.dryRun ? '（演练）' : ''}</td>
+      <td><span class="badge ${st}">${statusText(m)}</span></td><td class="mono">${m.positions.map((x) => '#' + x).join(' ') || ''}</td>
+      <td>${new Date(m.startedAt).toLocaleTimeString()}</td><td>${fmtDur((m.endedAt ?? Date.now()) - m.startedAt)}</td>
+      <td><button class="btn sm" data-act="view" data-id="${m.id}">查看日志</button> ${m.running ? `<button class="btn sm" data-act="stop" data-id="${m.id}">停止</button>` : ''}</td>`
+    tb.appendChild(tr)
+  }
+  if (!list.length) tb.innerHTML = '<tr><td colspan="8" class="placeholder">还没有任务</td></tr>'
+}
+$('#task-table').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.act === 'view') selectTask(Number(b.dataset.id)); else stopJob(Number(b.dataset.id)) }
+function selectTask(id) { panes.task.show(id); renderTasks() }
+setInterval(() => { if ($('#page-tasks').classList.contains('on') && running().length) renderTasks() }, 5000)
+
+panes.launch = new Pane('launch', { table: $('#run-table tbody'), onPlan: renderLaunchPlan })
+panes.pos = new Pane('pos', { onPlan: renderExitPlan })
+panes.task = new Pane('task')
+loadState(true).then(() => { connectEvents(); setAuto(); setInterval(() => loadState(false), 30000) })
+</script>
+</body>
+</html>
