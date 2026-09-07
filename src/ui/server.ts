@@ -5,10 +5,10 @@ import { readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { formatEther, isAddress, parseAbi, type Address } from 'viem'
+import { createPublicClient, erc20Abi as erc20EventsAbi, formatEther, http, isAddress, parseAbi, parseAbiItem, parseEventLogs, type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import * as v4 from '../v4.ts'
-import { POSM, STATE_VIEW, USDG, EXPLORER, env, erc20Abi, ethPriceUsd, log, makeClients, p6, posmAbi, stateViewAbi, tokenMeta, trim } from '../common.ts'
+import { POOL_MANAGER, POSM, PUBLIC_RPC, STATE_VIEW, USDG, EXPLORER, chain, env, erc20Abi, ethPriceUsd, log, makeClients, p6, posmAbi, stateViewAbi, tokenMeta, trim } from '../common.ts'
 import { findPositions, positionFees, same, type Position } from '../exit.ts'
 import { listTokenPools } from '../pools.ts'
 
@@ -88,6 +88,41 @@ async function metaOf(token: Address) { let m = meta.get(token.toLowerCase()); i
 // 池子原始价格 -> 每个代币多少 USDG
 const priceFn = (tokenIs1: boolean, decimals: number) => { const [dec0, dec1] = tokenIs1 ? [6, decimals] : [decimals, 6]; return (t: number) => { const h = v4.priceAtTick(t) * 10 ** (dec0 - dec1); return tokenIs1 ? 1 / h : h } }
 const uncollectedFees = (p: Position): Promise<[bigint, bigint]> => positionFees(clients!.pub, p).catch((e) => { log(`仓位 ${p.id} 手续费读取失败: ${String(e?.message).slice(0, 120)}`); return [0n, 0n] })
+
+// ---- 入场信息（不会变，算一次缓存）：mint 区块时间 -> 持仓时间；mint 交易里存入 PoolManager 的两种币按当时池价折成 USDG -> 入场价值，用来算 uPNL ----
+// mint 日志（PositionManager 从 0x0 转给钱包的 NFT）用公共节点全链扫一次；池价用 Alchemy 读 mint 区块的历史状态
+type Entry = { mintedAt: number; entryUsd: number } | null
+const entryCache = new Map<string, Entry>()
+let mintLogs: Promise<Map<string, { block: bigint; tx: Hex }>> | null = null
+const scanMints = () => (mintLogs = (async () => {
+  const scan = createPublicClient({ chain, transport: http(PUBLIC_RPC) })
+  const logs = await scan.getLogs({ address: POSM, event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 indexed id)'), args: { from: v4.ZERO_ADDRESS, to: clients!.wallet }, fromBlock: 0n })
+  return new Map(logs.map((l) => [l.args.id!.toString(), { block: l.blockNumber, tx: l.transactionHash }]))
+})())
+async function entryOf(p: Position, decimals: number, priceAt: (t: number) => number): Promise<Entry> {
+  const k = p.id.toString()
+  if (entryCache.has(k)) return entryCache.get(k)!
+  let ml = (await (mintLogs ?? scanMints())).get(k)
+  if (!ml) ml = (await scanMints()).get(k) // 可能是刚建的仓位，重扫一次；还没有就是别处转进来的，记为未知
+  let e: Entry = null
+  if (ml) {
+    const { pub, wallet } = clients!
+    const { token } = tokenOf(p)
+    const [block, rc, [, tick]] = await Promise.all([
+      pub.getBlock({ blockNumber: ml.block }), pub.getTransactionReceipt({ hash: ml.tx }),
+      pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [v4.poolId(p.key)], blockNumber: ml.block }),
+    ])
+    let usdg = 0n, tok = 0n
+    for (const t of parseEventLogs({ abi: erc20EventsAbi, eventName: 'Transfer', logs: rc.logs })) {
+      if (!same(t.args.from, wallet) || !same(t.args.to, POOL_MANAGER)) continue
+      if (same(t.address, USDG)) usdg += t.args.value
+      else if (same(t.address, token)) tok += t.args.value
+    }
+    e = { mintedAt: Number(block.timestamp) * 1000, entryUsd: Number(usdg) / 1e6 + (Number(tok) / 10 ** decimals) * priceAt(tick) }
+  }
+  entryCache.set(k, e)
+  return e
+}
 async function listPositions(full: boolean) {
   if (!clients) return []
   const { pub } = clients
@@ -109,6 +144,7 @@ async function listPositions(full: boolean) {
     const { tokenIs1, token } = tokenOf(p)
     const [m, [f0, f1]] = await Promise.all([metaOf(token), uncollectedFees(p)])
     const priceAt = priceFn(tokenIs1, m.decimals)
+    const entry = await entryOf(p, m.decimals, priceAt).catch((e) => { log(`仓位 ${p.id} 入场信息读取失败: ${String(e?.message).slice(0, 120)}`); return null })
     const [u, t] = tokenIs1 ? [p.amount0, p.amount1] : [p.amount1, p.amount0]
     const [fu, ft] = tokenIs1 ? [f0, f1] : [f1, f0]
     const [lo, hi] = [priceAt(p.tickLower), priceAt(p.tickUpper)].sort((a, b) => a - b)
@@ -122,6 +158,9 @@ async function listPositions(full: boolean) {
       tickLower: p.tickLower, tickUpper: p.tickUpper, tick: p.tick, lo: p6(lo), hi: p6(hi), price: p6(price), inRange: p.tick >= p.tickLower && p.tick < p.tickUpper,
       usdg: trim(u, 6), tokenAmount: trim(t, m.decimals), value: usd(u, t), liquidity: p.liquidity.toString(), watchJob: watcher?.id ?? null,
       feesUsdg: trim(fu, 6), feesToken: trim(ft, m.decimals), feesUsd: usd(fu, ft),
+      // 持仓时间与 uPNL：现在的持仓价值 + 未领手续费 - 入场价值（入场价值 = mint 时存入的币按当时池价折算，不含换币时的手续费/滑点）
+      mintedAt: entry?.mintedAt ?? null, entryUsd: entry ? entry.entryUsd.toFixed(2) : null,
+      pnlUsd: entry ? (Number(usd(u, t)) + Number(usd(fu, ft)) - entry.entryUsd).toFixed(2) : null,
     }
   }))
 }

@@ -15,6 +15,7 @@ export const CHAIN_ID = 4663
 export const USDG = '0x5fc5360d0400a0fd4f2af552add042d716f1d168' as Address
 export const WETH = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73' as Address
 export const PERMIT2 = '0x000000000022D473030F116dDEE9F6B43aC78BA3' as Address
+export const POOL_MANAGER = '0x8366a39cc670b4001a1121b8f6a443a643e40951' as Address
 export const POSM = '0x58daec3116aae6D93017bAAea7749052E8a04fA7' as Address
 export const STATE_VIEW = '0xf3334192d15450cdd385c8b70e03f9a6bd9e673b' as Address
 export const QUOTER = '0x8dc178efb8111bb0973dd9d722ebeff267c98f94' as Address
