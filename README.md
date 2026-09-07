@@ -62,7 +62,7 @@ npm run ui          # 打开 http://127.0.0.1:3000（端口可用 UI_PORT 改）
 | `PRIVATE_KEY` | 付款钱包私钥（`0x` 开头 64 位十六进制）。钱包里要有 `USDG_AMOUNT` 的 USDG 和少量 ETH |
 | `UNISWAP_API_KEY` | Uniswap Trading API key，只用于问路由/拿交易数据，和钱包无关。免费申请：https://developers.uniswap.org/dashboard |
 | `OKX_API_KEY` `OKX_SECRET_KEY` `OKX_API_PASSPHRASE` | 可选。撤退卖币时用 OKX DEX 聚合器和 Uniswap 比价（实测常比 Uniswap 多换回 1~2%）。在 https://web3.okx.com/onchainos 申请 |
-| `RPC_URL` | 可选，默认公共节点 `https://rpc.mainnet.chain.robinhood.com`。强烈建议换成自己的 Alchemy 等节点：实测每次请求 50ms vs 公共节点 260ms，整趟快一倍 |
+| `RPC_URL` | 可选，默认公共节点 `https://rpc.mainnet.chain.robinhood.com`。强烈建议换成自己的 Alchemy 等节点：实测每次请求 50ms vs 公共节点 260ms，整趟快一倍。配了自己的节点后公共节点自动作为备用（节点限流/超时的请求改走公共节点） |
 | `HTTPS_PROXY` | 可选。本机直连不了 `trade-api.gateway.uniswap.org` / `web3.okx.com` 时填本地代理，如 `http://127.0.0.1:7897` |
 
 ### `params.env` — 策略参数
@@ -262,6 +262,6 @@ npm run typecheck    # 类型检查
 
 - `.env` 里是私钥和 API 密钥，已被 `.gitignore` 排除，不要提交、不要截图分享。
 - Robinhood Chain 上的 UniversalRouter 是 2.1.1，请求 Trading API 时不能带 `x-universal-router-version: 2.0`（会报错），本工具不发该 header。
-- Alchemy 免费版的 `eth_getLogs` 只允许 10 个区块的范围，所以扫描仓位固定走公共节点，其余请求用 `RPC_URL`。
+- 扫描钱包名下的仓位（撤退、监控、网页列表都要用）走 `RPC_URL` 节点的 `alchemy_getAssetTransfers`（Alchemy 免费档也有，一次约 0.5 秒）；节点不支持该方法时退回公共节点全链 `eth_getLogs`（Alchemy 的 `eth_getLogs` 只允许 10 个区块的范围，公共节点连续扫会被限流，失败会隔几秒重试）。
 - 新币风险自负：貔貅币能 mint 成功但卖不掉；池子薄时你的仓位可能就是主要流动性，退出会砸价；无常损失由 LP 承担。建议先用小预算试。
 - Robinhood Chain gas 很便宜，进场 + 撤退整套流程通常不到 1.5 美元。

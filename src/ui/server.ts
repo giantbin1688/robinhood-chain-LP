@@ -5,10 +5,10 @@ import { readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createPublicClient, erc20Abi as erc20EventsAbi, formatEther, http, isAddress, parseAbi, parseAbiItem, parseEventLogs, type Address, type Hex } from 'viem'
+import { erc20Abi as erc20EventsAbi, formatEther, isAddress, parseAbi, parseEventLogs, type Address } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import * as v4 from '../v4.ts'
-import { POOL_MANAGER, POSM, PUBLIC_RPC, STATE_VIEW, USDG, EXPLORER, chain, env, erc20Abi, ethPriceUsd, log, makeClients, p6, posmAbi, stateViewAbi, tokenMeta, trim } from '../common.ts'
+import { POOL_MANAGER, POSM, STATE_VIEW, USDG, EXPLORER, env, erc20Abi, ethPriceUsd, log, makeClients, p6, posmAbi, stateViewAbi, tokenMeta, trim } from '../common.ts'
 import { findPositions, positionFees, same, type Position } from '../exit.ts'
 import { listTokenPools } from '../pools.ts'
 
@@ -90,27 +90,19 @@ const priceFn = (tokenIs1: boolean, decimals: number) => { const [dec0, dec1] = 
 const uncollectedFees = (p: Position): Promise<[bigint, bigint]> => positionFees(clients!.pub, p).catch((e) => { log(`仓位 ${p.id} 手续费读取失败: ${String(e?.message).slice(0, 120)}`); return [0n, 0n] })
 
 // ---- 入场信息（不会变，算一次缓存）：mint 区块时间 -> 持仓时间；mint 交易里存入 PoolManager 的两种币按当时池价折成 USDG -> 入场价值，用来算 uPNL ----
-// mint 日志（PositionManager 从 0x0 转给钱包的 NFT）用公共节点全链扫一次；池价用 Alchemy 读 mint 区块的历史状态
+// mint 的区块/交易由 findPositions 随仓位一起给出（同一次转入记录查询，不再多扫一遍）；当时的池价用 RPC_URL 读 mint 区块的历史状态（Alchemy 各档都能读）
 type Entry = { mintedAt: number; entryUsd: number } | null
 const entryCache = new Map<string, Entry>()
-let mintLogs: Promise<Map<string, { block: bigint; tx: Hex }>> | null = null
-const scanMints = () => (mintLogs = (async () => {
-  const scan = createPublicClient({ chain, transport: http(PUBLIC_RPC) })
-  const logs = await scan.getLogs({ address: POSM, event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 indexed id)'), args: { from: v4.ZERO_ADDRESS, to: clients!.wallet }, fromBlock: 0n })
-  return new Map(logs.map((l) => [l.args.id!.toString(), { block: l.blockNumber, tx: l.transactionHash }]))
-})())
 async function entryOf(p: Position, decimals: number, priceAt: (t: number) => number): Promise<Entry> {
   const k = p.id.toString()
   if (entryCache.has(k)) return entryCache.get(k)!
-  let ml = (await (mintLogs ?? scanMints())).get(k)
-  if (!ml) ml = (await scanMints()).get(k) // 可能是刚建的仓位，重扫一次；还没有就是别处转进来的，记为未知
   let e: Entry = null
-  if (ml) {
+  if (p.mint) { // 没有 mint 记录 = 别处转进来的仓位，入场价值未知
     const { pub, wallet } = clients!
     const { token } = tokenOf(p)
     const [block, rc, [, tick]] = await Promise.all([
-      pub.getBlock({ blockNumber: ml.block }), pub.getTransactionReceipt({ hash: ml.tx }),
-      pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [v4.poolId(p.key)], blockNumber: ml.block }),
+      pub.getBlock({ blockNumber: p.mint.block }), pub.getTransactionReceipt({ hash: p.mint.tx }),
+      pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [v4.poolId(p.key)], blockNumber: p.mint.block }),
     ])
     let usdg = 0n, tok = 0n
     for (const t of parseEventLogs({ abi: erc20EventsAbi, eventName: 'Transfer', logs: rc.logs })) {
@@ -166,8 +158,7 @@ async function listPositions(full: boolean) {
 }
 
 // ---- 池子深度：仓位所在池、仓位区间向两侧各扩 30% 的范围内，每个 tick 段的流动性折成 USDG / 代币数量 ----
-// 做法：tick 位图找出范围内所有已初始化的 tick，读各自的 liquidityNet，从当前 tick 的活跃流动性出发向两侧累加得到每段的流动性
-const chunked = async <T, R>(xs: T[], n: number, f: (x: T) => Promise<R>) => { const out: R[] = []; for (let i = 0; i < xs.length; i += n) out.push(...(await Promise.all(xs.slice(i, i + n).map(f)))); return out }
+// 做法：tick 位图找出范围内所有已初始化的 tick，读各自的 liquidityNet，从当前 tick 的活跃流动性出发向两侧累加得到每段的流动性（两轮 multicall）
 const depthCache = new Map<string, { at: number; data: unknown }>()
 async function depth(idStr: string) {
   if (!clients) throw new Error('没有钱包')
@@ -195,10 +186,10 @@ async function depth(idStr: string) {
   const w0 = Math.floor(comp(lo) / 256), w1 = Math.floor(comp(hi) / 256)
   if (w1 - w0 > 120) throw new Error('区间太宽，暂不画深度图')
   const words = Array.from({ length: w1 - w0 + 1 }, (_, i) => w0 + i)
-  const bitmaps = await chunked(words, 20, (w) => pub.readContract({ address: STATE_VIEW, abi: svExtAbi, functionName: 'getTickBitmap', args: [pid, w] }))
+  const bitmaps = await pub.multicall({ allowFailure: false, batchSize: 0, contracts: words.map((w) => ({ address: STATE_VIEW, abi: svExtAbi, functionName: 'getTickBitmap', args: [pid, w] }) as const) })
   const inits: number[] = []
   bitmaps.forEach((bm, i) => { for (let b = 0; b < 256; b++) if ((bm >> BigInt(b)) & 1n) { const t = (words[i] * 256 + b) * spacing; if (t > lo && t < hi) inits.push(t) } })
-  const nets = await chunked(inits, 20, (t) => pub.readContract({ address: STATE_VIEW, abi: svExtAbi, functionName: 'getTickLiquidity', args: [pid, t] }))
+  const nets = await pub.multicall({ allowFailure: false, batchSize: 0, contracts: inits.map((t) => ({ address: STATE_VIEW, abi: svExtAbi, functionName: 'getTickLiquidity', args: [pid, t] }) as const) })
   const net = new Map(inits.map((t, i) => [t, nets[i][1]]))
   // 段边界 B，段 j = [B[j], B[j+1])；先定位当前 tick 所在段 = 池子当前活跃流动性，向上每跨一个 tick 加 net，向下每跨一个减 net
   const B = [lo, ...inits, hi]

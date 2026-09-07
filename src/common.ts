@@ -3,7 +3,7 @@ import { createHmac } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici'
 import {
-  createPublicClient, createWalletClient, defineChain, encodeFunctionData, formatUnits, getAddress, http, maxUint160, maxUint256, parseAbi,
+  createPublicClient, createWalletClient, defineChain, encodeFunctionData, fallback, formatUnits, getAddress, http, maxUint160, maxUint256, parseAbi, parseAbiItem,
   type Address, type Hex, type PublicClient, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
@@ -68,13 +68,19 @@ export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 export const chain = defineChain({
   id: CHAIN_ID, name: 'Robinhood Chain', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
   rpcUrls: { default: { http: [process.env.RPC_URL ?? PUBLIC_RPC] } },
+  contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } }, // 标准 Multicall3，pub.multicall 把成批只读调用合成一个 eth_call
 })
 // batch: 同一时刻发出的多个请求合并成一个 HTTP 请求；pollingInterval: 等收据时的轮询间隔
+// 配了自己的节点时公共节点作备用：Alchemy 免费档每秒 500 计算单元，一批几十个 eth_call 就会被 429（JSON-RPC 里的 429 viem 不重试），
+// 出错的请求自动改走公共节点；合约 revert 不会回落（fallback 对 execution reverted 直接抛出），报价/滑点那些靠 revert 数据的逻辑不受影响
 export function makeClients(from?: string, needKey = true) {
   const account = process.env.PRIVATE_KEY ? privateKeyToAccount(process.env.PRIVATE_KEY as Hex) : undefined
   const wallet: Address = account?.address ?? (from ? getAddress(from) : die('请在 .env 里设置 PRIVATE_KEY（或 --dry-run 配合 --from <地址>）'))
   if (!account && needKey) die('非 --dry-run 模式必须提供 PRIVATE_KEY')
-  const transport = http(undefined, { batch: true })
+  const rpc = process.env.RPC_URL
+  const transport = rpc && rpc !== PUBLIC_RPC
+    ? fallback([http(rpc, { batch: true }), http(PUBLIC_RPC, { batch: true, methods: { exclude: ['alchemy_getAssetTransfers'] } })])
+    : http(PUBLIC_RPC, { batch: true })
   const pub = createPublicClient({ chain, transport, pollingInterval: 500 })
   const wc = account ? createWalletClient({ account, chain, transport }) : undefined
   return { account, wallet, pub, wc }
@@ -93,6 +99,37 @@ export async function tokenMeta(pub: PublicClient, token: Address) {
 export async function ethPriceUsd(pub: PublicClient) {
   const [sqrt] = await pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [v4.poolId(v4.makePoolKey(WETH, USDG, 500, 10))] })
   return v4.priceFromSqrtX96(sqrt) * 1e12
+}
+
+// ---- 钱包名下 PositionManager NFT 的转入/转出记录（from 为 0x0 的是 mint，to 为 0x0 的是销毁）----
+// 优先用节点的 alchemy_getAssetTransfers（Alchemy 各档都有，一次约 0.5s，两个方向并发查）；节点不支持时退回公共节点全链 eth_getLogs
+// （Alchemy 免费版 getLogs 只让查 10 个区块；公共节点连续扫两次就会 429，所以只扫转入方向，失败隔几秒再试）
+export type NftTransfer = { id: bigint; from: Address; to: Address; block: bigint; tx: Hex }
+export async function positionTransfers(c: Clients): Promise<NftTransfer[]> {
+  const { pub, wallet } = c
+  if (process.env.RPC_URL && process.env.RPC_URL !== PUBLIC_RPC) {
+    const page = async (dir: 'toAddress' | 'fromAddress') => {
+      const out: NftTransfer[] = []
+      for (let pageKey: string | undefined; ; ) {
+        const r: any = await pub.request({ method: 'alchemy_getAssetTransfers', params: [{ fromBlock: '0x0', toBlock: 'latest', [dir]: wallet, contractAddresses: [POSM], category: ['erc721'], maxCount: '0x3e8', ...(pageKey ? { pageKey } : {}) }] } as any)
+        for (const t of r.transfers) out.push({ id: BigInt(t.erc721TokenId), from: getAddress(t.from), to: getAddress(t.to ?? v4.ZERO_ADDRESS), block: BigInt(t.blockNum), tx: t.hash })
+        if (!(pageKey = r.pageKey)) return out
+      }
+    }
+    try { return (await Promise.all([page('toAddress'), page('fromAddress')])).flat() }
+    catch (e: any) { log(`alchemy_getAssetTransfers 失败，改用公共节点扫描: ${String(e?.shortMessage ?? e?.message).slice(0, 80)}`) }
+  }
+  const scan = createPublicClient({ chain, transport: http(PUBLIC_RPC) })
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const logs = await scan.getLogs({ address: POSM, event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 indexed id)'), args: { to: wallet }, fromBlock: 0n })
+      return logs.map((l) => ({ id: l.args.id!, from: l.args.from!, to: l.args.to!, block: l.blockNumber, tx: l.transactionHash }))
+    } catch (e: any) {
+      if (attempt >= 3) throw e
+      log(`公共节点扫描失败 (${String(e?.shortMessage ?? e?.message).slice(0, 60)})，${3 * attempt}s 后重试`)
+      await sleep(3000 * attempt)
+    }
+  }
 }
 
 // ---- Uniswap Trading API ----

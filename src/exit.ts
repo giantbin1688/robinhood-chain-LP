@@ -3,34 +3,44 @@
 import { createInterface } from 'node:readline/promises'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
-import { createPublicClient, encodeFunctionData, formatEther, getAddress, http, numberToHex, parseAbi, parseAbiItem, type Address, type Hex } from 'viem'
+import { encodeFunctionData, formatEther, getAddress, numberToHex, parseAbi, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
 import {
-  POSM, PUBLIC_RPC, STATE_VIEW, USDG, chain, die, env, erc20Abi, ethPriceUsd, loadPositions, log, makeClients, now, okxDex, posmAbi,
+  POSM, STATE_VIEW, USDG, die, env, erc20Abi, ethPriceUsd, loadPositions, log, makeClients, now, okxDex, posmAbi, positionTransfers,
   sleep, slippageRevert, stateViewAbi, tokenMeta, trim, txKit, uniswapApi, swapOffers, executeSwap, type Clients, type SwapOffer,
 } from './common.ts'
 
 export const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase() // 合约返回的是校验和大小写地址，比较时忽略大小写
 
-// 钱包名下、属于 代币/USDG 池、还有流动性的仓位：只给了 explicit 就只看这些 id；否则 positions.json 记录的 + 链上扫描
-// （PositionManager 转给钱包的 NFT，扫描走公共节点，Alchemy 免费版限制 getLogs 区间）。token 不给 = 所有 USDG 池的仓位（网页界面列表用）
+// 钱包名下、属于 代币/USDG 池、还有流动性的仓位：只给了 explicit 就只看这些 id；否则 positions.json 记录的 + 链上转入记录（positionTransfers）。
+// token 不给 = 所有 USDG 池的仓位（网页界面列表用）。mint = 这个 NFT 铸造时的区块/交易（别处转进来的或 explicit 查询时为 null）。
+// 逐个 NFT 的只读调用用 multicall 合成一个 eth_call：Uniswap 网页撤流动性不销毁 NFT，钱包里会攒下几十个空仓位，逐个查会撞 Alchemy 的每秒额度
 export async function findPositions(c: Clients, token?: Address, explicit?: bigint[]) {
   const { wallet, pub } = c
-  const posInfo = (id: bigint) => pub.readContract({ address: POSM, abi: posmAbi, functionName: 'getPoolAndPositionInfo', args: [id] })
   const candidates = new Set<bigint>(explicit ?? [])
   const kinds = new Map<string, string>()
+  const mints = new Map<string, { block: bigint; tx: Hex }>()
   for (const p of loadPositions()) if (!token || same(p.token, token)) { if (!explicit) candidates.add(BigInt(p.id)); kinds.set(p.id, p.kind) }
-  if (!explicit) {
-    const scan = createPublicClient({ chain, transport: http(PUBLIC_RPC) })
-    const logs = await scan.getLogs({ address: POSM, event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 indexed id)'), args: { to: wallet }, fromBlock: 0n })
-    for (const l of logs) candidates.add(l.args.id!)
+  if (!explicit) { // 转入次数 > 转出次数的才可能还在钱包里（销毁 = 转给 0x0）
+    const held = new Map<string, number>()
+    for (const t of await positionTransfers(c)) {
+      const k = t.id.toString()
+      if (same(t.to, wallet)) { held.set(k, (held.get(k) ?? 0) + 1); if (same(t.from, v4.ZERO_ADDRESS)) mints.set(k, { block: t.block, tx: t.tx }) }
+      if (same(t.from, wallet)) held.set(k, (held.get(k) ?? 0) - 1)
+    }
+    for (const [k, n] of held) if (n > 0) candidates.add(BigInt(k))
   }
-  const owned = (await Promise.allSettled([...candidates].map(async (id) => ({ id, owner: await pub.readContract({ address: POSM, abi: posmAbi, functionName: 'ownerOf', args: [id] }) }))))
-    .flatMap((r) => (r.status === 'fulfilled' && same(r.value.owner, wallet) ? [r.value.id] : []))
-  const found = (await Promise.all(owned.map(async (id) => {
-    const [[key, info], liquidity] = await Promise.all([posInfo(id), pub.readContract({ address: POSM, abi: posmAbi, functionName: 'getPositionLiquidity', args: [id] })])
-    return { id, key, liquidity, kind: kinds.get(id.toString()) ?? 'lp', ...v4.decodePositionInfo(info) }
-  }))).filter((p) => p.liquidity > 0n && [p.key.currency0, p.key.currency1].some((x) => same(x, USDG)) && (!token || [p.key.currency0, p.key.currency1].some((x) => same(x, token))))
+  const ids = [...candidates]
+  const owners = await pub.multicall({ allowFailure: true, batchSize: 0, contracts: ids.map((id) => ({ address: POSM, abi: posmAbi, functionName: 'ownerOf', args: [id] }) as const) })
+  const owned = ids.filter((_, i) => owners[i].status === 'success' && same(owners[i].result as string, wallet)) // 已销毁的 ownerOf 会 revert
+  const infos = await pub.multicall({ allowFailure: false, batchSize: 0, contracts: owned.flatMap((id) => [
+    { address: POSM, abi: posmAbi, functionName: 'getPoolAndPositionInfo', args: [id] } as const,
+    { address: POSM, abi: posmAbi, functionName: 'getPositionLiquidity', args: [id] } as const,
+  ]) })
+  const found = owned.map((id, i) => {
+    const [key, info] = infos[2 * i] as readonly [v4.PoolKey, bigint]
+    return { id, key, liquidity: infos[2 * i + 1] as bigint, kind: kinds.get(id.toString()) ?? 'lp', mint: mints.get(id.toString()) ?? null, ...v4.decodePositionInfo(info) }
+  }).filter((p) => p.liquidity > 0n && [p.key.currency0, p.key.currency1].some((x) => same(x, USDG)) && (!token || [p.key.currency0, p.key.currency1].some((x) => same(x, token))))
   // 按当前池价折算每个仓位能拿回多少（手续费另计）
   return Promise.all(found.map(async (p) => {
     const [sqrtP, tick] = await pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [v4.poolId(p.key)] })
