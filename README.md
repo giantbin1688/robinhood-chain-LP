@@ -5,8 +5,8 @@
 | 命令 | 做什么 |
 |---|---|
 | `npm run launch -- --token 0x…` | **进场**：USDG 换币 → 建池（已有则复用，价格偏了先校正）→ 在现价区间组 LP |
-| `npm run watch -- --token 0x…` | **监控**：盯着池价，跳出区间就自动撤退 + 卖币；你手动撤了它自动停 |
-| `npm run exit -- --token 0x…` | **撤退**：撤掉全部仓位（本金 + 手续费），代币自动换回 USDG（Uniswap / OKX DEX 比价取高者） |
+| `npm run watch -- --token 0x…` | **监控**：盯着池价，跳出区间就自动撤退 + 卖币；你手动撤了它自动停。`--position` 可只盯指定仓位 |
+| `npm run exit -- --token 0x…` | **撤退**：撤掉该代币全部仓位（本金 + 手续费），代币自动换回 USDG（Uniswap / OKX DEX 比价取高者）。`--position` 可只撤指定仓位 |
 
 进场时加 `--watch` 可以一条龙：组完 LP 直接进入监控。只需要一个钱包（USDG + 少量 ETH 付 gas）和一个 Uniswap API key；OKX DEX 密钥可选。
 
@@ -55,7 +55,7 @@ npm run exit -- --token 0x代币地址
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `USDG_AMOUNT` | `25` | LP 总预算（USDG）。工具按区间配比和实时报价算出该换多少代币，剩下的 USDG 直接进 LP |
+| `USDG_AMOUNT` | `25` | LP 总预算（USDG）。工具按区间配比和实时报价算出该换多少代币，剩下的 USDG 直接进 LP。钱包里已有的该代币按市场价折算计入预算（见"进场"末尾） |
 | `POOL_FEE` | `5` | 池子手续费，百分比，最多 4 位小数：`5` = 5%，`3.9999` = 3.9999%，`0.3` = 0.3% |
 | `POOL_SELECT` | `auto` | 配置的池不存在时：`auto` = 复用该币已有的 USDG 池（同费率优先，否则流动性 ≥ max($5k, 预算) 中日成交最大的）；`exact` = 只用配置的费率/间距，没有就新建 |
 | `TICK_SPACING` | 空 | tick 间距。留空 = `POOL_FEE × 10000 / 50`（5%→1000、3%→600、1%→200）。只在建新池时生效，复用已有池时以链上为准 |
@@ -107,7 +107,7 @@ npm run launch -- --token <地址> [--usdg 50] [--fee 3] [--spacing 600] [--rang
 |---|---|
 | `--token` | 代币合约地址（必填） |
 | `--usdg` `--fee` `--spacing` `--price-range` `--range` `--slippage` `--lp-slippage` `--max-deviation` `--pool-select` | 临时覆盖 `params.env` 里的同名参数，只对本次生效 |
-| `--watch` | 组完 LP 后不退出，继续监控，跳出区间自动撤退 |
+| `--watch` | 组完 LP 后不退出，继续监控本次建的仓位，跳出区间自动撤退（同一代币的其他仓位不管） |
 | `--dry-run` | 只打印计划，不发任何交易。没有私钥也能用，配合 `--from 0x地址` 指定钱包 |
 | `--yes` | 跳过 y/N 确认 |
 
@@ -182,9 +182,9 @@ npm run exit -- --token 0x… --yes               # 跳过确认
 
 流程：
 
-1. **找仓位**：`positions.json` 记录 + 链上扫描 PositionManager 转给钱包的所有 NFT，只保留"仍归你所有、属于该代币/USDG 池、还有流动性"的（没记录的老仓位也能找到）。
+1. **找仓位**：`--token` 模式下用 `positions.json` 记录 + 链上扫描 PositionManager 转给钱包的所有 NFT，只保留"仍归你所有、属于该代币/USDG 池、还有流动性"的（没记录的老仓位也能找到）；`--position` 模式只看指定的那些 id。
 2. **撤仓**：同一个池的仓位合并成一笔交易，`BURN_POSITION` + `TAKE_PAIR`，本金和未领手续费一起到账；最少拿回量按 `LP_SLIPPAGE` 留余量。过渡仓位的粉尘顺带回收。
-3. **卖币**：钱包里该代币全部卖成 USDG。Uniswap 和 OKX DEX 同时报价，走能换回更多 USDG 的一家（OKX 还会顺带标记貔貅币）。
+3. **卖币**：`--token` 模式把钱包里该代币全部卖成 USDG；`--position` 模式只卖这次撤出来的。Uniswap 和 OKX DEX 同时报价，走能换回更多 USDG 的一家（OKX 还会顺带标记貔貅币）。
 4. 打印共收回多少 USDG 和 gas。
 
 演练模式会用 `estimateGas` 在链上模拟撤仓交易，确认编码无误：
