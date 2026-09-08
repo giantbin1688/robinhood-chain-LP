@@ -1,28 +1,28 @@
-// 进场：USDG -> 代币换币（Uniswap Trading API 路由）、创建/复用 v4 池、按现价区间组 LP。撤退见 exit.ts
+// 进场：计价币 -> 代币换币（Uniswap API / OKX 聚合路由）、创建/复用池子、按现价区间组 LP。撤退见 exit.ts
+// 链 / 协议由 --chain / --protocol（或 CHAIN / PROTOCOL 环境变量）决定：robinhood/v4、bsc/infinity、bsc/v3；链上细节都在 lp.ts 的适配器里
 import { createInterface } from 'node:readline/promises'
 import { parseArgs } from 'node:util'
-import { encodeFunctionData, formatEther, getAddress, parseEventLogs, parseUnits, type Address, type Hex } from 'viem'
+import { formatEther, getAddress, parseUnits, type Address } from 'viem'
 import * as v4 from './v4.ts'
-import {
-  POSM, QUOTER, STATE_VIEW, UR, USDG, EXPLORER, abs, die, env, erc20Abi, ethPriceUsd, log, makeClients, min, now, p6, pct, posmAbi,
-  quoterAbi, savePosition, sleep, slippageRevert, stateViewAbi, tokenMeta, trim, txKit, uniswapApi, okxDex, swapOffers, executeSwap, type SwapOffer,
-} from './common.ts'
+import { abs, die, env, erc20Abi, feeText, log, makeClients, min, nativePriceUsd, now, p6, pct, savePosition, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, type SwapOffer } from './common.ts'
+import type { MintSpec, Pool } from './lp.ts'
 import { watchToken } from './monitor.ts'
-import { discoverUsdgPools } from './pools.ts'
+import { discoverQuotePools } from './pools.ts'
 
 // 默认值来自 params.env，命令行参数可临时覆盖
 const { values: opt } = parseArgs({
   options: {
+    chain: { type: 'string' }, protocol: { type: 'string' },                 // 链 / 协议（common.ts 里解析）
     token: { type: 'string' },
-    usdg: { type: 'string', default: env('USDG_AMOUNT', '25') },              // LP 总预算（USDG）
+    usdg: { type: 'string', default: env('USDG_AMOUNT', '25') },              // LP 总预算（计价币：USDG / USDT）
     fee: { type: 'string', default: env('POOL_FEE', '5') },                   // 池子费率 %
-    spacing: { type: 'string', default: env('TICK_SPACING', '') },            // 留空 = fee/50
+    spacing: { type: 'string', default: env('TICK_SPACING', '') },            // 留空 = 协议默认（v4/Infinity 为 fee/50，v3 固定四档）
     range: { type: 'string', default: env('RANGE', '-50%,+100%') },          // 区间：相对现价的百分比
-    'price-range': { type: 'string', default: env('PRICE_RANGE', '') },      // 区间：绝对价格（USDG/代币）"最低价,最高价"，设置了就优先于 RANGE
+    'price-range': { type: 'string', default: env('PRICE_RANGE', '') },      // 区间：绝对价格（计价币/代币）"最低价,最高价"，设置了就优先于 RANGE
     slippage: { type: 'string', default: env('SWAP_SLIPPAGE', '5') },         // 换币滑点 %
     'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },      // mint amountMax 余量 %
     'max-deviation': { type: 'string', default: env('MAX_DEVIATION', '10') },// 池价与市场价最大偏离 %
-    'pool-select': { type: 'string', default: env('POOL_SELECT', 'auto') },  // auto: 配置的池不存在时复用该币已有的 USDG 池；exact: 只用配置的费率/间距
+    'pool-select': { type: 'string', default: env('POOL_SELECT', 'auto') },  // auto: 配置的池不存在时复用该币已有的计价币池；exact: 只用配置的费率/间距
     shape: { type: 'string', default: env('LP_SHAPE', 'spot') },             // 流动性形状：spot 一个仓位 | curve 同心嵌套、越靠现价越厚 | bidask 两侧分段、越远越厚
     layers: { type: 'string', default: env('LP_LAYERS', '3') },              // curve 的层数 / bidask 每侧的段数
     watch: { type: 'boolean', default: false },     // 组完 LP 后继续监控，跳出区间自动撤退
@@ -32,14 +32,10 @@ const { values: opt } = parseArgs({
     json: { type: 'boolean', default: false },        // 计划确定后额外打印一行 "@@plan {json}" 给网页界面用
   },
 })
-if (!opt.token) die('用法: npm run launch -- --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--range="-50%,+100%" | --price-range="0.006,0.01"] [--shape spot|curve|bidask] [--layers 3] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
+if (!opt.token) die('用法: npm run launch -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--range="-50%,+100%" | --price-range="0.006,0.01"] [--shape spot|curve|bidask] [--layers 3] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
 const token = getAddress(opt.token)
-const usdgBudget = parseUnits(opt.usdg, 6)
-if (usdgBudget <= 0n) die('USDG_AMOUNT / --usdg 必须大于 0')
 let fee = Math.round(Number(opt.fee) * 10_000) // pips
 if (!(fee > 0 && fee <= 1_000_000)) die(`POOL_FEE / --fee 必须是 (0, 100] 之间的百分比，当前 "${opt.fee}"`)
-let spacing = opt.spacing ? Number(opt.spacing) : Math.max(1, Math.round(fee / 50))
-if (!(Number.isInteger(spacing) && spacing >= 1 && spacing <= 32767)) die(`TICK_SPACING / --spacing 必须是 [1, 32767] 的整数，当前 "${opt.spacing}"`)
 if (!['auto', 'exact'].includes(opt['pool-select'])) die('POOL_SELECT / --pool-select 只能是 auto 或 exact')
 const shape = opt.shape.toLowerCase().replace('-', '') as 'spot' | 'curve' | 'bidask'
 if (!['spot', 'curve', 'bidask'].includes(shape)) die(`LP_SHAPE / --shape 只能是 spot、curve 或 bidask，当前 "${opt.shape}"`)
@@ -53,79 +49,87 @@ if (rangePct.length !== 2 || rangePct[0] === rangePct[1]) die(`RANGE / --range �
 const [pLo, pHi] = [Math.min(...rangePct), Math.max(...rangePct)]
 if (pLo <= -100) die('RANGE 下限必须大于 -100%')
 const [mLo, mHi] = [1 + pLo / 100, 1 + pHi / 100] // 代币价格倍数
-// 绝对价格区间（USDG/代币）：设置了就用它，不看 RANGE
+// 绝对价格区间（计价币/代币）：设置了就用它，不看 RANGE
 const priceRange = (opt['price-range'].match(/\d*\.?\d+(?:e-?\d+)?/gi) ?? []).map(Number)
-if (opt['price-range'] && (priceRange.length !== 2 || !(priceRange[0] > 0) || !(priceRange[1] > priceRange[0]))) die(`PRICE_RANGE / --price-range 写法：最低价,最高价（USDG/代币），如 0.006,0.01，当前 "${opt['price-range']}"`)
-const rangeLabel = priceRange.length ? `${priceRange[0]} .. ${priceRange[1]} USDG` : `${pLo > 0 ? '+' : ''}${pLo}% .. ${pHi > 0 ? '+' : ''}${pHi}%`
+if (opt['price-range'] && (priceRange.length !== 2 || !(priceRange[0] > 0) || !(priceRange[1] > priceRange[0]))) die(`PRICE_RANGE / --price-range 写法：最低价,最高价（计价币/代币），如 0.006,0.01，当前 "${opt['price-range']}"`)
 const swapSlippage = Number(opt.slippage), lpSlippage = Number(opt['lp-slippage'])
 if (!(swapSlippage >= 0 && swapSlippage <= 50 && lpSlippage >= 0 && lpSlippage <= 50)) die('滑点必须是 [0, 50] 之间的百分比')
 const maxDev = Number(opt['max-deviation']) / 100
 if (!(maxDev > 0 && maxDev < 1)) die('MAX_DEVIATION / --max-deviation 必须是 (0, 100) 之间的百分比')
 const dryRun = opt['dry-run']
 
-const clients = makeClients(opt.from, !dryRun)
-const { wallet, pub, wc } = clients
+const clients = await makeClients({ from: opt.from, needKey: !dryRun })
+const { wallet, pub, cfg, lp, Q } = clients
+const QU = 10n ** BigInt(Q.decimals) // 1 个计价币的基础单位
+const rangeLabel = priceRange.length ? `${priceRange[0]} .. ${priceRange[1]} ${Q.symbol}` : `${pLo > 0 ? '+' : ''}${pLo}% .. ${pHi > 0 ? '+' : ''}${pHi}%`
+const usdgBudget = parseUnits(opt.usdg, Q.decimals)
+if (usdgBudget <= 0n) die('USDG_AMOUNT / --usdg 必须大于 0')
+let spacing = opt.spacing ? Number(opt.spacing) : lp.spacingFor(fee) ?? 0
+if (opt.spacing && !(Number.isInteger(spacing) && spacing >= 1 && spacing <= 32767)) die(`TICK_SPACING / --spacing 必须是 [1, 32767] 的整数，当前 "${opt.spacing}"`)
 const balanceOf = (t: Address) => pub.readContract({ address: t, abi: erc20Abi, functionName: 'balanceOf', args: [wallet] })
-const slot0 = (id: Hex) => pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [id] })
 
 // ---- 钱包 / 代币 / 余额 / 池子（一次批量读取）----
-let key = v4.makePoolKey(USDG, token, fee, spacing)
-let id = v4.poolId(key)
+// 配置的费率这个协议不支持（v3 只有四档）：auto 模式下跳过它去找已有池，exact 模式直接报错
+let pool: Pool | null = await lp.pool(token, fee, spacing).catch((e) => (opt['pool-select'] === 'exact' ? die(String(e?.message)) : (log(`提示: ${String(e?.message)}，只看已有池`), null)))
 let [{ symbol, name, decimals }, usdgStart, ethBal, tokenStart, ethPrice, poolSlot] = await Promise.all([
-  tokenMeta(pub, token), balanceOf(USDG), pub.getBalance({ address: wallet }), balanceOf(token), ethPriceUsd(pub), slot0(id),
+  tokenMeta(pub, token), balanceOf(Q.address), pub.getBalance({ address: wallet }), balanceOf(token), nativePriceUsd(clients), pool ? lp.slot0(pool) : { sqrtP: 0n, tick: 0, protocolFee: 0, lpFee: 0 },
 ])
 const usd = (wei: bigint) => (Number(formatEther(wei)) * ethPrice).toFixed(2)
-const fmtU = (x: bigint) => trim(x, 6), fmtT = (x: bigint) => trim(x, decimals)
-const symOf = (t: Address) => (t === USDG ? 'USDG' : symbol)
+const fmtU = (x: bigint) => trim(x, Q.decimals), fmtT = (x: bigint) => trim(x, decimals)
+const symOf = (t: Address) => (t === Q.address ? Q.symbol : symbol)
 // 买币报价：Uniswap 和 OKX 同时问，取产出多的；Uniswap 常常只认一个薄池报不出大单，OKX 能找到更深的路
-const swapDeps = { uni: uniswapApi(wallet, swapSlippage), okx: okxDex(wallet, swapSlippage), via: env('SWAP_VIA', 'best'), fmtOut: (x: bigint) => trim(x, decimals), outSym: symbol }
-const buyOffers = (type: 'EXACT_INPUT' | 'EXACT_OUTPUT', amount: bigint) => swapOffers(swapDeps, USDG, token, type, amount)
+const swapDeps = swapDepsFor(clients, swapSlippage, env('SWAP_VIA', 'best'), (x: bigint) => trim(x, decimals), symbol)
+const buyOffers = (type: 'EXACT_INPUT' | 'EXACT_OUTPUT', amount: bigint) => swapOffers(swapDeps, Q.address, token, type, amount)
 async function bestBuy(amount: bigint, what: string) {
   const [o] = await buyOffers('EXACT_INPUT', amount)
-  if (!o) die(`${what}：Uniswap 和 OKX 都找不到能吃下 ${fmtU(amount)} USDG 的路由（代币流动性太薄），把 USDG_AMOUNT 调小再试`)
+  if (!o) die(`${what}：Uniswap 和 OKX 都找不到能吃下 ${fmtU(amount)} ${Q.symbol} 的路由（代币流动性太薄），把 USDG_AMOUNT 调小再试`)
   return o
 }
-log(`钱包 ${wallet} | ${fmtU(usdgStart)} USDG, ${trim(ethBal, 18)} ETH | ETH $${ethPrice.toFixed(2)}`)
+log(`${cfg.label} / ${lp.label} | 钱包 ${wallet} | ${fmtU(usdgStart)} ${Q.symbol}, ${trim(ethBal, 18)} ${cfg.native.symbol} | ${cfg.native.symbol} $${ethPrice.toFixed(2)}`)
 log(`代币 ${symbol} (${name}) 精度=${decimals} 地址 ${token}`)
-// 本次已花掉的 USDG（卖币收回则为负）和手里的代币。钱包里原有的代币（比如上次换完币没组成 LP）一并计入，
-// 按市场价折成 USDG 从预算里扣掉（见下方"计划"处），重跑时就不会再换一遍
-const holdings = async () => { const [u, t] = await Promise.all([balanceOf(USDG), balanceOf(token)]); return { spent: usdgStart - u, held: t } }
+// 本次已花掉的计价币（卖币收回则为负）和手里的代币。钱包里原有的代币（比如上次换完币没组成 LP）一并计入，
+// 按市场价折成计价币从预算里扣掉（见下方"计划"处），重跑时就不会再换一遍
+const holdings = async () => { const [u, t] = await Promise.all([balanceOf(Q.address), balanceOf(token)]); return { spent: usdgStart - u, held: t } }
 
-const tokenIs1 = key.currency1 === token
-const [dec0, dec1] = tokenIs1 ? [6, decimals] : [decimals, 6]
-const [sym0, sym1] = tokenIs1 ? ['USDG', symbol] : [symbol, 'USDG']
-// 池子原始价格（currency1 基础单位 / currency0 基础单位）<-> 每个代币多少 USDG
-const usdgPerTokenAtTick = (t: number) => { const h = v4.priceAtTick(t) * 10 ** (dec0 - dec1); return tokenIs1 ? 1 / h : h }
-const tickFromProbe = (tokenOutPer1Usdg: bigint) => v4.tickFromPrice(tokenIs1 ? Number(tokenOutPer1Usdg) / 1e6 : 1e6 / Number(tokenOutPer1Usdg))
-const tokensForUsdg = (usdgBase: bigint, usdgPerToken: number) => BigInt(Math.floor((Number(usdgBase) / usdgPerToken) * 10 ** (decimals - 6)))
-const price = (t: number) => `${p6(usdgPerTokenAtTick(t))} USDG/${symbol}`
-const deviation = (poolTick: number, marketTick: number) => usdgPerTokenAtTick(poolTick) / usdgPerTokenAtTick(marketTick) - 1 // 池价相对市场价
-let [sqrtP, tick] = poolSlot
+let [sqrtP, tick] = [poolSlot.sqrtP, poolSlot.tick]
 let initialized = sqrtP !== 0n
 if (initialized && (tick <= v4.MIN_TICK || tick >= v4.MAX_TICK)) {
   die(`池子处于不可用边界 tick ${tick}；请更换 fee/spacing 创建新池，或先在原池补回覆盖现价的流动性`)
 }
-// 配置的池不存在：看看这个币已有哪些 USDG 池。同费率的直接复用（间距以链上为准）；否则选流动性够、成交量最大的；都没有才新建
+// 配置的池不存在：看看这个币已有哪些计价币池。同费率的直接复用（间距以链上为准）；否则选流动性够、成交量最大的；都没有才新建
 if (!initialized && opt['pool-select'] === 'auto') {
-  const pools = (await discoverUsdgPools(token)).sort((a, b) => b.volume24h - a.volume24h)
+  const pools = (await discoverQuotePools(clients, token)).sort((a, b) => b.volume24h - a.volume24h)
   const usd$ = (x: number) => `$${Math.round(x).toLocaleString('en-US')}`
-  if (pools.length) log(`已有 ${symbol}/USDG 池: ${pools.slice(0, 4).map((p) => `${p.fee / 10000}%/${p.spacing} 流动性${usd$(p.liquidityUsd)} 日成交${usd$(p.volume24h)}`).join('；')}${pools.length > 4 ? '…' : ''}`)
+  if (pools.length) log(`已有 ${symbol}/${Q.symbol} 池: ${pools.slice(0, 4).map((p) => `${feeText(p.pool)}/${p.pool.spacing}${p.pool.hooks !== v4.ZERO_ADDRESS ? '(hook)' : ''} ${p.empty ? '空池' : `流动性${usd$(p.liquidityUsd)} 日成交${usd$(p.volume24h)}`}`).join('；')}${pools.length > 4 ? '…' : ''}`)
   const minLiq = Math.max(5000, Number(fmtU(usdgBudget)))
-  const pick = pools.find((p) => p.fee === fee) ?? pools.find((p) => p.liquidityUsd >= minLiq)
+  // 空池不复用：复用要先花钱纠价，新建一个不同间距的池反而是免费的
+  const pick = pools.find((p) => !p.empty && p.pool.fee === fee) ?? pools.find((p) => !p.empty && p.liquidityUsd >= minLiq)
   if (pick) {
-    ;[fee, spacing, key, id] = [pick.fee, pick.spacing, v4.makePoolKey(USDG, token, pick.fee, pick.spacing), pick.id]
-    ;[sqrtP, tick] = await slot0(id)
+    pool = pick.pool; fee = pool.fee; spacing = pool.spacing
+    ;({ sqrtP, tick } = await lp.slot0(pool))
     initialized = sqrtP !== 0n
-    log(`复用 ${pick.name}（${pick.fee / 10000}%/${pick.spacing}${pick.fee !== Math.round(Number(opt.fee) * 10_000) ? '，与配置的费率不同，成交最活跃' : '，同费率'}）；只想用自己配置的费率请设 POOL_SELECT=exact`)
+    log(`复用 ${pick.name}（${feeText(pool)}/${spacing}${pick.pool.fee !== Math.round(Number(opt.fee) * 10_000) ? '，与配置的费率不同，成交最活跃' : '，同费率'}${pool.hooks !== v4.ZERO_ADDRESS ? `，带 hook ${pool.hooks}` : ''}）；只想用自己配置的费率请设 POOL_SELECT=exact`)
   }
 }
-log(`池子 ${symbol}/USDG 费率=${fee / 10000}% 间距=${spacing}: ${initialized ? `已存在，tick ${tick} = ${price(tick)}` : '不存在，将创建'}`)
+if (!pool) die(`${symbol} 在 ${lp.label} 上没有可复用的 ${Q.symbol} 池，且配置的费率 ${opt.fee}% 建不了池（${lp.tiers.map((t) => t.fee / 10000 + '%').join(' / ')} 可选）`)
+if (!(Number.isInteger(spacing) && spacing >= 1)) die('tick 间距无效')
+
+const tokenIs1 = pool.currency1 === token
+const [dec0, dec1] = tokenIs1 ? [Q.decimals, decimals] : [decimals, Q.decimals]
+const [sym0, sym1] = tokenIs1 ? [Q.symbol, symbol] : [symbol, Q.symbol]
+// 池子原始价格（currency1 基础单位 / currency0 基础单位）<-> 每个代币多少计价币
+const usdgPerTokenAtTick = (t: number) => { const h = v4.priceAtTick(t) * 10 ** (dec0 - dec1); return tokenIs1 ? 1 / h : h }
+const tickFromProbe = (tokenOutPer1Usdg: bigint) => v4.tickFromPrice(tokenIs1 ? Number(tokenOutPer1Usdg) / Number(QU) : Number(QU) / Number(tokenOutPer1Usdg))
+const tokensForUsdg = (usdgBase: bigint, usdgPerToken: number) => BigInt(Math.floor((Number(usdgBase) / usdgPerToken) * 10 ** (decimals - Q.decimals)))
+const price = (t: number) => `${p6(usdgPerTokenAtTick(t))} ${Q.symbol}/${symbol}`
+const deviation = (poolTick: number, marketTick: number) => usdgPerTokenAtTick(poolTick) / usdgPerTokenAtTick(marketTick) - 1 // 池价相对市场价
+log(`池子 ${symbol}/${Q.symbol} 费率=${feeText(pool)} 间距=${spacing}: ${initialized ? `已存在，tick ${tick} = ${price(tick)}` : '不存在，将创建'}`)
 
 // ---- 区间 ----
 // 代币价格 × m  <=>  代币是 currency0 时原始价格 × m，是 currency1 时原始价格 ÷ m
 const tickDelta = (m: number) => Math.log(m) / Math.log(1.0001)
 const [dLo, dHi] = tokenIs1 ? [-tickDelta(mHi), -tickDelta(mLo)] : [tickDelta(mLo), tickDelta(mHi)]
-// USDG/代币 的价格 -> 池子 tick（usdgPerTokenAtTick 的反函数）
+// 计价币/代币 的价格 -> 池子 tick（usdgPerTokenAtTick 的反函数）
 const tickAtUsdgPerToken = (p: number) => v4.tickFromPrice((tokenIs1 ? 1 / p : p) * 10 ** (dec1 - dec0))
 // 远端边界向外取整（保证覆盖要求的范围）；0% 那条边向内取整（单边仓位不包含现价，保持纯单边）
 const rangeFor = (t: number) => {
@@ -146,9 +150,9 @@ const rangeFor = (t: number) => {
 }
 const rangeText = ([lo, hi]: readonly [number, number]) => {
   const [a, b] = [usdgPerTokenAtTick(lo), usdgPerTokenAtTick(hi)].sort((x, y) => x - y)
-  return `ticks [${lo}, ${hi}] = ${p6(a)} .. ${p6(b)} USDG/${symbol} (${rangeLabel})`
+  return `ticks [${lo}, ${hi}] = ${p6(a)} .. ${p6(b)} ${Q.symbol}/${symbol} (${rangeLabel})`
 }
-// 形状 = 把一个区间拆成几个仓位，g 是各仓位的流动性权重（同一份流动性 L 按 g 倍分配，各仓位要多少 USDG / 代币由几何决定）：
+// 形状 = 把一个区间拆成几个仓位，g 是各仓位的流动性权重（同一份流动性 L 按 g 倍分配，各仓位要多少计价币 / 代币由几何决定）：
 //   spot   一个仓位
 //   curve  layers 个同心嵌套仓位，每层宽度减半、权重相同 -> 现价附近被所有层覆盖，最厚；越往外越薄
 //   bidask 现价两侧各 layers 段互不重叠，第 k 段权重 k -> 离现价越远越厚；含现价的那一格空着（跌买涨卖，不做市）
@@ -192,16 +196,16 @@ function unitAmounts(sp: number, lo: number, hi: number) {
   const a1 = sp <= sa ? 0 : Math.min(sp, sb) - sa
   return [a0, a1] as const
 }
-// 整套仓位在 tick t 处每单位流动性需要多少代币 / USDG（基础单位）
+// 整套仓位在 tick t 处每单位流动性需要多少代币 / 计价币（基础单位）
 function mixAt(t: number, legs = legsFor(t)) {
   const sp = Math.sqrt(v4.priceAtTick(t))
   let tok = 0, usdg = 0
   for (const l of legs) { const [a0, a1] = unitAmounts(sp, l.lo, l.hi); tok += l.g * (tokenIs1 ? a1 : a0); usdg += l.g * (tokenIs1 ? a0 : a1) }
   return { tok, usdg }
 }
-// 每 1 USDG 基础单位的预算要配多少代币基础单位（p = 每个代币基础单位值多少 USDG 基础单位）：0 = 只要 USDG，1/p = 只要代币
+// 每 1 计价币基础单位的预算要配多少代币基础单位（p = 每个代币基础单位值多少计价币基础单位）：0 = 只要计价币，1/p = 只要代币
 const tokenPerUsdg = (t: number, p: number) => { const { tok, usdg } = mixAt(t); return tok === 0 ? 0 : tok / (tok * p + usdg) }
-// 预算拆分：已持有 held 个代币、按市场汇率 rate（代币基础单位 / USDG 基础单位）换币，换多少 USDG 能让各仓位 mint 后两边刚好用尽
+// 预算拆分：已持有 held 个代币、按市场汇率 rate（代币基础单位 / 计价币基础单位）换币，换多少计价币能让各仓位 mint 后两边刚好用尽
 function swapShare(budget: bigint, held: bigint, refTick: number, rate: number) {
   const p = 1 / rate
   const s = (tokenPerUsdg(refTick, p) * (Number(budget) + Number(held) * p) - Number(held)) * p
@@ -215,13 +219,13 @@ type Correction =
   | { kind: 'swap'; dev: number; devAfter: number; zeroForOne: boolean; amountIn: bigint; minOut: bigint; sqrtNext: bigint }
   | { kind: 'bridge'; dev: number; zeroForOne: boolean; lo: number; hi: number; liquidity: bigint; need0: bigint; need1: bigint; exactOut: bigint; maxIn: bigint; sqrtNext: bigint }
 async function planCorrection(marketTick: number, marketPrice: number): Promise<Correction | null> {
-  const [[sp, t, protocolFee, lpFee], L] = await Promise.all([slot0(id), pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getLiquidity', args: [id] })])
+  const [s, L] = await Promise.all([lp.slot0(pool!), lp.liquidity(pool!)])
+  const { sqrtP: sp, tick: t } = s
   const dev = deviation(t, marketTick)
   if (Math.abs(dev) <= maxDev) return null
   const sqrtT = v4.getSqrtRatioAtTick(marketTick)
   const zeroForOne = sqrtT < sp
-  const pf = zeroForOne ? protocolFee & 0xfff : protocolFee >> 12
-  const swapFee = BigInt(pf + lpFee - Math.floor((pf * lpFee) / 1_000_000)) // pips，v4 的 calculateSwapFee
+  const swapFee = BigInt(lp.swapFee(s, zeroForOne, pool!)) // pips
   const gross = (net: bigint) => (net * 1_000_000n + 1_000_000n - swapFee - 1n) / (1_000_000n - swapFee) // 加上手续费的实际投入
 
   // 方案 A
@@ -229,7 +233,7 @@ async function planCorrection(marketTick: number, marketPrice: number): Promise<
     const simulate = async (net: bigint) => { // Quoter 真实模拟；null = 走不通（流动性用尽，或与恒定流动性模型差超过 1%）
       const { out } = v4.swapConstantL(L, sp, zeroForOne, { amountInNet: net })
       try {
-        const [quoted] = await pub.readContract({ address: QUOTER, abi: quoterAbi, functionName: 'quoteExactInputSingle', args: [{ poolKey: key, zeroForOne, exactAmount: gross(net), hookData: '0x' }] })
+        const quoted = await lp.quoteExactIn(pool!, zeroForOne, gross(net))
         return Math.abs(Number(quoted) / Number(out) - 1) <= 0.01 ? quoted : null
       } catch (e: any) { if (e?.name === 'ContractFunctionExecutionError') return null; throw e }
     }
@@ -250,9 +254,9 @@ async function planCorrection(marketTick: number, marketPrice: number): Promise<
   // 方案 B：过渡仓位在当前 tick 的一侧、覆盖到市场 tick；价格往下走(zeroForOne)时它只装 currency1，往上走时只装 currency0
   const [lo, hi] = zeroForOne ? [v4.floorToSpacing(marketTick, spacing), v4.floorToSpacing(t, spacing)] : [v4.ceilToSpacing(t + 1, spacing), v4.ceilToSpacing(marketTick, spacing)]
   if (hi <= lo) die(`池价偏离市场价 ${pct(dev)}，但差距不足一个 tick 间距（${spacing}），无法用过渡仓位校正，放弃`)
-  const value = usdgBudget / 100n > 200_000n ? usdgBudget / 100n : 200_000n // 过渡仓位价值：预算 1%，至少 0.2 USDG
-  const bridgeCurrency = zeroForOne ? key.currency1 : key.currency0
-  const amount = bridgeCurrency === USDG ? value : tokensForUsdg(value, marketPrice)
+  const value = usdgBudget / 100n > QU / 5n ? usdgBudget / 100n : QU / 5n // 过渡仓位价值：预算 1%，至少 0.2 个计价币
+  const bridgeCurrency = zeroForOne ? pool!.currency1 : pool!.currency0
+  const amount = bridgeCurrency === Q.address ? value : tokensForUsdg(value, marketPrice)
   const sqrtA = v4.getSqrtRatioAtTick(lo), sqrtB = v4.getSqrtRatioAtTick(hi)
   const liquidity = v4.liquidityForAmounts(sp, sqrtA, sqrtB, zeroForOne ? 0n : amount, zeroForOne ? amount : 0n)
   if (liquidity === 0n) die('过渡仓位流动性为 0，放弃')
@@ -263,29 +267,29 @@ async function planCorrection(marketTick: number, marketPrice: number): Promise<
   if (exactOut === 0n) die('过渡仓位太小，放弃')
   return { kind: 'bridge', dev, zeroForOne, lo, hi, liquidity, need0, need1, exactOut, maxIn, sqrtNext: sqrtT }
 }
-// 校正需要临时占用的 USDG（要卖代币的话先按市价买入，按市场价折算）
+// 校正需要临时占用的计价币（要卖代币的话先按市价买入，按市场价折算）
 const correctionCost = (c: Correction, marketPrice: number) => {
-  const usdgOf = (x: bigint, cur: Address) => (cur === USDG ? x : BigInt(Math.ceil(Number(x) * marketPrice * 10 ** (6 - decimals))))
-  const cin = c.zeroForOne ? key.currency0 : key.currency1
-  return c.kind === 'swap' ? usdgOf(c.amountIn, cin) : usdgOf(c.need0, key.currency0) + usdgOf(c.need1, key.currency1) + usdgOf(c.maxIn, cin)
+  const usdgOf = (x: bigint, cur: Address) => (cur === Q.address ? x : BigInt(Math.ceil(Number(x) * marketPrice * 10 ** (Q.decimals - decimals))))
+  const cin = c.zeroForOne ? pool!.currency0 : pool!.currency1
+  return c.kind === 'swap' ? usdgOf(c.amountIn, cin) : usdgOf(c.need0, pool!.currency0) + usdgOf(c.need1, pool!.currency1) + usdgOf(c.maxIn, cin)
 }
 const correctionText = (c: Correction) => {
-  const [cin, cout] = c.zeroForOne ? [key.currency0, key.currency1] : [key.currency1, key.currency0]
-  const f = (x: bigint, cur: Address) => `${trim(x, cur === USDG ? 6 : decimals)} ${symOf(cur)}`
+  const [cin, cout] = c.zeroForOne ? [pool!.currency0, pool!.currency1] : [pool!.currency1, pool!.currency0]
+  const f = (x: bigint, cur: Address) => `${trim(x, cur === Q.address ? Q.decimals : decimals)} ${symOf(cur)}`
   const head = `池价偏离 ${pct(c.dev)} 超过 ${maxDev * 100}%，`
   if (c.kind === 'swap') return head + `先在池内卖出 ≈${f(c.amountIn, cin)} 换 ≈${f(c.minOut, cout)}，把偏离拉到 ${pct(c.devAfter)}`
-  const held = c.zeroForOne ? f(c.need1, key.currency1) : f(c.need0, key.currency0)
+  const held = c.zeroForOne ? f(c.need1, pool!.currency1) : f(c.need0, pool!.currency0)
   return head + `池内到市场价之间没有流动性：先建 ≈${held} 的过渡仓位 [${c.lo}, ${c.hi}]，再通过它用最多 ${f(c.maxIn, cin)} 买回 ${f(c.exactOut, cout)}，把价格推到市场价`
 }
 
 // ---- 计划 ----
-const probe = await bestBuy(1_000_000n, '探测市场价') // 1 USDG 探测市场价
+const probe = await bestBuy(QU, '探测市场价') // 1 个计价币探测市场价
 let marketTick = tickFromProbe(probe.out)
 let marketPrice = usdgPerTokenAtTick(marketTick)
-const rate = Number(probe.out) / 1e6
-log(`市场价 ${p6(marketPrice)} USDG/${symbol}（${probe.via}）${initialized ? `，池价偏离 ${pct(deviation(tick, marketTick))}` : ''}`)
-// 钱包原有代币按市场价折算，算作预算里已经换好的那部分；超过预算就只用预算能装下的那部分（其余留在钱包），USDG 一侧按配比从钱包出
-let usdgSpend = usdgBudget // 本次可动用的 USDG（换币 + LP）
+const rate = Number(probe.out) / Number(QU)
+log(`市场价 ${p6(marketPrice)} ${Q.symbol}/${symbol}（${probe.via}）${initialized ? `，池价偏离 ${pct(deviation(tick, marketTick))}` : ''}`)
+// 钱包原有代币按市场价折算，算作预算里已经换好的那部分；超过预算就只用预算能装下的那部分（其余留在钱包），计价币一侧按配比从钱包出
+let usdgSpend = usdgBudget // 本次可动用的计价币（换币 + LP）
 let tokenCap = false       // 持有代币超过预算：组 LP 时代币侧按预算截断
 const tokenPart = (t: number) => BigInt(Math.floor(tokenPerUsdg(t, 1 / rate) * Number(usdgBudget))) // 预算在 tick t 的形状配比下，代币侧应占多少（基础单位）
 if (tokenStart > 0n) {
@@ -294,19 +298,19 @@ if (tokenStart > 0n) {
     tokenCap = true
     const t = tokenPart(initialized ? tick : marketTick)
     usdgSpend = usdgBudget - BigInt(Math.ceil(Number(t) / rate))
-    log(`钱包已有 ${fmtT(tokenStart)} ${symbol}（≈${fmtU(heldValue)} USDG）超过预算 ${fmtU(usdgBudget)}：只投入 ≈${fmtT(t)} ${symbol} + ≈${fmtU(usdgSpend)} USDG，其余留在钱包，不换币`)
+    log(`钱包已有 ${fmtT(tokenStart)} ${symbol}（≈${fmtU(heldValue)} ${Q.symbol}）超过预算 ${fmtU(usdgBudget)}：只投入 ≈${fmtT(t)} ${symbol} + ≈${fmtU(usdgSpend)} ${Q.symbol}，其余留在钱包，不换币`)
   } else {
     usdgSpend = usdgBudget - heldValue
-    log(`钱包已有 ${fmtT(tokenStart)} ${symbol}（≈${fmtU(heldValue)} USDG），计入本次 LP，剩余 USDG 预算 ${fmtU(usdgSpend)}`)
+    log(`钱包已有 ${fmtT(tokenStart)} ${symbol}（≈${fmtU(heldValue)} ${Q.symbol}），计入本次 LP，剩余 ${Q.symbol} 预算 ${fmtU(usdgSpend)}`)
   }
 }
 if (usdgStart < usdgSpend) {
-  const msg = `需要 ${fmtU(usdgSpend)} USDG，钱包只有 ${fmtU(usdgStart)}`
+  const msg = `需要 ${fmtU(usdgSpend)} ${Q.symbol}，钱包只有 ${fmtU(usdgStart)}`
   dryRun ? log(`警告: ${msg}`) : die(msg)
 }
 const correction = initialized ? await planCorrection(marketTick, marketPrice) : null
 if (correction) {
-  if (correctionCost(correction, marketPrice) > usdgSpend) die(`池价偏离市场价 ${pct(correction.dev)}，校正约需 ${fmtU(correctionCost(correction, marketPrice))} USDG，超过预算，放弃`)
+  if (correctionCost(correction, marketPrice) > usdgSpend) die(`池价偏离市场价 ${pct(correction.dev)}，校正约需 ${fmtU(correctionCost(correction, marketPrice))} ${Q.symbol}，超过预算，放弃`)
   log(`计划: ${correctionText(correction)}`)
 }
 const refTick = correction ? v4.tickFromPrice(v4.priceFromSqrtX96(correction.sqrtNext)) : initialized ? tick : marketTick
@@ -316,12 +320,12 @@ let planOffer: SwapOffer | null = null
 if (estSwap > 0n) {
   planOffer = await bestBuy(estSwap, '换币')
   const impact = Number(planOffer.out) / Number(estSwap) / rate - 1
-  if (impact < -0.2) die(`换 ${fmtU(estSwap)} USDG 的价格冲击 ${pct(impact)}（流动性太薄），把 USDG_AMOUNT 调小再试`)
-  if (impact < -0.05) log(`警告: 换 ${fmtU(estSwap)} USDG 的价格冲击 ${pct(impact)}`)
+  if (impact < -0.2) die(`换 ${fmtU(estSwap)} ${Q.symbol} 的价格冲击 ${pct(impact)}（流动性太薄），把 USDG_AMOUNT 调小再试`)
+  if (impact < -0.05) log(`警告: 换 ${fmtU(estSwap)} ${Q.symbol} 的价格冲击 ${pct(impact)}`)
 }
-log(`计划: ${planOffer ? `换币 ≈${fmtU(estSwap)} USDG -> ${planOffer.text}` : '无需换币'}，LP ≈${fmtU(usdgSpend - estSwap)} USDG + ${tokenCap ? '预算内的' : tokenStart > 0n ? '手里全部的' : '全部拿到的'} ${symbol}${correction ? '（校正开销另计）' : ''}`)
+log(`计划: ${planOffer ? `换币 ≈${fmtU(estSwap)} ${Q.symbol} -> ${planOffer.text}` : '无需换币'}，LP ≈${fmtU(usdgSpend - estSwap)} ${Q.symbol} + ${tokenCap ? '预算内的' : tokenStart > 0n ? '手里全部的' : '全部拿到的'} ${symbol}${correction ? '（校正开销另计）' : ''}`)
 log(`计划: 区间 ${rangeText(rangeFor(refTick))}，滑点 换币 ${swapSlippage}% / LP ${lpSlippage}%`)
-// 各仓位按当前配比占预算的份额（按市场价折成 USDG）
+// 各仓位按当前配比占预算的份额（按市场价折成计价币）
 const planLegs = legsFor(refTick)
 const legShares = (() => {
   const sp = Math.sqrt(v4.priceAtTick(refTick)), p = 1 / rate
@@ -331,15 +335,15 @@ const legShares = (() => {
 })()
 if (shape !== 'spot') {
   log(`计划: 形状 ${shapeLabel}，共 ${planLegs.length} 个仓位（同一笔交易创建）:`)
-  planLegs.forEach((l, i) => log(`  #${i + 1} ${legText(l)} USDG/${symbol}，≈${(legShares[i] * 100).toFixed(0)}% 资金${{ usdg: '（全 USDG）', token: '（全代币）', both: '' }[legSide(l, refTick)]}`))
+  planLegs.forEach((l, i) => log(`  #${i + 1} ${legText(l)} ${Q.symbol}/${symbol}，≈${(legShares[i] * 100).toFixed(0)}% 资金${{ usdg: `（全 ${Q.symbol}）`, token: '（全代币）', both: '' }[legSide(l, refTick)]}`))
 }
 if (opt.json) {
   const [lo, hi] = rangeFor(refTick)
   const [a, b] = [usdgPerTokenAtTick(lo), usdgPerTokenAtTick(hi)].sort((x, y) => x - y)
   console.log('@@plan ' + JSON.stringify({
-    kind: 'launch', wallet, usdg: fmtU(usdgStart), eth: trim(ethBal, 18), ethPrice: ethPrice.toFixed(2),
+    kind: 'launch', chain: cfg.name, protocol: lp.protocol, quote: Q.symbol, native: cfg.native.symbol, wallet, usdg: fmtU(usdgStart), eth: trim(ethBal, 18), ethPrice: ethPrice.toFixed(2),
     token: { address: token, symbol, name, decimals },
-    pool: { id, fee: fee / 10000, spacing, state: initialized ? 'reuse' : 'create', price: initialized ? p6(usdgPerTokenAtTick(tick)) : null, deviation: initialized ? pct(deviation(tick, marketTick)) : null },
+    pool: { id: pool.id, fee: pool.fee / 10000, feeText: feeText(pool), spacing, hooks: pool.hooks !== v4.ZERO_ADDRESS ? pool.hooks : null, state: initialized ? 'reuse' : 'create', price: initialized ? p6(usdgPerTokenAtTick(tick)) : null, deviation: initialized ? pct(deviation(tick, marketTick)) : null },
     market: { price: p6(marketPrice), via: probe.via },
     correction: correction ? correctionText(correction) : null,
     swap: planOffer ? { usdgIn: fmtU(estSwap), out: fmtT(planOffer.out), via: planOffer.via, text: planOffer.text } : null,
@@ -360,14 +364,14 @@ if (!opt.yes) {
 
 // ---- 交易 ----
 const kit = txKit(clients, usd, symOf)
-const { sendEstimated, ensureErc20Approval, permitFor, stats } = kit
-const buy = (o: SwapOffer, label: string) => executeSwap(o, swapDeps, kit, clients, USDG, token, label)
+const { sendEstimated, stats } = kit
+const buy = (o: SwapOffer, label: string) => executeSwap(o, swapDeps, kit, clients, Q.address, token, label)
 // 手里的代币不够 need 时按市价买齐：先试 Uniswap 精确输出；不行就按市场价折算投入量走精确输入（OKX），不够再按比例加量
 async function ensureTokens(need: bigint, label: string) {
   const short = need - (await holdings()).held
   if (short <= 0n) return
   let [o] = await buyOffers('EXACT_OUTPUT', short)
-  let amountIn = BigInt(Math.ceil((Number(short) / 10 ** decimals) * marketPrice * 1e6 * 1.05))
+  let amountIn = BigInt(Math.ceil((Number(short) / 10 ** decimals) * marketPrice * 10 ** Q.decimals * 1.05))
   for (let i = 0; !o && i < 3; i++) {
     const [x] = await buyOffers('EXACT_INPUT', amountIn)
     if (!x) break
@@ -376,56 +380,44 @@ async function ensureTokens(need: bigint, label: string) {
   if (!o) die(`买不到 ${fmtT(short)} ${symbol}（找不到路由）`)
   log(`换币完成: 拿到 ${fmtT(await buy(o, label))} ${symbol}`)
 }
-// PositionManager.multicall([permit…, initializePool?, modifyLiquidities(MINT ×n)])：同一个池的几个仓位在一笔交易里原子创建，各自有 amountMax、最后合并结算。
-// 返回仓位 id（按 mint 顺序）并记录到 positions.json；本次建的仓位 id 都收进 minted 供 --watch 只盯自己的
+// 同一个池的几个仓位在一笔交易里原子创建（适配器负责授权与编码）。返回仓位 id（按 mint 顺序）并记录到 positions.json；本次建的仓位 id 都收进 minted 供 --watch 只盯自己的
 const minted: bigint[] = []
-async function mint(label: string, kind: 'lp' | 'bridge', specs: v4.MintSpec[], init?: bigint) {
-  const calls: Hex[] = []
-  const [max0, max1] = specs.reduce(([a, b], s) => [a + s.amount0Max, b + s.amount1Max], [0n, 0n])
-  for (const [cur, max] of [[key.currency0, max0], [key.currency1, max1]] as const) {
-    if (max === 0n) continue
-    await ensureErc20Approval(cur, max)
-    const p = await permitFor(cur, POSM, max)
-    if (p) calls.push(encodeFunctionData({ abi: posmAbi, functionName: 'permit', args: [wallet, p.permitSingle, p.signature] }))
-  }
-  const unlockData = v4.encodeMintUnlockData(key, specs, wallet)
-  if (init) calls.push(encodeFunctionData({ abi: posmAbi, functionName: 'initializePool', args: [key, init] }))
-  calls.push(encodeFunctionData({ abi: posmAbi, functionName: 'modifyLiquidities', args: [unlockData, BigInt(now() + 600)] }))
-  const rc = await sendEstimated(label, { to: POSM, data: encodeFunctionData({ abi: posmAbi, functionName: 'multicall', args: [calls] }) })
-  const ids = parseEventLogs({ abi: posmAbi, eventName: 'Transfer', logs: rc.logs }).filter((l) => l.address.toLowerCase() === POSM.toLowerCase()).map((l) => l.args.id)
+async function mint(label: string, kind: 'lp' | 'bridge', specs: MintSpec[], init?: bigint) {
+  const tx = await lp.mintTx(kit, pool!, specs, wallet, init)
+  const rc = await sendEstimated(label, tx)
+  const ids = lp.mintIds(rc.logs)
   const at = new Date().toISOString()
   for (const positionId of ids) {
     minted.push(positionId)
-    savePosition({ id: positionId.toString(), token, symbol, poolId: id, kind, at, ...(kind === 'lp' && shape !== 'spot' ? { shape, group: rc.transactionHash } : {}) })
+    savePosition({ id: positionId.toString(), token, symbol, poolId: pool!.id, kind, at, chain: cfg.name, protocol: lp.protocol, ...(kind === 'lp' && shape !== 'spot' ? { shape, group: rc.transactionHash } : {}) })
   }
   return { rc, ids }
 }
-const withHeadroom = (x: bigint, avail: bigint) => min((x * BigInt(Math.round((100 + lpSlippage) * 100))) / 10_000n, avail)
+const floorSlip = (x: bigint) => (x * BigInt(Math.round((100 - lpSlippage) * 100))) / 10_000n
 
 // 1) 池价校正（最多 3 轮，每轮重新探测市场价）
 if (correction) {
   for (let round = 1; ; round++) {
-    if (round > 1) { marketTick = tickFromProbe((await bestBuy(1_000_000n, '探测市场价')).out); marketPrice = usdgPerTokenAtTick(marketTick) }
+    if (round > 1) { marketTick = tickFromProbe((await bestBuy(QU, '探测市场价')).out); marketPrice = usdgPerTokenAtTick(marketTick) }
     const c = round === 1 ? correction : await planCorrection(marketTick, marketPrice)
     if (!c) { log(`池价偏离 ${pct(deviation(tick, marketTick))}，已在阈值内`); break }
     if (round > 3) die(`3 轮校正后池价仍偏离 ${pct(c.dev)}，放弃`)
-    if (correctionCost(c, marketPrice) > usdgSpend - (await holdings()).spent) die(`校正约需 ${fmtU(correctionCost(c, marketPrice))} USDG，超过剩余预算，放弃`)
-    const [cin, cout] = c.zeroForOne ? [key.currency0, key.currency1] : [key.currency1, key.currency0]
-    const fmt = (x: bigint, cur: Address) => `${trim(x, cur === USDG ? 6 : decimals)} ${symOf(cur)}`
+    if (correctionCost(c, marketPrice) > usdgSpend - (await holdings()).spent) die(`校正约需 ${fmtU(correctionCost(c, marketPrice))} ${Q.symbol}，超过剩余预算，放弃`)
+    const [cin, cout] = c.zeroForOne ? [pool.currency0, pool.currency1] : [pool.currency1, pool.currency0]
+    const fmt = (x: bigint, cur: Address) => `${trim(x, cur === Q.address ? Q.decimals : decimals)} ${symOf(cur)}`
     if (c.kind === 'bridge') {
       const tokenNeed = tokenIs1 ? c.need1 : c.need0
       if (tokenNeed > 0n) await ensureTokens(tokenNeed, `买入 ${symbol} 用于过渡仓位`)
-      const { ids } = await mint(`过渡仓位 [${c.lo}, ${c.hi}]`, 'bridge', [{ tickLower: c.lo, tickUpper: c.hi, liquidity: c.liquidity, amount0Max: c.need0, amount1Max: c.need1 }])
+      const { ids } = await mint(`过渡仓位 [${c.lo}, ${c.hi}]`, 'bridge', [{ tickLower: c.lo, tickUpper: c.hi, liquidity: c.liquidity, amount0: c.need0, amount1: c.need1, amount0Max: c.need0, amount1Max: c.need1, amount0Min: floorSlip(c.need0), amount1Min: floorSlip(c.need1) }])
       log(`过渡仓位 id ${ids[0] ?? '?'}（用完即弃，撤退时一并回收）`)
     }
     const maxIn = c.kind === 'swap' ? c.amountIn : c.maxIn
     if (cin === token) await ensureTokens(maxIn, `买入 ${symbol} 用于校正`)
-    await ensureErc20Approval(cin, maxIn)
     const amount = c.kind === 'swap' ? { exactIn: c.amountIn, minOut: c.minOut } : { exactOut: c.exactOut, maxIn: c.maxIn }
-    const data = v4.encodeV4SwapCalldata(key, c.zeroForOne, amount, BigInt(now() + 600), await permitFor(cin, UR, maxIn))
+    const tx = await lp.poolSwapTx(kit, pool, c.zeroForOne, amount, BigInt(now() + 600))
     const label = c.kind === 'swap' ? `校正池价 (卖出 ${fmt(c.amountIn, cin)})` : `校正池价 (买回 ${fmt(c.exactOut, cout)})`
-    await sendEstimated(label, { to: UR, data })
-    ;[sqrtP, tick] = await slot0(id)
+    await sendEstimated(label, tx)
+    ;({ sqrtP, tick } = await lp.slot0(pool))
     log(`池价 tick ${tick} = ${price(tick)}，偏离市场价 ${pct(deviation(tick, marketTick))}`)
     if (Math.abs(deviation(tick, marketTick)) <= maxDev) break
   }
@@ -442,7 +434,7 @@ if (budgetLeft > 0n) {
     const resized = swapShare(budgetLeft, held, ref, Number(o.out) / Number(o.amountIn))
     if (abs(resized - swapAmount) > swapAmount / 200n) { swapAmount = resized; o = await bestBuy(swapAmount, '换币') } // 差 0.5% 以上就按大单实际汇率重算
     const got = await buy(o, '换币')
-    log(`换币完成: ${fmtU(swapAmount)} USDG -> ${fmtT(got)} ${symbol}`)
+    log(`换币完成: ${fmtU(swapAmount)} ${Q.symbol} -> ${fmtT(got)} ${symbol}`)
     ;({ spent, held } = await holdings())
     budgetLeft = usdgSpend - spent
   }
@@ -454,12 +446,12 @@ if (budgetLeft < 0n) budgetLeft = 0n
 // 遇到就重读池价、按手里的币重算再试
 const f0 = (x: bigint) => trim(x, dec0), f1 = (x: bigint) => trim(x, dec1)
 async function readPrice() {
-  ;[sqrtP, tick] = await slot0(id)
+  ;({ sqrtP, tick } = await lp.slot0(pool!))
   initialized = sqrtP !== 0n
   if (initialized) {
     log(`LP 价格: 池 tick ${tick} = ${price(tick)}`)
   } else {
-    tick = tickFromProbe((await bestBuy(1_000_000n, '探测市场价')).out)
+    tick = tickFromProbe((await bestBuy(QU, '探测市场价')).out)
     sqrtP = v4.getSqrtRatioAtTick(tick)
     log(`LP 价格: 新池初始价 tick ${tick} = ${price(tick)}（市场探测价）`)
   }
@@ -495,7 +487,7 @@ function planMints(avail0: bigint, avail1: bigint) {
     return want.reduce((a, b) => a + b, 0n) <= avail || sum === 0n ? want : xs.map((x) => x + ((avail - sum) * x) / sum)
   }
   const m0 = maxes(amounts.map((a) => a[0]), sum0, avail0), m1 = maxes(amounts.map((a) => a[1]), sum1, avail1)
-  const specs: v4.MintSpec[] = legs.map((l, j) => ({ tickLower: l.lo, tickUpper: l.hi, liquidity: liq[j], amount0Max: m0[j], amount1Max: m1[j] }))
+  const specs: MintSpec[] = legs.map((l, j) => ({ tickLower: l.lo, tickUpper: l.hi, liquidity: liq[j], amount0: amounts[j][0], amount1: amounts[j][1], amount0Max: m0[j], amount1Max: m1[j], amount0Min: floorSlip(amounts[j][0]), amount1Min: floorSlip(amounts[j][1]) }))
   return { specs, amounts, sum0, sum1 }
 }
 let result: Awaited<ReturnType<typeof mint>> | undefined
@@ -521,17 +513,19 @@ for (let attempt = 1; !result; attempt++) {
   try {
     result = await mint(initialized ? tag : `建池+${tag}`, 'lp', specs, initialized ? undefined : sqrtP)
   } catch (e) {
-    const r = slippageRevert(e)
-    if (r?.kind !== 'max' || attempt >= 5) throw e
-    const cur = specs.some((s) => s.amount0Max === r.limit) ? key.currency0 : key.currency1
-    const f = cur === key.currency0 ? f0 : f1
-    log(`${tag} 回滚: 池价变动，需要 ${f(r.actual)} ${symOf(cur)} 超过上限 ${f(r.limit)}，等 3 秒按新池价重算（第 ${attempt} 次）`)
+    const r = lp.slippageRevert(e)
+    if (!r || attempt >= 5) throw e
+    if (r.limit !== undefined && r.actual !== undefined) {
+      const cur = specs.some((s) => s.amount0Max === r.limit) ? pool.currency0 : pool.currency1
+      const f = cur === pool.currency0 ? f0 : f1
+      log(`${tag} 回滚: 池价变动，需要 ${f(r.actual)} ${symOf(cur)} 超过上限 ${f(r.limit)}，等 3 秒按新池价重算（第 ${attempt} 次）`)
+    } else log(`${tag} 回滚: 池价变动超出滑点，等 3 秒按新池价重算（第 ${attempt} 次）`)
     await sleep(3000)
   }
 }
-log(`完成: 仓位 ${result.ids.join(', ') || '?'}，池 ${id}（已记录到 positions.json，撤退: npm run exit -- --token ${token}）`)
-log(`      ${EXPLORER}/tx/${result.rc.transactionHash}`)
-log(`gas 合计: ${stats.txCount} 笔，${trim(stats.gasTotal, 18)} ETH ($${usd(stats.gasTotal)})`)
+log(`完成: 仓位 ${result.ids.join(', ') || '?'}，池 ${pool.id}（已记录到 positions.json，撤退: npm run exit -- --chain ${cfg.name} --protocol ${lp.protocol} --token ${token}）`)
+log(`      ${cfg.explorer}/tx/${result.rc.transactionHash}`)
+log(`gas 合计: ${stats.txCount} 笔，${trim(stats.gasTotal, 18)} ${cfg.native.symbol} ($${usd(stats.gasTotal)})`)
 if (opt.json) console.log('@@positions ' + JSON.stringify(minted.map(String))) // 网页界面：本次建的仓位（--watch 时接下来就盯这些）
 
 // 6) 可选：继续监控本次建的仓位，跳出区间自动撤退（同一代币的其他仓位不管，可以再开一个进程做别的区间）

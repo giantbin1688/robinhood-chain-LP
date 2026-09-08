@@ -115,21 +115,25 @@ const PERMIT_SINGLE_ABI = {
   ],
 } as const
 
-// UniversalRouter (>= 2.1.1) calldata for one swap in one v4 pool, exact input or exact output:
-// [PERMIT2_PERMIT] V4_SWAP { SWAP_EXACT_IN_SINGLE | SWAP_EXACT_OUT_SINGLE, SETTLE_ALL, TAKE_ALL }. Input is pulled from the caller through Permit2;
+// UniversalRouter calldata for one swap in one singleton pool, exact input or exact output:
+// [PERMIT2_PERMIT] V4_SWAP/INFI_SWAP(0x10) { SWAP_EXACT_IN_SINGLE | SWAP_EXACT_OUT_SINGLE, SETTLE_ALL, TAKE_ALL }. Input is pulled from the caller through Permit2;
 // an optional signed permit sets the Permit2 -> router allowance in the same transaction.
+// keyAbi: PoolKey tuple of the protocol; minHop: Robinhood's UniversalRouter 2.1.1 adds a minHopPriceX36 field after amountLimit (PancakeSwap Infinity does not)
 export function encodeV4SwapCalldata(
-  key: PoolKey, zeroForOne: boolean, amount: { exactIn: bigint; minOut: bigint } | { exactOut: bigint; maxIn: bigint }, deadline: bigint, permit?: SignedPermit | null,
+  key: unknown, zeroForOne: boolean, amount: { exactIn: bigint; minOut: bigint } | { exactOut: bigint; maxIn: bigint }, deadline: bigint, permit?: SignedPermit | null,
+  opts: { keyAbi?: typeof POOL_KEY_ABI | { type: 'tuple'; components: readonly { name: string; type: string }[] }; minHop?: boolean } = {},
 ): Hex {
+  const keyAbi = opts.keyAbi ?? POOL_KEY_ABI, minHop = opts.minHop ?? true
+  const k = key as PoolKey
   const exactIn = 'exactIn' in amount
   const swap = encodeAbiParameters(
     [{ type: 'tuple', components: [
-      { ...POOL_KEY_ABI, name: 'poolKey' }, { name: 'zeroForOne', type: 'bool' }, { name: 'amount', type: 'uint128' },
-      { name: 'amountLimit', type: 'uint128' }, { name: 'minHopPriceX36', type: 'uint256' }, { name: 'hookData', type: 'bytes' },
-    ] }],
-    [{ poolKey: key, zeroForOne, amount: exactIn ? amount.exactIn : amount.exactOut, amountLimit: exactIn ? amount.minOut : amount.maxIn, minHopPriceX36: 0n, hookData: '0x' }],
+      { ...keyAbi, name: 'poolKey' }, { name: 'zeroForOne', type: 'bool' }, { name: 'amount', type: 'uint128' },
+      { name: 'amountLimit', type: 'uint128' }, ...(minHop ? [{ name: 'minHopPriceX36', type: 'uint256' }] : []), { name: 'hookData', type: 'bytes' },
+    ] }] as any,
+    [{ poolKey: key, zeroForOne, amount: exactIn ? amount.exactIn : amount.exactOut, amountLimit: exactIn ? amount.minOut : amount.maxIn, ...(minHop ? { minHopPriceX36: 0n } : {}), hookData: '0x' }],
   )
-  const [cin, cout] = zeroForOne ? [key.currency0, key.currency1] : [key.currency1, key.currency0]
+  const [cin, cout] = zeroForOne ? [k.currency0, k.currency1] : [k.currency1, k.currency0]
   const settle = encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [cin, exactIn ? amount.exactIn : amount.maxIn])
   const take = encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [cout, exactIn ? amount.minOut : amount.exactOut])
   const v4Input = encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [exactIn ? '0x060c0f' : '0x080c0f', [swap, settle, take]])
@@ -140,20 +144,21 @@ export function encodeV4SwapCalldata(
 const UR_ABI = parseAbi(['function execute(bytes commands, bytes[] inputs, uint256 deadline) payable'])
 
 // PositionManager.modifyLiquidities unlockData for MINT_POSITION (0x02) ×n + SETTLE_PAIR (0x0d): several positions of one pool in one transaction,
-// each with its own amountMax, one settlement of the summed deltas. ERC20 pairs only (no SWEEP).
+// each with its own amountMax, one settlement of the summed deltas. ERC20 pairs only (no SWEEP). Same action bytes on Uniswap v4 and PancakeSwap Infinity CL.
 export type MintSpec = { tickLower: number; tickUpper: number; liquidity: bigint; amount0Max: bigint; amount1Max: bigint }
-export function encodeMintUnlockData(key: PoolKey, mints: MintSpec[], owner: Address): Hex {
+export function encodeMintUnlockData(key: unknown, mints: MintSpec[], owner: Address, keyAbi: { type: 'tuple'; components: readonly { name: string; type: string }[] } = POOL_KEY_ABI): Hex {
+  const k = key as PoolKey
   const encoded = mints.map((m) => encodeAbiParameters(
-    [POOL_KEY_ABI, { type: 'int24' }, { type: 'int24' }, { type: 'uint256' }, { type: 'uint128' }, { type: 'uint128' }, { type: 'address' }, { type: 'bytes' }],
+    [keyAbi, { type: 'int24' }, { type: 'int24' }, { type: 'uint256' }, { type: 'uint128' }, { type: 'uint128' }, { type: 'address' }, { type: 'bytes' }] as any,
     [key, m.tickLower, m.tickUpper, m.liquidity, m.amount0Max, m.amount1Max, owner, '0x'],
   ))
-  const settle = encodeAbiParameters([{ type: 'address' }, { type: 'address' }], [key.currency0, key.currency1])
+  const settle = encodeAbiParameters([{ type: 'address' }, { type: 'address' }], [k.currency0, k.currency1])
   const actions = ('0x' + '02'.repeat(mints.length) + '0d') as Hex
   return encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [actions, [...encoded, settle]])
 }
 
 // unlockData for burning whole positions of one pool: BURN_POSITION (0x03) per position + TAKE_PAIR (0x11) to the recipient
-export function encodeBurnUnlockData(key: PoolKey, positions: { id: bigint; amount0Min: bigint; amount1Min: bigint }[], recipient: Address): Hex {
+export function encodeBurnUnlockData(key: { currency0: Address; currency1: Address }, positions: { id: bigint; amount0Min: bigint; amount1Min: bigint }[], recipient: Address): Hex {
   const burns = positions.map((p) => encodeAbiParameters(
     [{ type: 'uint256' }, { type: 'uint128' }, { type: 'uint128' }, { type: 'bytes' }], [p.id, p.amount0Min, p.amount1Min, '0x'],
   ))
@@ -163,7 +168,7 @@ export function encodeBurnUnlockData(key: PoolKey, positions: { id: bigint; amou
 }
 
 // unlockData for collecting fees only: DECREASE_LIQUIDITY (0x01) with liquidity 0 per position (fees accrue as the delta) + TAKE_PAIR (0x11)
-export function encodeCollectUnlockData(key: PoolKey, ids: bigint[], recipient: Address): Hex {
+export function encodeCollectUnlockData(key: { currency0: Address; currency1: Address }, ids: bigint[], recipient: Address): Hex {
   const decreases = ids.map((id) => encodeAbiParameters(
     [{ type: 'uint256' }, { type: 'uint256' }, { type: 'uint128' }, { type: 'uint128' }, { type: 'bytes' }], [id, 0n, 0n, 0n, '0x'],
   ))
@@ -172,8 +177,22 @@ export function encodeCollectUnlockData(key: PoolKey, ids: bigint[], recipient: 
   return encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [actions, [...decreases, take]])
 }
 
-// PositionInfo packing (v4-periphery PositionInfoLibrary): poolId (200 bits) | tickUpper (24) | tickLower (24) | hasSubscriber (8)
+// PositionInfo packing (v4-periphery PositionInfoLibrary, same on PancakeSwap Infinity): poolId (200 bits) | tickUpper (24) | tickLower (24) | hasSubscriber (8)
 export function decodePositionInfo(info: bigint) {
   const int24 = (x: bigint) => { const n = Number(x & 0xffffffn); return n >= 0x800000 ? n - 0x1000000 : n }
   return { tickLower: int24(info >> 8n), tickUpper: int24(info >> 32n) }
 }
+
+// Fee growth inside [lower, upper] from the global counters and the two ticks' feeGrowthOutside (v3-core Tick.getFeeGrowthInside; uint256 wraparound)
+const U256 = (1n << 256n) - 1n
+export function feeGrowthInside(tick: number, lower: number, upper: number, global: [bigint, bigint], outLower: [bigint, bigint], outUpper: [bigint, bigint]): [bigint, bigint] {
+  const one = (i: 0 | 1) => {
+    const below = tick >= lower ? outLower[i] : (global[i] - outLower[i]) & U256
+    const above = tick < upper ? outUpper[i] : (global[i] - outUpper[i]) & U256
+    return (global[i] - below - above) & U256
+  }
+  return [one(0), one(1)]
+}
+// Uncollected fees of a position: liquidity × (feeGrowthInside − feeGrowthInsideLast) / 2^128, difference taken modulo 2^256
+export const feesOwed = (liquidity: bigint, inside: [bigint, bigint], last: [bigint, bigint]): [bigint, bigint] =>
+  [(((inside[0] - last[0]) & U256) * liquidity) >> 128n, (((inside[1] - last[1]) & U256) * liquidity) >> 128n]

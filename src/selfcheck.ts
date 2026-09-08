@@ -35,6 +35,15 @@ assert.equal(keccak256(unlockData), '0x19e3852cd4d12f82843f099bf8d7c00dcce5caf72
 const two = encodeMintUnlockData(key, [{ tickLower: 334000, tickUpper: 349000, liquidity, amount0Max: 1n, amount1Max: 1n }, { tickLower: 330000, tickUpper: 352000, liquidity, amount0Max: 1n, amount1Max: 1n }], WALLET)
 assert.ok(two.includes('02020d'.padEnd(64, '0')), 'actions 0x02020d')
 
+// PancakeSwap（BSC）：v3 池地址的 create2 推导、Infinity PoolKey 的 poolId（含带 hook 的动态费率池），都对照链上已知的池
+const { computePoolAddress } = await import('./lp-v3.ts')
+const USDT = '0x55d398326f99059fF775485246999027B3197955', CAKE = '0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82'
+assert.equal(computePoolAddress('0x41ff9AA7e16B8B1a8a8dc4f0eFacd93D02d071c9', CAKE, USDT, 2500), '0x7f51c8AaA6B0599aBd16674e2b17FEc7a9f674A1', 'Pancake v3 CAKE/USDT 0.25% pool address')
+const { encodeAbiParameters } = await import('viem')
+const INFI_KEY = { type: 'tuple', components: [{ name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'hooks', type: 'address' }, { name: 'poolManager', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'parameters', type: 'bytes32' }] } as const
+const infiId = keccak256(encodeAbiParameters([INFI_KEY], [{ currency0: CAKE, currency1: USDT, hooks: '0x1A3DFBCAc585e22F993Cc8e09BcC0dB388Cc1Ca3', poolManager: '0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b', fee: 0x800000, parameters: '0x0000000000000000000000000000000000000000000000000000000000320040' }]))
+assert.equal(infiId, '0x47516855520496b84a169f7bb92ace7ffb6e8c535bccb52a308ccff113aeccfb', 'Infinity CAKE/USDT dynamic-fee pool id')
+
 // 网页内联脚本只做语法解析（不执行）：一个重复声明就会让整个页面不动，右上角停在"连接中…"
 for (const [, src] of readFileSync(new URL('./ui/index.html', import.meta.url), 'utf8').matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)) new Function(src)
 

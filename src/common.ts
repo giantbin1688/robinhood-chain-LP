@@ -1,27 +1,17 @@
-// 进场（cli.ts）和撤退（exit.ts）共用：常量、ABI、客户端、Uniswap API、发交易/授权工具、仓位记录
+// 进场（cli.ts）和撤退（exit.ts）共用：链选择与客户端、ABI、Uniswap API / OKX 聚合器、发交易/授权工具、仓位记录
 import { createHmac } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici'
 import {
-  createPublicClient, createWalletClient, defineChain, encodeFunctionData, fallback, formatUnits, getAddress, http, maxUint160, maxUint256, parseAbi, parseAbiItem,
+  createPublicClient, createWalletClient, defineChain, encodeFunctionData, fallback, formatUnits, getAddress, http, maxUint160, maxUint256, parseAbi,
   type Address, type Hex, type PublicClient, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import * as v4 from './v4.ts'
+import { CHAINS, selectChain, type ChainConfig, type ChainName, type ProtocolName } from './chains.ts'
+import { makeLp, type Lp, type Pool } from './lp.ts'
 
 if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) setGlobalDispatcher(new EnvHttpProxyAgent())
-
-export const CHAIN_ID = 4663
-export const USDG = '0x5fc5360d0400a0fd4f2af552add042d716f1d168' as Address
-export const WETH = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73' as Address
-export const PERMIT2 = '0x000000000022D473030F116dDEE9F6B43aC78BA3' as Address
-export const POOL_MANAGER = '0x8366a39cc670b4001a1121b8f6a443a643e40951' as Address
-export const POSM = '0x58daec3116aae6D93017bAAea7749052E8a04fA7' as Address
-export const STATE_VIEW = '0xf3334192d15450cdd385c8b70e03f9a6bd9e673b' as Address
-export const QUOTER = '0x8dc178efb8111bb0973dd9d722ebeff267c98f94' as Address
-export const UR = '0x8876789976decbfcbbbe364623c63652db8c0904' as Address // UniversalRouter 2.1.1
-export const EXPLORER = 'https://robinhoodchain.blockscout.com'
-export const PUBLIC_RPC = 'https://rpc.mainnet.chain.robinhood.com'
 
 export const erc20Abi = parseAbi([
   'function symbol() view returns (string)', 'function name() view returns (string)', 'function decimals() view returns (uint8)',
@@ -29,29 +19,6 @@ export const erc20Abi = parseAbi([
   'function approve(address,uint256) returns (bool)',
 ])
 export const permit2Abi = parseAbi(['function allowance(address,address,address) view returns (uint160 amount, uint48 expiration, uint48 nonce)'])
-export const stateViewAbi = parseAbi([
-  'function getSlot0(bytes32) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)',
-  'function getLiquidity(bytes32) view returns (uint128)',
-])
-const poolKeyStruct = 'struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }'
-export const quoterAbi = parseAbi([ // 声明成 view 以便 eth_call；Quoter 内部靠 revert 取数，不改状态
-  poolKeyStruct, 'struct QuoteExactSingleParams { PoolKey poolKey; bool zeroForOne; uint128 exactAmount; bytes hookData; }',
-  'function quoteExactInputSingle(QuoteExactSingleParams params) view returns (uint256 amountOut, uint256 gasEstimate)',
-])
-export const posmAbi = parseAbi([
-  poolKeyStruct,
-  'struct PermitDetails { address token; uint160 amount; uint48 expiration; uint48 nonce; }',
-  'struct PermitSingle { PermitDetails details; address spender; uint256 sigDeadline; }',
-  'function permit(address owner, PermitSingle permitSingle, bytes signature) payable returns (bytes err)',
-  'function initializePool(PoolKey key, uint160 sqrtPriceX96) payable returns (int24)',
-  'function modifyLiquidities(bytes unlockData, uint256 deadline) payable',
-  'function multicall(bytes[] data) payable returns (bytes[])',
-  'function ownerOf(uint256 id) view returns (address)',
-  'function getPoolAndPositionInfo(uint256 tokenId) view returns (PoolKey poolKey, uint256 info)',
-  'function getPositionLiquidity(uint256 tokenId) view returns (uint128 liquidity)',
-  'function poolKeys(bytes25 poolId) view returns (address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks)', // 销毁的 NFT 仓位信息已删，只能按 poolId 前 25 字节查池子
-  'event Transfer(address indexed from, address indexed to, uint256 indexed id)',
-])
 
 export const env = (k: string, d: string) => process.env[k] || d
 export const ts = () => new Date().toTimeString().slice(0, 8)
@@ -66,27 +33,37 @@ export const abs = (a: bigint) => (a < 0n ? -a : a)
 export const now = () => Math.floor(Date.now() / 1000)
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-export const chain = defineChain({
-  id: CHAIN_ID, name: 'Robinhood Chain', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-  rpcUrls: { default: { http: [process.env.RPC_URL ?? PUBLIC_RPC] } },
-  contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } }, // 标准 Multicall3，pub.multicall 把成批只读调用合成一个 eth_call
+export const viemChain = (cfg: ChainConfig, rpc: string) => defineChain({
+  id: cfg.id, name: cfg.label, nativeCurrency: { name: cfg.native.symbol, symbol: cfg.native.symbol, decimals: cfg.native.decimals },
+  rpcUrls: { default: { http: [rpc] } },
+  contracts: { multicall3: { address: cfg.multicall3 } }, // 标准 Multicall3，pub.multicall 把成批只读调用合成一个 eth_call
 })
 // batch: 同一时刻发出的多个请求合并成一个 HTTP 请求；pollingInterval: 等收据时的轮询间隔
 // 配了自己的节点时公共节点作备用：Alchemy 免费档每秒 500 计算单元，一批几十个 eth_call 就会被 429（JSON-RPC 里的 429 viem 不重试），
 // 出错的请求自动改走公共节点；合约 revert 不会回落（fallback 对 execution reverted 直接抛出），报价/滑点那些靠 revert 数据的逻辑不受影响
-export function makeClients(from?: string, needKey = true) {
+export type ClientsOptions = { from?: string; needKey?: boolean; chain?: ChainName; protocol?: ProtocolName }
+export async function makeClients(o: ClientsOptions = {}) {
+  const needKey = o.needKey ?? true
+  const sel = o.chain ? selectChain([`--chain=${o.chain}`, `--protocol=${o.protocol ?? CHAINS[o.chain]?.protocols[0]}`], {}) : selectChain()
+  const cfg = sel.cfg, protocol = sel.protocol
   const account = process.env.PRIVATE_KEY ? privateKeyToAccount(process.env.PRIVATE_KEY as Hex) : undefined
-  const wallet: Address = account?.address ?? (from ? getAddress(from) : die('请在 .env 里设置 PRIVATE_KEY（或 --dry-run 配合 --from <地址>）'))
+  const wallet: Address = account?.address ?? (o.from ? getAddress(o.from) : die('请在 .env 里设置 PRIVATE_KEY（或 --dry-run 配合 --from <地址>）'))
   if (!account && needKey) die('非 --dry-run 模式必须提供 PRIVATE_KEY')
-  const rpc = process.env.RPC_URL
-  const transport = rpc && rpc !== PUBLIC_RPC
-    ? fallback([http(rpc, { batch: true }), http(PUBLIC_RPC, { batch: true, methods: { exclude: ['alchemy_getAssetTransfers'] } })])
-    : http(PUBLIC_RPC, { batch: true })
+  const rpc = process.env[cfg.rpcEnv]
+  const own = !!rpc && rpc !== cfg.publicRpc
+  const chain = viemChain(cfg, rpc ?? cfg.publicRpc)
+  const transport = own
+    ? fallback([http(rpc, { batch: true }), http(cfg.publicRpc, { batch: true, methods: { exclude: ['alchemy_getAssetTransfers'] } })])
+    : http(cfg.publicRpc, { batch: true })
   const pub = createPublicClient({ chain, transport, pollingInterval: 500 })
   const wc = account ? createWalletClient({ account, chain, transport }) : undefined
-  return { account, wallet, pub, wc }
+  const rpcIsAlchemy = own && /alchemy\.com/.test(rpc!)
+  const deps = { pub, wallet, cfg, rpcIsAlchemy, log }
+  const lp = await makeLp(protocol, deps)
+  const priceLp = cfg.nativePrice.protocol === protocol ? lp : await makeLp(cfg.nativePrice.protocol, deps)
+  return { account, wallet, pub, wc, cfg, protocol, chain, lp, priceLp, Q: cfg.quote, rpcIsAlchemy }
 }
-export type Clients = ReturnType<typeof makeClients>
+export type Clients = Awaited<ReturnType<typeof makeClients>>
 
 export async function tokenMeta(pub: PublicClient, token: Address) {
   const [symbol, name, decimals] = await Promise.all([
@@ -96,48 +73,22 @@ export async function tokenMeta(pub: PublicClient, token: Address) {
   ])
   return { symbol, name, decimals }
 }
-// ETH 价格：v4 WETH/USDG 0.05% 池（WETH 是 currency0 18 位，USDG 是 currency1 6 位）
-export async function ethPriceUsd(pub: PublicClient) {
-  const [sqrt] = await pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: 'getSlot0', args: [v4.poolId(v4.makePoolKey(WETH, USDG, 500, 10))] })
-  return v4.priceFromSqrtX96(sqrt) * 1e12
+// 原生币（ETH / BNB）的美元价：读一个稳定的 包装原生币/计价币 池的 tick（Robinhood: v4 WETH/USDG 0.05%；BSC: v3 WBNB/USDT 0.05%）
+export async function nativePriceUsd(c: Clients) {
+  const { cfg } = c
+  const pool = await c.priceLp.pool(cfg.wnative, cfg.nativePrice.fee, cfg.nativePrice.spacing)
+  const { tick } = await c.priceLp.slot0(pool)
+  const raw = v4.priceAtTick(tick) // currency1 基础单位 / currency0 基础单位
+  const quoteIs1 = pool.currency1.toLowerCase() === cfg.quote.address.toLowerCase()
+  return quoteIs1 ? raw * 10 ** (cfg.native.decimals - cfg.quote.decimals) : 10 ** (cfg.native.decimals - cfg.quote.decimals) / raw
 }
 
-// ---- 钱包名下 PositionManager NFT 的转入/转出记录（from 为 0x0 的是 mint，to 为 0x0 的是销毁）----
-// 优先用节点的 alchemy_getAssetTransfers（Alchemy 各档都有，一次约 0.5s，两个方向并发查）；节点不支持时退回公共节点全链 eth_getLogs
-// （Alchemy 免费版 getLogs 只让查 10 个区块；公共节点连续扫两次就会 429，所以只扫转入方向，失败隔几秒再试）
-export type NftTransfer = { id: bigint; from: Address; to: Address; block: bigint; tx: Hex }
-export async function positionTransfers(c: Clients): Promise<NftTransfer[]> {
-  const { pub, wallet } = c
-  if (process.env.RPC_URL && process.env.RPC_URL !== PUBLIC_RPC) {
-    const page = async (dir: 'toAddress' | 'fromAddress') => {
-      const out: NftTransfer[] = []
-      for (let pageKey: string | undefined; ; ) {
-        const r: any = await pub.request({ method: 'alchemy_getAssetTransfers', params: [{ fromBlock: '0x0', toBlock: 'latest', [dir]: wallet, contractAddresses: [POSM], category: ['erc721'], maxCount: '0x3e8', ...(pageKey ? { pageKey } : {}) }] } as any)
-        for (const t of r.transfers) out.push({ id: BigInt(t.erc721TokenId), from: getAddress(t.from), to: getAddress(t.to ?? v4.ZERO_ADDRESS), block: BigInt(t.blockNum), tx: t.hash })
-        if (!(pageKey = r.pageKey)) return out
-      }
-    }
-    try { return (await Promise.all([page('toAddress'), page('fromAddress')])).flat() }
-    catch (e: any) { log(`alchemy_getAssetTransfers 失败，改用公共节点扫描: ${String(e?.shortMessage ?? e?.message).slice(0, 80)}`) }
-  }
-  const scan = createPublicClient({ chain, transport: http(PUBLIC_RPC) })
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const logs = await scan.getLogs({ address: POSM, event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 indexed id)'), args: { to: wallet }, fromBlock: 0n })
-      return logs.map((l) => ({ id: l.args.id!, from: l.args.from!, to: l.args.to!, block: l.blockNumber, tx: l.transactionHash }))
-    } catch (e: any) {
-      if (attempt >= 3) throw e
-      log(`公共节点扫描失败 (${String(e?.shortMessage ?? e?.message).slice(0, 60)})，${3 * attempt}s 后重试`)
-      await sleep(3000 * attempt)
-    }
-  }
-}
-
-// ---- Uniswap Trading API ----
-export function uniswapApi(wallet: Address, slippage: number) {
+// ---- Uniswap Trading API（聚合路由；BSC 上它只走 Uniswap 自家的池，Pancake 的深度看不到，所以 BSC 主要靠 OKX）----
+export function uniswapApi(c: Pick<Clients, 'wallet' | 'cfg'>, slippage: number) {
+  const { wallet, cfg } = c
   const API_URL = process.env.UNISWAP_API_URL ?? 'https://trade-api.gateway.uniswap.org/v1'
   const API_KEY = process.env.UNISWAP_API_KEY ?? ''
-  if (!API_KEY) die('请在 .env 里设置 UNISWAP_API_KEY（developers.uniswap.org/dashboard）')
+  if (!API_KEY) return null
   async function api(path: string, body: unknown): Promise<any> {
     for (let attempt = 1; ; attempt++) {
       const r = await fetch(API_URL + path, {
@@ -155,7 +106,7 @@ export function uniswapApi(wallet: Address, slippage: number) {
   // EXACT_INPUT: amount 是投入的 tokenIn；EXACT_OUTPUT: amount 是要拿到的 tokenOut
   async function quote(tokenIn: Address, tokenOut: Address, type: 'EXACT_INPUT' | 'EXACT_OUTPUT', amount: bigint) {
     const q = await api('/quote', {
-      tokenIn, tokenOut, tokenInChainId: CHAIN_ID, tokenOutChainId: CHAIN_ID, type,
+      tokenIn, tokenOut, tokenInChainId: cfg.id, tokenOutChainId: cfg.id, type,
       amount: amount.toString(), swapper: wallet, slippageTolerance: slippage, protocols: ['V2', 'V3', 'V4'], urgency: 'normal',
     })
     if (q.routing !== 'CLASSIC') die(`API 返回了非 CLASSIC 路由: ${q.routing}`)
@@ -175,7 +126,8 @@ export function uniswapApi(wallet: Address, slippage: number) {
 }
 
 // ---- OKX DEX 聚合器（web3.okx.com Onchain OS，v6）。没配 OKX_API_KEY 时返回 null ----
-export function okxDex(wallet: Address, slippage: number) {
+export function okxDex(c: Pick<Clients, 'wallet' | 'cfg'>, slippage: number) {
+  const { wallet, cfg } = c
   const key = env('OKX_API_KEY', ''), secret = env('OKX_SECRET_KEY', ''), pass = env('OKX_API_PASSPHRASE', '')
   if (!key || !secret || !pass) return null
   async function get(path: string, params: Record<string, string>): Promise<any[]> {
@@ -189,10 +141,10 @@ export function okxDex(wallet: Address, slippage: number) {
   }
   return {
     // 授权给 OKX 的合约地址
-    approver: async () => getAddress((await get('/api/v6/dex/aggregator/supported/chain', { chainIndex: String(CHAIN_ID) }))[0].dexTokenApproveAddress),
+    approver: async () => getAddress((await get('/api/v6/dex/aggregator/supported/chain', { chainIndex: String(cfg.okxChainIndex) }))[0].dexTokenApproveAddress),
     // 报价 + 交易数据一次拿齐
     swap: async (from: Address, to: Address, amount: bigint) => {
-      const d = (await get('/api/v6/dex/aggregator/swap', { chainIndex: String(CHAIN_ID), amount: amount.toString(), fromTokenAddress: from, toTokenAddress: to, slippagePercent: String(slippage), userWalletAddress: wallet }))[0]
+      const d = (await get('/api/v6/dex/aggregator/swap', { chainIndex: String(cfg.okxChainIndex), amount: amount.toString(), fromTokenAddress: from, toTokenAddress: to, slippagePercent: String(slippage), userWalletAddress: wallet }))[0]
       return { out: BigInt(d.routerResult.toTokenAmount) as bigint, minOut: BigInt(d.tx.minReceiveAmount) as bigint, route: (d.routerResult.dexRouterList ?? []).map((r: any) => `${r.dexProtocol?.dexName ?? '?'} ${r.dexProtocol?.percent ?? ''}%`).join(' + '), honeypot: d.routerResult.fromToken?.isHoneyPot === true, tx: { to: getAddress(d.tx.to), data: d.tx.data as Hex, value: BigInt(d.tx.value ?? 0), gasLimit: BigInt(d.tx.gas ?? 0) } }
     },
   }
@@ -200,8 +152,8 @@ export function okxDex(wallet: Address, slippage: number) {
 
 // ---- 发交易 / 授权 ----
 export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Address) => string) {
-  const { pub, wc, wallet } = c
-  // nonce 本地递增、gas 价整轮复用（RHC 费率稳定，上限给 3 倍余量，实际只按基础费扣），发交易前不再逐笔查询
+  const { pub, wc, wallet, chain, cfg, lp } = c
+  // nonce 本地递增、gas 价整轮复用（费率稳定的链上够用，上限给 3 倍余量，实际只按基础费扣），发交易前不再逐笔查询
   let nonce: number | undefined, fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } | undefined
   const stats = { txCount: 0, gasTotal: 0n }
   async function send(label: string, tx: { to: Address; data: Hex; value?: bigint; gas: bigint }) {
@@ -212,11 +164,11 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
     const cost = rc.gasUsed * rc.effectiveGasPrice
     stats.txCount++; stats.gasTotal += cost
     process.stdout.write(rc.status === 'success' ? ` 成功，${rc.gasUsed} gas $${usd(cost)}\n` : ' 失败(revert)\n')
-    if (rc.status !== 'success') die(`${label} 交易回滚: ${EXPLORER}/tx/${hash}`)
+    if (rc.status !== 'success') die(`${label} 交易回滚: ${cfg.explorer}/tx/${hash}`)
     return rc
   }
-  // ERC20 无限额授权给 spender（默认 Permit2），额度够就跳过
-  async function ensureErc20Approval(t: Address, need: bigint, spender: Address = PERMIT2, spenderName = 'Permit2') {
+  // ERC20 无限额授权给 spender（默认这个协议的 Permit2），额度够就跳过
+  async function ensureErc20Approval(t: Address, need: bigint, spender: Address = lp.permit2, spenderName = 'Permit2') {
     const allowance = await pub.readContract({ address: t, abi: erc20Abi, functionName: 'allowance', args: [wallet, spender] })
     if (allowance >= need) return
     const tx = { to: t, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [spender, maxUint256] }) }
@@ -224,10 +176,10 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
   }
   // Permit2 -> spender 的额度用签名授权（塞进用它的那笔交易里，不单独发交易）；额度够且未过期则返回 null
   async function permitFor(t: Address, spender: Address, need: bigint): Promise<v4.SignedPermit | null> {
-    const [amount, expiration, pnonce] = await pub.readContract({ address: PERMIT2, abi: permit2Abi, functionName: 'allowance', args: [wallet, t, spender] })
+    const [amount, expiration, pnonce] = await pub.readContract({ address: lp.permit2, abi: permit2Abi, functionName: 'allowance', args: [wallet, t, spender] })
     if (amount >= need && expiration >= now() + 3600) return null
     const permitSingle: v4.PermitSingle = { details: { token: t, amount: maxUint160, expiration: now() + 30 * 86400, nonce: pnonce }, spender, sigDeadline: BigInt(now() + 1800) }
-    const signature = await wc!.signTypedData({ account: wc!.account!, domain: { name: 'Permit2', chainId: CHAIN_ID, verifyingContract: PERMIT2 }, types: v4.PERMIT_TYPES, primaryType: 'PermitSingle', message: permitSingle })
+    const signature = await wc!.signTypedData({ account: wc!.account!, domain: { name: 'Permit2', chainId: cfg.id, verifyingContract: lp.permit2 }, types: v4.PERMIT_TYPES, primaryType: 'PermitSingle', message: permitSingle })
     return { permitSingle, signature }
   }
   // 估 gas 后发送，gas 上限 = 估算 × 1.3（可传入 API 给的参考值取较大者）
@@ -255,36 +207,33 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
     return sent.map((s, i) => {
       const rc = rcs[i], cost = rc.gasUsed * rc.effectiveGasPrice, ok = rc.status === 'success'
       stats.txCount++; stats.gasTotal += cost
-      log(`${s.label} ${s.hash} ${ok ? `成功，${rc.gasUsed} gas $${usd(cost)}` : `失败(revert) ${EXPLORER}/tx/${s.hash}`}`)
+      log(`${s.label} ${s.hash} ${ok ? `成功，${rc.gasUsed} gas $${usd(cost)}` : `失败(revert) ${cfg.explorer}/tx/${s.hash}`}`)
       return { label: s.label, hash: s.hash, ok, block: rc.blockNumber }
     })
   }
   return { send, sendEstimated, sendBatch, ensureErc20Approval, permitFor, stats }
 }
 
-// PositionManager 的滑点回滚：MaximumAmountExceeded(uint128 max, uint128 requested) / MinimumAmountInsufficient(uint128 min, uint128 received)，
-// 从 viem 错误链里取 revert data 解出来；池价在计划和上链之间变了就会遇到，调用方重读池价重算再试
-export function slippageRevert(e: unknown): { kind: 'max' | 'min'; limit: bigint; actual: bigint } | null {
-  for (let x: any = e; x; x = x.cause) {
-    const data: unknown = x.data
-    if (typeof data !== 'string' || data.length !== 10 + 128) continue
-    const kind = data.startsWith('0x31e30ad0') ? 'max' : data.startsWith('0x12816f22') ? 'min' : null
-    if (kind) return { kind, limit: BigInt('0x' + data.slice(10, 74)), actual: BigInt('0x' + data.slice(74, 138)) }
-  }
-  return null
-}
-
 // ---- 换币：Uniswap 和 OKX 同时报价，按结果排序（精确输入看产出多少，精确输出看投入多少）----
 export type SwapOffer = {
   via: 'uniswap' | 'okx'; amountIn: bigint; amountInMax: bigint; out: bigint; text: string; at: number
-  uni?: Awaited<ReturnType<ReturnType<typeof uniswapApi>['quote']>>; okx?: Awaited<ReturnType<NonNullable<ReturnType<typeof okxDex>>['swap']>>
+  uni?: Awaited<ReturnType<NonNullable<ReturnType<typeof uniswapApi>>['quote']>>; okx?: Awaited<ReturnType<NonNullable<ReturnType<typeof okxDex>>['swap']>>
 }
 export type SwapDeps = { uni: ReturnType<typeof uniswapApi>; okx: ReturnType<typeof okxDex>; via: string; fmtOut: (x: bigint) => string; outSym: string }
+// 两家都没配就没法换币，早点说清楚
+export function swapDepsFor(c: Clients, slippage: number, via: string, fmtOut: (x: bigint) => string, outSym: string): SwapDeps {
+  const d: SwapDeps = { uni: uniswapApi(c, slippage), okx: okxDex(c, slippage), via, fmtOut, outSym }
+  if (via === 'okx' && !d.okx) die('--via okx 需要在 .env 里配置 OKX_API_KEY / OKX_SECRET_KEY / OKX_API_PASSPHRASE')
+  if (via === 'uniswap' && !d.uni) die('--via uniswap 需要在 .env 里配置 UNISWAP_API_KEY')
+  if (!d.uni && !d.okx) die('换币需要至少配置一家聚合器：.env 里的 UNISWAP_API_KEY 或 OKX_API_KEY / OKX_SECRET_KEY / OKX_API_PASSPHRASE')
+  if (c.cfg.name !== 'robinhood' && !d.okx && via !== 'uniswap') log('提示: BSC 上 Uniswap API 只看 Uniswap 自家的池，PancakeSwap 的深度要配 OKX_API_KEY 才能用到')
+  return d
+}
 export async function swapOffers(d: SwapDeps, tokenIn: Address, tokenOut: Address, type: 'EXACT_INPUT' | 'EXACT_OUTPUT', amount: bigint): Promise<SwapOffer[]> {
   const quiet = (e: any) => (log(`报价失败: ${String(e?.message).slice(0, 100)}`), null)
   const all = await Promise.all([
-    d.via !== 'okx' ? d.uni.quote(tokenIn, tokenOut, type, amount).then((q): SwapOffer => ({ via: 'uniswap', amountIn: q.amountIn, amountInMax: q.amountInMax, out: q.out, text: `Uniswap ≈${d.fmtOut(q.out)} ${d.outSym}`, uni: q, at: q.at })).catch(quiet) : null,
-    d.via !== 'uniswap' && d.okx && type === 'EXACT_INPUT' // OKX 在 RHC 上只支持精确输入
+    d.via !== 'okx' && d.uni ? d.uni.quote(tokenIn, tokenOut, type, amount).then((q): SwapOffer => ({ via: 'uniswap', amountIn: q.amountIn, amountInMax: q.amountInMax, out: q.out, text: `Uniswap ≈${d.fmtOut(q.out)} ${d.outSym}`, uni: q, at: q.at })).catch(quiet) : null,
+    d.via !== 'uniswap' && d.okx && type === 'EXACT_INPUT' // OKX 只支持精确输入
       ? d.okx.swap(tokenIn, tokenOut, amount).then((s): SwapOffer => ({ via: 'okx', amountIn: amount, amountInMax: amount, out: s.out, text: `OKX ≈${d.fmtOut(s.out)} ${d.outSym} (${s.route})${s.honeypot ? ' 警告: OKX 标记为貔貅币' : ''}`, okx: s, at: Date.now() })).catch(quiet)
       : null,
   ])
@@ -297,8 +246,8 @@ export async function prepareSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typ
     await kit.ensureErc20Approval(tokenIn, o.amountIn, await d.okx!.approver(), 'OKX DEX')
     return { via: 'OKX', tx: o.okx!.tx, refGas: o.okx!.tx.gasLimit }
   }
-  await kit.ensureErc20Approval(tokenIn, o.amountInMax)
-  const tx = await d.uni.swapTx(o.uni!, c.wc!)
+  await kit.ensureErc20Approval(tokenIn, o.amountInMax, '0x000000000022D473030F116dDEE9F6B43aC78BA3', 'Permit2') // Uniswap 路由用 Uniswap 的 Permit2（BSC 上 Pancake 的是另一个）
+  const tx = await d.uni!.swapTx(o.uni!, c.wc!)
   return { via: 'Uniswap', tx, refGas: tx.gasLimit }
 }
 // 执行一个报价：授权 -> 发交易。返回收到的 tokenOut 数量
@@ -314,8 +263,13 @@ export async function executeSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typ
 
 // ---- 本地仓位记录 positions.json（进场时追加，撤退时读取）----
 // shape / group：curve、bidask 一次进场建的几个仓位共用一个 group（= mint 交易哈希），仓位页按形状分区、按 group 成组显示；没记录的（链上扫到的）按 spot 处理
+// chain / protocol 没写的是早期记录 = robinhood / v4
 export type Shape = 'spot' | 'curve' | 'bidask'
-export type PositionRecord = { id: string; token: Address; symbol: string; poolId: Hex; kind: 'lp' | 'bridge'; at: string; shape?: Shape; group?: Hex }
+export type PositionRecord = { id: string; token: Address; symbol: string; poolId: Hex; kind: 'lp' | 'bridge'; at: string; shape?: Shape; group?: Hex; chain?: ChainName; protocol?: ProtocolName }
 const POSITIONS_FILE = 'positions.json'
 export const loadPositions = (): PositionRecord[] => (existsSync(POSITIONS_FILE) ? JSON.parse(readFileSync(POSITIONS_FILE, 'utf8')) : [])
+export const positionsOf = (c: Pick<Clients, 'cfg' | 'protocol'>) => loadPositions().filter((p) => (p.chain ?? 'robinhood') === c.cfg.name && (p.protocol ?? 'v4') === c.protocol)
 export function savePosition(p: PositionRecord) { writeFileSync(POSITIONS_FILE, JSON.stringify([...loadPositions(), p], null, 2) + '\n') }
+
+// 池子的费率文字：动态费率池标出来
+export const feeText = (p: Pool) => (p.dynamic ? `动态${p.fee ? `(${p.fee / 10000}%)` : ''}` : `${p.fee / 10000}%`)

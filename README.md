@@ -1,6 +1,15 @@
-# rh-uni — Robinhood Chain 一键 LP：进场 / 监控 / 撤退
+# rh-uni — 一键 LP：进场 / 监控 / 撤退（Robinhood Chain · BNB Chain）
 
-在 Robinhood Chain 上围绕一个代币做 Uniswap v4 LP 的全套命令行工具，三条命令覆盖整个生命周期：
+围绕一个代币做集中流动性 LP 的全套命令行工具 + 网页界面，三条命令覆盖整个生命周期。支持的链和协议：
+
+| 链 | 协议（`--protocol`） | 计价币 | 说明 |
+|---|---|---|---|
+| Robinhood Chain（`--chain robinhood`，默认） | `v4` Uniswap v4 | USDG | 原有功能 |
+| BNB Smart Chain（`--chain bsc`） | `infinity` PancakeSwap Infinity CLAMM（默认） | USDT | BSC 上成交最活跃的 CL 池多是带 hook 的动态费率池，本工具能复用它们（只是不能新建带 hook 的池） |
+| | `v3` PancakeSwap v3 | USDT | BSC 成交量的主战场；费率只有 0.01 / 0.05 / 0.25 / 1% 四档 |
+| | `v4` Uniswap v4 | USDT | 合约在、流动性很薄，主要用于工具直接复用的场景 |
+
+链上差异（PoolKey 结构、Permit2 地址、路由编码、仓位 NFT 合约、手续费计算）都收在 `src/lp.ts` 的适配器后面，进场 / 监控 / 撤退 / 网页对三种协议是同一套逻辑。
 
 | 命令 | 做什么 |
 |---|---|
@@ -8,7 +17,7 @@
 | `npm run watch -- --token 0x…` | **监控**：盯着池价，跳出区间就自动撤退 + 卖币；你手动撤了它自动停。`--position` 可只盯指定仓位 |
 | `npm run exit -- --token 0x…` | **撤退**：撤掉该代币全部仓位（本金 + 手续费），代币自动换回 USDG（Uniswap / OKX DEX 比价取高者）。`--position` 可只撤指定仓位 |
 
-进场时加 `--watch` 可以一条龙：组完 LP 直接进入监控。只需要一个钱包（USDG + 少量 ETH 付 gas）和一个 Uniswap API key；OKX DEX 密钥可选。
+进场时加 `--watch` 可以一条龙：组完 LP 直接进入监控。只需要一个钱包（Robinhood：USDG + 少量 ETH；BSC：USDT + 少量 BNB）和聚合器密钥：Robinhood 上 Uniswap API key 够用，**BSC 上要配 OKX DEX 密钥**（Uniswap 的 Trading API 只看 Uniswap 自家的池，PancakeSwap 的深度它路由不到）。下文所有 `USDG` 在 BSC 上都读作 `USDT`。
 
 ## 快速开始
 
@@ -33,6 +42,10 @@ npm run watch -- --token 0x代币地址
 
 # 3. 任何时候想手动撤退（监控会自动发现并停止）
 npm run exit -- --token 0x代币地址
+
+# BSC：在每条命令前面加 --chain bsc [--protocol infinity|v3|v4]（或在 .env 里设 CHAIN / PROTOCOL 作默认）
+npm run launch -- --chain bsc --protocol infinity --token 0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82 --usdg 50 --dry-run
+npm run exit   -- --chain bsc --protocol v3 --token 0x…
 ```
 
 每条命令都支持 `--dry-run`（只看计划 / 模拟交易，不花钱）和 `--yes`（跳过确认）。
@@ -45,7 +58,8 @@ npm run exit -- --token 0x代币地址
 npm run ui          # 打开 http://127.0.0.1:3000（端口可用 UI_PORT 改）
 ```
 
-- **进场**页：左侧表单（默认值来自 `params.env`），输入代币地址后右侧自动列出该代币在 GeckoTerminal 上的**全部池子**（v4 / v3 / 其他 DEX、USDG 或 WETH 计价），按流动性只显示前 10 个（其余点"显示其余"展开），标出本工具能否复用及原因（不是 v4、计价不是 USDG、带 hook）；可复用的显示精确费率/间距和链上池价，点"用这个池"直接填入。点"计划"先演练，右侧出现换币 / 池子 / 仓位 / 钱包四张卡片；确认无误再点"执行这个计划"（会弹一次确认）。勾上"继续监控"等于 `--watch`。改过参数必须重新计划才能执行。
+- 页头的下拉框切换 **链**（Robinhood / BSC），进场页表单第一行选 **协议**（BSC 上：PancakeSwap Infinity / PancakeSwap v3 / Uniswap v4；Robinhood 只有 Uniswap v4，这一行不显示；每条链各自记住上次选的协议），仓位、日历、进场都按所选链显示，任务列表是全部链的（任务名前缀 `[BSC]` / `[RHC]`）；钱包余额、计价币（USDG / USDT）、原生币（ETH / BNB）随之切换，选择记在浏览器里。
+- **进场**页：左侧表单（默认值来自 `params.env`），输入代币地址后右侧自动列出该代币在 GeckoTerminal 上的**全部池子**（v4 / v3 / 其他 DEX、USDG 或 WETH 计价），按流动性只显示前 10 个（其余点"显示其余"展开），标出本工具能否复用及原因（不是当前协议、计价不是 USDG、带 hook）；可复用的显示精确费率/间距和链上池价，点"用这个池"直接填入。GeckoTerminal 的流动性 / 成交量会滞后，所以可复用的池还会读一次链上流动性：现价处流动性为 0 的标成**空池**（Gecko 的旧数字归零、排到末尾，按钮变成"仍要用"），`POOL_SELECT=auto` 也不会复用空池——复用要先花预算 1% 纠价、之后也没成交量，不如按市场价新建一个不同间距的池。点"计划"先演练，右侧出现换币 / 池子 / 仓位 / 钱包四张卡片；确认无误再点"执行这个计划"（会弹一次确认）。勾上"继续监控"等于 `--watch`。改过参数必须重新计划才能执行。
 - 进场页和仓位页底部的"运行"只显示一行状态（任务名、状态、最后一行日志），"在任务中查看"跳到任务页看完整日志，"展开日志"就地展开交易步骤表和日志。
 - **仓位**页：页顶五格汇总——**投入价值**（各仓位存入 − 已撤本金）、**现金价值**（本金现值 + 未领手续费）、**手续费收益**（已领 + 未领）、**总盈亏**（= 现金价值 + 已领手续费 − 投入价值，也就是各仓位 uPNL 之和）、**DPR 日收益率**（总盈亏 ÷ Σ 各仓位投入×持仓天数，即按资金量和时间加权的每天收益率；小字给出加权持仓时长和只算手续费的日收益率）。下面是钱包名下所有 USDG 池的仓位，按形状分成 **Spot / Curve / Bid-Ask** 三个区（`positions.json` 里没记录形状的、包括不是本工具建的，都算 Spot）；Curve、Bid-Ask 区里同一次进场建的几段连在一起，组头一行给出整组的价值 / 手续费 / uPNL 和建仓交易，带**整组撤退**（同一个池合成 1 笔交易）和**整组监控**按钮。每个仓位一行：仓位（交易对、费率、id、持仓时间）、区间（USDG/代币，带现价标尺和在不在区间内）、**投入**、**价值**、**手续费**（已领 + 未领）、**uPNL**、**DPR**，以及操作按钮；美元一律 2 位小数，两种币的数量和手续费的已领/未领拆分鼠标悬停可见。uPNL = 现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入，每一笔都按发生当时的池价折算（不含进场换币的手续费/滑点）；**点 uPNL 数字展开资金明细**：这个仓位的每笔交易（加流动性 / 领手续费 / 撤流动性）的两种币数量、当时价值、当时池价和交易链接，最新在前。流水从链上重建（钱包和 PoolManager 之间的转账 + PoolManager 的 ModifyLiquidity 事件按仓位 id 归类），对任何仓位（包括不是本工具建的）都能算，但需要 `RPC_URL` 是 Alchemy 节点（用它的转账记录接口和历史状态）；不是的话 uPNL 显示"—"，持仓时间仍然有。点 id 展开**该仓位所在池子的流动性分布图**（蓝 = 现价下方的 USDG 侧，绿 = 现价上方的代币侧，淡色 = 你的区间外，悬停看每段数量）。每个仓位可"领取"手续费（只领手续费，本金不动，等于 `npm run exit -- --position <id> --collect`；确认框里可以勾选"顺便把领到的币卖成 USDG"，等于加 `--sell`）、"监控"（各仓位独立监控，跳出区间自动撤退）、"撤退"（只撤这一个、只卖撤出来的币；确认框里可以勾选"顺便把钱包里全部该币卖光"，等于加 `--sell-all`）。正在监控的仓位会标出是哪个任务在盯。工具栏的**"领取全部手续费"**一次领所有仓位（未领 ≥ $0.01 的）的手续费：所有池的领取合成 **1 笔交易**（`PositionManager.multicall`），然后（勾选了卖币的话）每种币按实际到账数量重新报价，所有卖币交易**同时广播、落在同一个区块**——广播前逐笔模拟，模拟不过的直接剔除不占 nonce，某个币卖失败或报不出价只留在钱包、不影响别的；等于 `npm run exit -- --position <id,id,…> --collect --sell` 跨代币一起给。
 - **盈亏日历**页：已平仓仓位按平仓日排成月历（周一起，本地时间），每格是当天平掉的仓位各自整段盈亏（拿回本金 + 手续费 − 存入，每笔按当时池价折算）之和和胜负平数，页顶是本月盈亏 / 平仓数 / 胜率（盈亏在 ±1 分内算平，不计入胜率）/ 最好一天 / 最差一天，‹ › 切换月份，点某一天列出当天平掉的每个仓位（存入、拿回本金、手续费、盈亏、持仓时间、平仓交易）。"已平仓" = 流动性全部撤出的仓位，NFT 销没销毁都算（Uniswap 网页撤流动性不销毁 NFT）；只算 USDG 池的。撤出后拿到的代币再卖掉的盈亏不在这里（那是换币，不是 LP）。第一次打开要从创世块起读钱包全部 LP 交易并逐笔取当时池价，约半分钟，之后秒开；同样需要 Alchemy 的 `RPC_URL`。
@@ -250,19 +264,25 @@ npm run exit -- --token 0x… --yes               # 跳过确认
 | `src/monitor.ts` | 监控命令（也被 `launch --watch` 调用） |
 | `src/exit.ts` | 撤退命令（也被监控触发时调用） |
 | `src/ui/server.ts` `src/ui/index.html` | 网页界面：本地服务 + 单页面，子进程跑上面的命令 |
-| `src/common.ts` | 公共部分：链上地址、客户端、Uniswap / OKX API、发交易与授权、仓位记录 |
-| `src/v4.ts` | Uniswap v4 数学与编码：tick / 流动性 / mint / burn / swap |
+| `src/chains.ts` | 链与协议配置：合约地址、计价币、公共节点、区块浏览器；`--chain` / `--protocol` 的解析 |
+| `src/lp.ts` | 协议适配器接口（池子 / 池价 / 仓位 / 手续费 / mint / burn / collect / 池内换币 / 深度 / 流水），命令和网页只跟它打交道 |
+| `src/lp-singleton.ts` | Uniswap v4 与 PancakeSwap Infinity CLAMM 的实现（同一套 singleton 架构，差别在 PoolKey 结构和状态读取合约） |
+| `src/lp-v3.ts` | PancakeSwap v3 的实现（每个池一个合约、NonfungiblePositionManager、直接 ERC20 授权） |
+| `src/common.ts` | 公共部分：客户端、Uniswap / OKX API、发交易与授权、仓位记录 |
+| `src/v4.ts` | 集中流动性数学与 singleton 编码：tick / 流动性 / 手续费增长 / mint / burn / swap（三种协议共用） |
 | `src/selfcheck.ts` | 离线自检：用链上一笔真实 mint 交易复算并逐字节比对 |
 | `params.env` | 策略参数 |
 | `.env` | 密钥（不进 git） |
-| `positions.json` | 本地仓位记录（不进 git） |
+| `positions.json` | 本地仓位记录（不进 git）；每条带 `chain` / `protocol`，没有的是早期的 Robinhood v4 记录 |
 
 ```bash
 npm run selfcheck    # 自检
 npm run typecheck    # 类型检查
 ```
 
-## 链上地址（Robinhood Chain, chainId 4663）
+## 链上地址
+
+### Robinhood Chain（chainId 4663）
 
 | 合约 | 地址 |
 |---|---|
@@ -274,10 +294,30 @@ npm run typecheck    # 类型检查
 | UniversalRouter 2.1.1 | `0x8876789976decbfcbbbe364623c63652db8c0904` |
 | Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
 
+### BNB Smart Chain（chainId 56）
+
+地址来自 `@pancakeswap/infinity-sdk` / `v3-sdk` / `universal-router-sdk` / `permit2-sdk` 和 `@uniswap/sdk-core` / `universal-router-sdk`，并在链上核对过（PositionManager / StateView / Quoter 的 poolManager() 互相指向，PositionManager.permit2() 与下表一致）。
+
+| 合约 | 地址 |
+|---|---|
+| USDT（18 位精度） | `0x55d398326f99059fF775485246999027B3197955` |
+| WBNB | `0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c` |
+| Infinity Vault / CLPoolManager | `0x238a358808379702088667322f80aC48bAd5e6c4` / `0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b` |
+| Infinity CLPositionManager / CLQuoter | `0x55f4c8abA71A1e923edC303eb4fEfF14608cC226` / `0xd0737C9762912dD34c3271197E362Aa736Df0926` |
+| PancakeSwap UniversalRouter / Permit2 | `0xd9C500DfF816a1Da21A48A732d3498Bf09dc9AEB` / `0x31c2F6fcFf4F8759b3Bd5Bf0e1084A055615c768` |
+| PancakeSwap v3 Factory / NonfungiblePositionManager | `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` / `0x46A15B0b27311cedF172AB29E4f4766fbE7F4364` |
+| PancakeSwap v3 SwapRouter / QuoterV2 | `0x1b81D678ffb9C0263b24A97847620C99d213eB14` / `0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997` |
+| Uniswap v4 PoolManager / PositionManager | `0x28e2ea090877bf75740558f6bfb36a5ffee9e9df` / `0x7a4a5c919ae2541aed11041a1aeee68f1287f95b` |
+| Uniswap v4 StateView / Quoter | `0xd13dd3d6e93f276fafc9db9e6bb47c1180aee0c4` / `0x9f75dd27d6664c475b90e105573e550ff69437b0` |
+| Uniswap UniversalRouter 2.1.1 / Permit2 | `0x8B844f885672f333Bc0042cB669255f93a4C1E6b` / `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
+
 ## 注意事项
 
 - `.env` 里是私钥和 API 密钥，已被 `.gitignore` 排除，不要提交、不要截图分享。
 - Robinhood Chain 上的 UniversalRouter 是 2.1.1，请求 Trading API 时不能带 `x-universal-router-version: 2.0`（会报错），本工具不发该 header。
-- 扫描钱包名下的仓位（撤退、监控、网页列表都要用）走 `RPC_URL` 节点的 `alchemy_getAssetTransfers`（Alchemy 免费档也有，一次约 0.5 秒）；节点不支持该方法时退回公共节点全链 `eth_getLogs`（Alchemy 的 `eth_getLogs` 只允许 10 个区块的范围，公共节点连续扫会被限流，失败会隔几秒重试）。
+- 扫描钱包名下的仓位（撤退、监控、网页列表都要用）走 Alchemy 节点的 `alchemy_getAssetTransfers`（免费档也有，一次约 0.5 秒）；Robinhood 上节点不支持时退回公共节点全链 `eth_getLogs`。**BSC 链太长扫不动**：PancakeSwap v3 的仓位 NFT 可枚举（`tokenOfOwnerByIndex`），不依赖节点；Infinity 和 Uniswap v4 没有 `BSC_RPC_URL`（Alchemy）时只认 `positions.json` 里本工具建的仓位。BSC 的公共节点不提供历史状态和旧交易回执，资金流水 / 盈亏 / 日历同样需要 Alchemy。
+- BSC 上 PancakeSwap Infinity 成交最活跃的池几乎都带 hook（动态费率，池名里的 0.205% 之类只是估计值，链上 `lpFee` 为 0，界面标"动态"）。本工具复用这类池时 PoolKey 从 PositionManager 的 `poolKeys` 反查，mint / burn / collect 走同一套动作；换币前用 Quoter 真实模拟，费率估计不准也不会多花钱。新建池只能是无 hook 的标准档。
+- BSC 上换币走 OKX DEX 聚合器（`OKX_API_KEY` 等三项）；Uniswap Trading API 在 BSC 只路由 Uniswap 自家的池。
+- 本机直连不了 `alchemy.com` 的话在 `.env` 里填 `HTTPS_PROXY`，否则 Alchemy 节点会一直超时、退回公共节点。
 - 新币风险自负：貔貅币能 mint 成功但卖不掉；池子薄时你的仓位可能就是主要流动性，退出会砸价；无常损失由 LP 承担。建议先用小预算试。
 - Robinhood Chain gas 很便宜，进场 + 撤退整套流程通常不到 1.5 美元。

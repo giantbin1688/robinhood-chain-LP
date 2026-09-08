@@ -1,63 +1,86 @@
-// 发现某个代币已有的 USDG v4 池：GeckoTerminal 列出池子（名字里带费率），再用 pool id 反推出精确的 (fee, tickSpacing)
-import type { Address } from 'viem'
+// 发现某个代币已有的 计价币 池：GeckoTerminal 列出池子（名字里带费率），再由 PositionManager 的 poolKeys 反查出完整 PoolKey（v4 / Infinity，含带 hook 的池）
+// 或直接读池合约（v3）
+import type { Address, Hex } from 'viem'
 import * as v4 from './v4.ts'
-import { USDG, log } from './common.ts'
+import { feeText, log, tokenMeta, type Clients } from './common.ts'
+import type { Pool } from './lp.ts'
 
-export type FoundPool = { id: `0x${string}`; fee: number; spacing: number; liquidityUsd: number; volume24h: number; name: string }
+export type FoundPool = { pool: Pool; liquidityUsd: number; volume24h: number; name: string; empty: boolean }
+// GeckoTerminal 的 dex id 按链不同：Robinhood 上 Uniswap v4 是 uniswap-v4，BSC 上是 uniswap-v4-bsc
+const GECKO_DEX: Record<string, Record<string, string>> = { robinhood: { v4: 'uniswap-v4' }, bsc: { v4: 'uniswap-v4-bsc', infinity: 'pancakeswap-infinity-clmm', v3: 'pancakeswap-v3-bsc' } }
 
 // GeckoTerminal 上这个代币的全部池子（任何 DEX、任何计价币），失败返回 []
-async function fetchGeckoPools(token: Address): Promise<any[]> {
+async function fetchGeckoPools(network: string, token: Address): Promise<any[]> {
   try {
-    const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/robinhood/tokens/${token}/pools?page=1`, { signal: AbortSignal.timeout(15_000) })
+    const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/${network}/tokens/${token}/pools?page=1`, { signal: AbortSignal.timeout(15_000) })
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
     return (await r.json()).data ?? []
   } catch (e: any) { log(`查询已有池失败（GeckoTerminal ${String(e?.message).slice(0, 80)}），按配置的费率处理`); return [] }
 }
+const feeFromName = (name: string) => { const m = name.match(/([\d.]+)%/); return m ? Math.round(Number(m[1]) * 10_000) : null }
+// GeckoTerminal 的流动性 / 成交量会滞后：流动性全撤走的池它还照旧显示旧数字。以链上现价处的活跃流动性为准，为 0 就当空池、旧数字作废
+const isEmpty = async (c: Clients, pool: Pool) => (await c.lp.liquidity(pool).catch(() => 0n)) === 0n
 
-export async function discoverUsdgPools(token: Address): Promise<FoundPool[]> {
+export async function discoverQuotePools(c: Clients, token: Address): Promise<FoundPool[]> {
+  const { lp, cfg } = c
   const out: FoundPool[] = []
-  for (const p of await fetchGeckoPools(token)) {
+  for (const p of await fetchGeckoPools(cfg.gecko, token)) {
     const a = p.attributes ?? {}
-    if (!String(p.relationships?.dex?.data?.id ?? '').includes('uniswap-v4') || !/USDG/.test(a.name ?? '')) continue
-    const m = String(a.name).match(/([\d.]+)%/)
-    if (!m) continue
-    const found = decodeKey(token, String(a.address).toLowerCase() as `0x${string}`, m[1])
-    if (!found) continue // 反推不出来：多半带 hook，不碰
-    out.push({ id: found.id, fee: found.fee, spacing: found.spacing, liquidityUsd: Number(a.reserve_in_usd ?? 0), volume24h: Number(a.volume_usd?.h24 ?? 0), name: a.name })
+    if (String(p.relationships?.dex?.data?.id ?? '') !== GECKO_DEX[cfg.name]?.[c.protocol] || !new RegExp(cfg.quote.symbol).test(a.name ?? '')) continue
+    const pool = await lp.poolById(String(a.address).toLowerCase() as Hex).catch(() => null)
+    if (!pool || ![pool.currency0, pool.currency1].some((x) => x.toLowerCase() === cfg.quote.address.toLowerCase())) continue
+    const hint = feeFromName(String(a.name ?? ''))
+    const empty = await isEmpty(c, pool)
+    out.push({ pool: hint ? { ...pool, feeHint: hint } : pool, liquidityUsd: empty ? 0 : Number(a.reserve_in_usd ?? 0), volume24h: empty ? 0 : Number(a.volume_usd?.h24 ?? 0), name: a.name, empty })
+  }
+  // GeckoTerminal 漏掉的（比如 BSC 上 Uniswap v4 的池常常不在它的列表里）：标准费率档直接在链上查，流动性按现价 ±10% 内的深度折成美元估算，成交量未知记 0
+  const seen = new Set(out.map((x) => x.pool.id.toLowerCase()))
+  const { symbol, decimals } = await tokenMeta(c.pub, token)
+  for (const t of lp.tiers) {
+    const pool = await lp.pool(token, t.fee, t.spacing).catch(() => null)
+    if (!pool || seen.has(pool.id.toLowerCase())) continue
+    const s = await lp.slot0(pool)
+    if (s.sqrtP === 0n) continue
+    const L = await lp.liquidity(pool)
+    if (L === 0n) continue
+    const [a0, a1] = v4.amountsForLiquidity(s.sqrtP, v4.getSqrtRatioAtTick(s.tick - 953), v4.getSqrtRatioAtTick(s.tick + 953), L) // 1.0001^953 ≈ 1.1
+    const quoteIs0 = pool.currency0.toLowerCase() === cfg.quote.address.toLowerCase()
+    const [qAmt, tAmt] = quoteIs0 ? [a0, a1] : [a1, a0]
+    const raw = v4.priceAtTick(s.tick) * 10 ** ((quoteIs0 ? cfg.quote.decimals : decimals) - (quoteIs0 ? decimals : cfg.quote.decimals))
+    const price = quoteIs0 ? 1 / raw : raw // 每个代币多少计价币
+    const liquidityUsd = Number(qAmt) / 10 ** cfg.quote.decimals + (Number(tAmt) / 10 ** decimals) * price
+    out.push({ pool, liquidityUsd, volume24h: 0, name: `${symbol} / ${cfg.quote.symbol} ${t.fee / 10000}%（链上）`, empty: false })
   }
   return out
 }
 
 // 网页界面用：该代币的全部池子，每个标出能不能被本工具复用及原因
-export type TokenPool = FoundPool & { dex: string; usable: boolean; status: string; fee: number; spacing: number }
-export async function listTokenPools(token: Address): Promise<TokenPool[]> {
+export type TokenPool = { id: Hex; name: string; dex: string; liquidityUsd: number; volume24h: number; fee: number; feeText: string; spacing: number; hooks: Address | null; usable: boolean; empty: boolean; status: string }
+export async function listTokenPools(c: Clients, token: Address): Promise<TokenPool[]> {
+  const { lp, cfg } = c
   const out: TokenPool[] = []
-  for (const p of await fetchGeckoPools(token)) {
+  const usd$ = (x: number) => `$${Math.round(x).toLocaleString('en-US')}`
+  for (const p of await fetchGeckoPools(cfg.gecko, token)) {
     const a = p.attributes ?? {}
-    const dex = String(p.relationships?.dex?.data?.id ?? '').replace(/-robinhood$/, '')
-    const name = String(a.name ?? ''), id = String(a.address).toLowerCase() as `0x${string}`
-    const base = { id, name, dex, liquidityUsd: Number(a.reserve_in_usd ?? 0), volume24h: Number(a.volume_usd?.h24 ?? 0), fee: 0, spacing: 0, usable: false }
-    const m = name.match(/([\d.]+)%/)
-    if (!dex.includes('uniswap-v4')) out.push({ ...base, fee: m ? Number(m[1]) * 10_000 : 0, status: `不是 v4（${dex}）` })
-    else if (!/USDG/.test(name)) out.push({ ...base, fee: m ? Number(m[1]) * 10_000 : 0, status: `计价不是 USDG（${name.split('/')[1]?.trim().split(' ')[0] ?? '?'}）` })
-    else if (!m) out.push({ ...base, status: '动态费率 / 带 hook，不复用' })
+    const dex = String(p.relationships?.dex?.data?.id ?? '').replace(new RegExp(`-${cfg.gecko}$`), '')
+    const name = String(a.name ?? ''), id = String(a.address).toLowerCase() as Hex
+    const feeN = feeFromName(name) ?? 0
+    const base: TokenPool = { id, name, dex, liquidityUsd: Number(a.reserve_in_usd ?? 0), volume24h: Number(a.volume_usd?.h24 ?? 0), fee: feeN, feeText: feeN ? `${feeN / 10000}%` : '—', spacing: 0, hooks: null, usable: false, empty: false, status: '' }
+    if (String(p.relationships?.dex?.data?.id ?? '') !== GECKO_DEX[cfg.name]?.[c.protocol]) out.push({ ...base, status: `不是 ${lp.label}（${dex}）` })
+    else if (!new RegExp(cfg.quote.symbol).test(name)) out.push({ ...base, status: `计价不是 ${cfg.quote.symbol}（${name.split('/')[1]?.trim().split(' ')[0] ?? '?'}）` })
     else {
-      const found = decodeKey(token, id, m[1])
-      if (!found) out.push({ ...base, fee: Number(m[1]) * 10_000, status: '带 hook 或非标准参数，不复用' })
-      else out.push({ ...base, fee: found.fee, spacing: found.spacing, usable: true, status: base.liquidityUsd < 5000 ? '可用，流动性 < $5k（auto 不会自动选）' : '可用' })
+      const pool = await lp.poolById(id).catch(() => null)
+      if (!pool) out.push({ ...base, status: c.protocol === 'v3' ? '不是 PancakeSwap 工厂建的池' : '查不到 PoolKey（没人通过 PositionManager 建过仓），不复用' })
+      else {
+        const hasHook = pool.hooks !== '0x0000000000000000000000000000000000000000'
+        const row = { ...base, fee: pool.fee, feeText: feeText(pool) + (pool.dynamic && feeN ? `≈${feeN / 10000}%` : ''), spacing: pool.spacing, hooks: hasHook ? pool.hooks : null, usable: true }
+        if (await isEmpty(c, pool)) out.push({ ...row, liquidityUsd: 0, volume24h: 0, empty: true, status: `空池：链上没有流动性，Gecko 的 ${usd$(base.liquidityUsd)} / 日成交 ${usd$(base.volume24h)} 是旧数据；进场要先花预算 1% 纠价，之后也没人来成交` })
+        else {
+          const warn = base.liquidityUsd < 5000 ? '，流动性 < $5k（auto 不会自动选）' : ''
+          out.push({ ...row, status: (hasHook ? '可用，带 hook（费率由 hook 决定）' : '可用') + warn })
+        }
+      }
     }
   }
   return out.sort((a, b) => b.liquidityUsd - a.liquidityUsd)
-}
-
-// 名字里的百分比是四舍五入过的：在误差范围内枚举费率，配合常见间距（fee/100、fee/50 …）算 pool id 比对；不行再全范围扫间距
-function decodeKey(token: Address, id: `0x${string}`, pctStr: string) {
-  const decimals = (pctStr.split('.')[1] ?? '').length
-  const center = Math.round(Number(pctStr) * 10_000), half = Math.round(5 * 10 ** (3 - decimals))
-  const match = (fee: number, spacing: number) => v4.poolId(v4.makePoolKey(USDG, token, fee, spacing)) === id
-  const spacings = [...new Set([...[100, 50, 10, 20, 25, 200, 500].map((d) => Math.round(center / d)), 1, 10, 60, 100, 200, 500, 1000, 2000])].filter((s) => s >= 1 && s <= 32767)
-  const fees = [center, center - 1, ...Array.from({ length: 2 * half + 1 }, (_, i) => center - half + i)].filter((f) => f >= 1 && f <= 1_000_000)
-  for (const fee of fees) for (const spacing of spacings) if (match(fee, spacing)) return { id, fee, spacing }
-  for (const fee of [center, center - 1]) for (let spacing = 1; spacing <= 32767; spacing++) if (match(fee, spacing)) return { id, fee, spacing }
-  return null
 }
