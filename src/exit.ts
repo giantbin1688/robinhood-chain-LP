@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { formatEther, getAddress, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
-import { die, env, erc20Abi, failFast, feeText, log, makeClients, nativePriceUsd, positionsOf, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, prepareSwap, type Clients, type PositionRecord, type SwapOffer } from './common.ts'
+import { die, env, erc20Abi, failFast, feeText, log, makeClients, nativePriceUsd, num, positionsOf, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, prepareSwap, type Clients, type PositionRecord, type SwapOffer } from './common.ts'
 import type { Pool, RawPosition } from './lp.ts'
 
 export const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase() // 合约返回的是校验和大小写地址，比较时忽略大小写
@@ -194,8 +194,9 @@ export async function withdraw(o: WithdrawOptions) {
     txCount: groups.size, expectUsdg: fmtU(expectUsdg), expectToken: fmtT(expectToken), sellAmount: fmtT(sellAmount), keepTokens: o.keepTokens,
     offers: sellOffers.map((x) => ({ via: x.via, out: fmtU(x.out), text: x.text })), lpSlippage: o.lpSlippage,
   }))
-  // 撤仓交易：最少拿回量 = 预估 × (1 - LP_SLIPPAGE)
-  const floor = (x: bigint) => (x * BigInt(Math.round((100 - o.lpSlippage) * 100))) / 10_000n
+  // 撤仓交易：最少拿回量 = 预估 × (1 - LP_SLIPPAGE)。预估（amountsForLiquidity）向上取整、链上返还向下取整，最多差 1 wei，
+  // 所以滑点为 0 时最少量得比预估再少 1 wei，否则必然回滚 MinimumAmountInsufficient
+  const floor = (x: bigint) => { const y = (x * BigInt(Math.round((100 - o.lpSlippage) * 100))) / 10_000n; return y === x && x > 0n ? x - 1n : y }
   const burnTx = (ps: Position[]) => lp.burnTx(ps[0].pool, ps.map((p) => ({ id: p.id, liquidity: p.liquidity, amount0Min: floor(p.amount0), amount1Min: floor(p.amount1) })), wallet)
   if (o.dryRun) {
     for (const [, ps] of groups) log(`模拟撤仓 ${ps.map((p) => p.id).join(',')}: OK，gas ${await pub.estimateGas({ account: wallet, ...burnTx(ps) })}`)
@@ -273,12 +274,12 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const clients = await makeClients({ from: opt.from, needKey: !opt['dry-run'] })
   if (opt.collect) {
     if (!positions) die('--collect 需要 --position 指定仓位')
-    await collectFees({ positions, sell: opt.sell, via: opt.via, slippage: Number(opt.slippage), yes: opt.yes, dryRun: opt['dry-run'], json: opt.json, clients })
+    await collectFees({ positions, sell: opt.sell, via: opt.via, slippage: num('--slippage', opt.slippage, 0, 50), yes: opt.yes, dryRun: opt['dry-run'], json: opt.json, clients })
     await sleep(100); process.exit(0)
   }
   await withdraw({
     token: opt.token ? getAddress(opt.token) : undefined, positions, via: opt.via,
-    slippage: Number(opt.slippage), lpSlippage: Number(opt['lp-slippage']), keepTokens: opt['keep-tokens'], sellAll: opt['sell-all'], yes: opt.yes, dryRun: opt['dry-run'], json: opt.json,
+    slippage: num('--slippage', opt.slippage, 0, 50), lpSlippage: num('--lp-slippage', opt['lp-slippage'], 0, 50), keepTokens: opt['keep-tokens'], sellAll: opt['sell-all'], yes: opt.yes, dryRun: opt['dry-run'], json: opt.json,
     clients,
   })
   await sleep(100); process.exit(0)

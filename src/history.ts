@@ -25,17 +25,14 @@ type Store = { txs: Map<Hex, ParsedTx>; slot0Cache: Map<string, Promise<readonly
 const stores = new Map<string, Store>()
 const storeOf = (c: Clients) => { const k = `${c.cfg.name}:${c.protocol}`; let s = stores.get(k); if (!s) { s = { txs: new Map(), slot0Cache: new Map(), preLiqCache: new Map(), scannedFrom: null }; stores.set(k, s) }; return s }
 
-const slot0At = (c: Clients, pool: Pool, block: bigint) => {
-  const S = storeOf(c), k = `${pool.id}:${block}`
-  if (!S.slot0Cache.has(k)) S.slot0Cache.set(k, c.lp.slot0At(pool, block).then(({ sqrtP, tick }) => [sqrtP, tick] as const))
-  return S.slot0Cache.get(k)!
+// 缓存的是 Promise：失败（Alchemy 限流溢出到没有归档数据的公共节点、超时）就从缓存里删掉，下次再读；否则一次失败会把这个池/区块永久卡死
+const cached = <T>(m: Map<string, Promise<T>>, k: string, make: () => Promise<T>) => {
+  if (!m.has(k)) { const p = make(); p.catch(() => m.delete(k)); m.set(k, p) }
+  return m.get(k)!
 }
+const slot0At = (c: Clients, pool: Pool, block: bigint) => cached(storeOf(c).slot0Cache, `${pool.id}:${block}`, () => c.lp.slot0At(pool, block).then(({ sqrtP, tick }) => [sqrtP, tick] as const))
 // 交易前一个区块时该仓位的流动性（多仓位同笔交易分手续费用）
-const preLiquidity = (c: Clients, id: bigint, block: bigint) => {
-  const S = storeOf(c), k = `${id}:${block}`
-  if (!S.preLiqCache.has(k)) S.preLiqCache.set(k, c.lp.liquidityAt(id, block - 1n))
-  return S.preLiqCache.get(k)!
-}
+const preLiquidity = (c: Clients, id: bigint, block: bigint) => cached(storeOf(c).preLiqCache, `${id}:${block}`, () => c.lp.liquidityAt(id, block - 1n))
 
 // 从 since 区块起钱包和池之间的转账 -> 交易哈希（两个方向）；同时拿到区块时间。
 // v4/Infinity 对手方固定是 PoolManager/Vault；v3 是各个池合约，改为查钱包与 NPM 相关的全部 ERC20 转账再按回执过滤

@@ -140,6 +140,7 @@
       </div>
       <div class="section">
         <h4>池子</h4>
+        <input type="hidden" id="f-pool"><!-- 池子列表里点"用这个池"选中的池 id（带 hook 的池只能这样指定），手动改代币/费率/间距/池选择就清掉 -->
         <div class="row"><label>池选择</label><select id="f-poolSelect"><option value="auto">auto：配置的池不存在就复用已有的 <span class="q">USDG</span> 池</option><option value="exact">exact：只用下面的费率/间距</option></select></div>
         <div class="row"><label>费率（%）</label><input type="text" id="f-fee"><div class="hint" id="fee-hint">5 = 5%，3.9999 = 3.9999%，0.3 = 0.3%</div></div>
         <div class="row"><label>tick 间距</label><input type="text" id="f-spacing" placeholder="留空 = 协议默认"><div class="hint">只在建新池时生效；复用已有池以链上为准（v4/Infinity 默认费率/50，v3 固定四档）</div></div>
@@ -492,7 +493,7 @@ $('#f-token').addEventListener('input', () => { lastMarketPrice = null; drawShap
 // ---- 进场：计划（演练任务）-> 执行（真实任务）。执行按钮只在"当前参数的演练成功"后可用 ----
 let plannedJob = null, plannedSig = null
 const form = (dryRun) => ({
-  token: $('#f-token').value.trim(), usdg: $('#f-usdg').value, fee: $('#f-fee').value, spacing: $('#f-spacing').value, poolSelect: $('#f-poolSelect').value,
+  token: $('#f-token').value.trim(), usdg: $('#f-usdg').value, fee: $('#f-fee').value, spacing: $('#f-spacing').value, poolSelect: $('#f-poolSelect').value, pool: $('#f-pool').value,
   maxDeviation: $('#f-maxDeviation').value, rangeMode: $('#f-rangeMode').value, range: $('#f-range').value, priceRange: $('#f-priceRange').value,
   shape: $('#f-shape').value, layers: $('#f-layers').value,
   slippage: $('#f-slippage').value, lpSlippage: $('#f-lpSlippage').value, watch: $('#f-watch').checked, dryRun,
@@ -562,15 +563,16 @@ async function loadPools() {
 }
 $('#pools-table').onclick = (e) => {
   const b = e.target.closest('button'); if (!b) return
-  $('#f-fee').value = b.dataset.fee; $('#f-spacing').value = b.dataset.spacing; $('#f-poolSelect').value = 'exact'
-  updateExecButton(); toast(`已选用 ${b.dataset.fee}% / ${b.dataset.spacing} 池（池选择 = exact）`)
+  $('#f-fee').value = b.dataset.fee; $('#f-spacing').value = b.dataset.spacing; $('#f-poolSelect').value = 'exact'; $('#f-pool').value = b.dataset.id
+  updateExecButton(); toast(`已选用 ${b.dataset.fee}% / ${b.dataset.spacing} 池（按池 id 指定，改参数即取消）`)
 }
+for (const id of ['#f-token', '#f-fee', '#f-spacing', '#f-poolSelect']) $(id).addEventListener('input', () => { $('#f-pool').value = '' })
 function renderLaunchPlan(p, id) {
   if (p.kind !== 'launch') return
   $('#launch-empty').style.display = 'none'; $('#launch-plan').style.display = ''
   $('#launch-plan').dataset.job = id
   lastMarketPrice = Number(p.market.price) || null; drawShape()
-  const sym = p.token.symbol
+  const sym = esc(p.token.symbol) // symbol 来自链上 symbol()，任何人都能部署一个带 HTML 的代币
   $('#card-swap').innerHTML = kv([
     ['动作', p.swap ? `${p.swap.usdgIn} ${QS} → ≈${p.swap.out} ${sym}` : '无需换币'],
     ['路由', p.swap ? `${p.swap.via}（${esc(p.swap.text)}）` : ''],
@@ -597,18 +599,19 @@ function renderLaunchPlan(p, id) {
 }
 function renderExitPlan(p) {
   if (p.kind === 'collect') {
-    const sellText = (t) => (!p.sell ? '不卖，领到的币留在钱包' : t.offers.length ? `≈${t.expectToken} ${t.token.symbol}：${t.offers.map((o) => esc(o.text)).join('；')}，走 ${t.offers[0].via}` : Number(t.expectToken) ? `${t.token.symbol} 报不出价，领到的留在钱包` : `领到的 ${t.token.symbol} 为 0，没有要卖的`)
+    const sellText = (t, sym) => (!p.sell ? '不卖，领到的币留在钱包' : t.offers.length ? `≈${t.expectToken} ${sym}：${t.offers.map((o) => esc(o.text)).join('；')}，走 ${t.offers[0].via}` : Number(t.expectToken) ? `${sym} 报不出价，领到的留在钱包` : `领到的 ${sym} 为 0，没有要卖的`)
     $('#card-exit').innerHTML = kv([
-      ['领手续费', `${p.tokens.reduce((n, t) => n + t.positions.length, 0)} 个仓位合成 ${p.txCount} 笔交易${p.sellCount ? `，再同时广播 ${p.sellCount} 笔卖币（同一区块）` : ''}，≈${p.expectUsdg} ${QS} + ${p.tokens.filter((t) => Number(t.expectToken)).map((t) => `${t.expectToken} ${t.token.symbol}`).join(' + ') || '0 代币'}，本金不动`],
-      ...p.tokens.map((t) => [`${esc(t.token.symbol)}`, `仓位 ${t.positions.map((x) => '#' + x).join(', ')}，≈${t.expectUsdg} ${QS} + ${t.expectToken} ${esc(t.token.symbol)}<br>卖币：${sellText(t)}`]),
+      ['领手续费', `${p.tokens.reduce((n, t) => n + t.positions.length, 0)} 个仓位合成 ${p.txCount} 笔交易${p.sellCount ? `，再同时广播 ${p.sellCount} 笔卖币（同一区块）` : ''}，≈${p.expectUsdg} ${QS} + ${p.tokens.filter((t) => Number(t.expectToken)).map((t) => `${t.expectToken} ${esc(t.token.symbol)}`).join(' + ') || '0 代币'}，本金不动`],
+      ...p.tokens.map((t) => [t.token.symbol, `仓位 ${t.positions.map((x) => '#' + x).join(', ')}，≈${t.expectUsdg} ${QS} + ${t.expectToken} ${esc(t.token.symbol)}<br>卖币：${sellText(t, esc(t.token.symbol))}`]),
     ])
     return
   }
   if (p.kind !== 'exit') return
+  const sym = esc(p.token.symbol)
   $('#card-exit').innerHTML = kv([
-    ['仓位', p.positions.map((x) => `#${x.id} ${p.token.symbol}/${QS} ${x.feeText || x.fee + '%'} ≈${x.usdg} ${QS} + ${x.token} ${p.token.symbol}${x.kind === 'bridge' ? '（过渡）' : ''}`).join('<br>')],
-    ['撤仓', `${p.positions.length} 个仓位，${p.txCount} 笔交易，拿回 ≈${p.expectUsdg} ${QS} + ${p.expectToken} ${p.token.symbol}`],
-    ['卖币', p.keepTokens ? '不卖，代币留在钱包' : p.offers.length ? `≈${p.sellAmount} ${p.token.symbol}：${p.offers.map((o) => esc(o.text)).join('；')}，走 ${p.offers[0].via}` : '无'],
+    ['仓位', p.positions.map((x) => `#${x.id} ${sym}/${QS} ${x.feeText || x.fee + '%'} ≈${x.usdg} ${QS} + ${x.token} ${sym}${x.kind === 'bridge' ? '（过渡）' : ''}`).join('<br>')],
+    ['撤仓', `${p.positions.length} 个仓位，${p.txCount} 笔交易，拿回 ≈${p.expectUsdg} ${QS} + ${p.expectToken} ${sym}`],
+    ['卖币', p.keepTokens ? '不卖，代币留在钱包' : p.offers.length ? `≈${p.sellAmount} ${sym}：${p.offers.map((o) => esc(o.text)).join('；')}，走 ${p.offers[0].via}` : '无'],
   ])
 }
 

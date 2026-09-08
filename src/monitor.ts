@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { getAddress, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
-import { die, env, failFast, log, makeClients, p6, pct, sleep, tokenMeta, type Clients } from './common.ts'
+import { die, env, failFast, log, makeClients, num, p6, pct, sleep, tokenMeta, type Clients } from './common.ts'
 import { findPositions, same, withdraw, type Position } from './exit.ts'
 
 // positions 给了就只盯这些仓位、触发时也只撤这些（同一代币可以开多个进程各管各的）；否则盯钱包里该代币的全部仓位
@@ -98,8 +98,8 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (!opt.token) die('用法: npm run watch -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <代币地址> [--position <仓位id,仓位id>] [--interval 10] [--confirm 2] [--upper-grace 600] [--via okx|uniswap|best] [--dry-run]')
   await watchToken({
     token: getAddress(opt.token), positions: opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined,
-    clients: await makeClients({ from: opt.from, needKey: !opt['dry-run'] }), interval: Math.max(3, Number(opt.interval)), confirm: Math.max(1, Number(opt.confirm)),
-    upperGrace: Math.max(0, Number(opt['upper-grace'])), via: opt.via, slippage: Number(opt.slippage), lpSlippage: Number(opt['lp-slippage']), dryRun: opt['dry-run'], json: opt.json,
+    clients: await makeClients({ from: opt.from, needKey: !opt['dry-run'] }), interval: Math.max(3, num('--interval', opt.interval, 0, 86400)), confirm: Math.max(1, num('--confirm', opt.confirm, 0, 1000)),
+    upperGrace: num('--upper-grace', opt['upper-grace'], 0, 86400 * 30), via: opt.via, slippage: num('--slippage', opt.slippage, 0, 50), lpSlippage: num('--lp-slippage', opt['lp-slippage'], 0, 50), dryRun: opt['dry-run'], json: opt.json,
   })
   await sleep(100); process.exit(0)
 }

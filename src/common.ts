@@ -24,6 +24,8 @@ export const env = (k: string, d: string) => process.env[k] || d
 export const ts = () => new Date().toTimeString().slice(0, 8)
 export const log = (...a: unknown[]) => console.log(ts(), ...a)
 export function die(msg: string): never { console.error('错误:', msg); process.exit(1) }
+// 命令行 / 环境变量里的数字参数：Number('5s') 是 NaN，Math.max(3, NaN) 还是 NaN——监控会变成无间隔死循环且永远不触发撤退，所以不是范围内的有限数字就直接报错
+export const num = (label: string, v: string, lo: number, hi: number) => { const n = Number(v); if (!(Number.isFinite(n) && n >= lo && n <= hi)) die(`${label} 必须是 [${lo}, ${hi}] 之间的数字，当前 "${v}"`); return n }
 // 顶层 await 里抛出的错误默认打整段堆栈，而网页把子进程输出原样显示——又长又带着 RPC 地址。
 // viem 的网络/合约错误收敛成一行；没有 shortMessage 的多半是真的代码 bug，保留堆栈方便查。（网页那侧另有脱敏兜底）
 export const failFast = () => {
@@ -155,8 +157,9 @@ export function okxDex(c: Pick<Clients, 'wallet' | 'cfg'>, slippage: number) {
     approver: async () => getAddress((await get('/api/v6/dex/aggregator/supported/chain', { chainIndex: String(cfg.okxChainIndex) }))[0].dexTokenApproveAddress),
     // 报价 + 交易数据一次拿齐
     swap: async (from: Address, to: Address, amount: bigint) => {
+      // 貔貅标记：卖出时目标在 fromToken，进场买币时在 toToken，两头都看
       const d = (await get('/api/v6/dex/aggregator/swap', { chainIndex: String(cfg.okxChainIndex), amount: amount.toString(), fromTokenAddress: from, toTokenAddress: to, slippagePercent: String(slippage), userWalletAddress: wallet }))[0]
-      return { out: BigInt(d.routerResult.toTokenAmount) as bigint, minOut: BigInt(d.tx.minReceiveAmount) as bigint, route: (d.routerResult.dexRouterList ?? []).map((r: any) => `${r.dexProtocol?.dexName ?? '?'} ${r.dexProtocol?.percent ?? ''}%`).join(' + '), honeypot: d.routerResult.fromToken?.isHoneyPot === true, tx: { to: getAddress(d.tx.to), data: d.tx.data as Hex, value: BigInt(d.tx.value ?? 0), gasLimit: BigInt(d.tx.gas ?? 0) } }
+      return { out: BigInt(d.routerResult.toTokenAmount) as bigint, minOut: BigInt(d.tx.minReceiveAmount) as bigint, route: (d.routerResult.dexRouterList ?? []).map((r: any) => `${r.dexProtocol?.dexName ?? '?'} ${r.dexProtocol?.percent ?? ''}%`).join(' + '), honeypot: d.routerResult.fromToken?.isHoneyPot === true || d.routerResult.toToken?.isHoneyPot === true, tx: { to: getAddress(d.tx.to), data: d.tx.data as Hex, value: BigInt(d.tx.value ?? 0), gasLimit: BigInt(d.tx.gas ?? 0) } }
     },
   }
 }

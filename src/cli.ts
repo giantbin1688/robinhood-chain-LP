@@ -2,9 +2,9 @@
 // 链 / 协议由 --chain / --protocol（或 CHAIN / PROTOCOL 环境变量）决定：robinhood/v4、bsc/infinity、bsc/v3；链上细节都在 lp.ts 的适配器里
 import { createInterface } from 'node:readline/promises'
 import { parseArgs } from 'node:util'
-import { formatEther, getAddress, parseUnits, type Address } from 'viem'
+import { formatEther, getAddress, parseUnits, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
-import { abs, die, env, erc20Abi, failFast, feeText, log, makeClients, min, nativePriceUsd, now, p6, pct, savePosition, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, type SwapOffer } from './common.ts'
+import { abs, die, env, erc20Abi, failFast, feeText, log, makeClients, min, nativePriceUsd, now, num, p6, pct, savePosition, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, type SwapOffer } from './common.ts'
 import type { MintSpec, Pool } from './lp.ts'
 import { watchToken } from './monitor.ts'
 import { discoverQuotePools } from './pools.ts'
@@ -25,6 +25,7 @@ const { values: opt } = parseArgs({
     'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },      // mint amountMax 余量 %
     'max-deviation': { type: 'string', default: env('MAX_DEVIATION', '10') },// 池价与市场价最大偏离 %
     'pool-select': { type: 'string', default: env('POOL_SELECT', 'auto') },  // auto: 配置的池不存在时复用该币已有的计价币池；exact: 只用配置的费率/间距
+    pool: { type: 'string', default: '' },          // 直接指定池 id（网页"用这个池"传来；带 hook 的池只能这样指定），费率/间距以链上为准，不看 --fee/--spacing/--pool-select
     shape: { type: 'string', default: env('LP_SHAPE', 'spot') },             // 流动性形状：spot 一个仓位 | curve 同心嵌套、越靠现价越厚 | bidask 两侧分段、越远越厚
     layers: { type: 'string', default: env('LP_LAYERS', '3') },              // curve 的层数 / bidask 每侧的段数
     watch: { type: 'boolean', default: false },     // 组完 LP 后继续监控，跳出区间自动撤退
@@ -34,10 +35,12 @@ const { values: opt } = parseArgs({
     json: { type: 'boolean', default: false },        // 计划确定后额外打印一行 "@@plan {json}" 给网页界面用
   },
 })
-if (!opt.token) die('用法: npm run launch -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--range="-50%,+100%" | --price-range="0.006,0.01"] [--shape spot|curve|bidask] [--layers 3] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
+if (!opt.token) die('用法: npm run launch -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--pool <池id>] [--range="-50%,+100%" | --price-range="0.006,0.01"] [--shape spot|curve|bidask] [--layers 3] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
 const token = getAddress(opt.token)
+const poolId = opt.pool.trim()
+if (poolId && !/^0x[0-9a-fA-F]{40}$|^0x[0-9a-fA-F]{64}$/.test(poolId)) die(`--pool 必须是池 id（v4/Infinity 为 32 字节 hex，v3 为池地址），当前 "${opt.pool}"`)
 let fee = Math.round(Number(opt.fee) * 10_000) // pips
-if (!(fee > 0 && fee <= 1_000_000)) die(`POOL_FEE / --fee 必须是 (0, 100] 之间的百分比，当前 "${opt.fee}"`)
+if (!poolId && !(fee > 0 && fee <= 1_000_000)) die(`POOL_FEE / --fee 必须是 (0, 100] 之间的百分比，当前 "${opt.fee}"`)
 if (!['auto', 'exact'].includes(opt['pool-select'])) die('POOL_SELECT / --pool-select 只能是 auto 或 exact')
 const shape = opt.shape.toLowerCase().replace('-', '') as 'spot' | 'curve' | 'bidask'
 if (!['spot', 'curve', 'bidask'].includes(shape)) die(`LP_SHAPE / --shape 只能是 spot、curve 或 bidask，当前 "${opt.shape}"`)
@@ -54,8 +57,7 @@ const [mLo, mHi] = [1 + pLo / 100, 1 + pHi / 100] // 代币价格倍数
 // 绝对价格区间（计价币/代币）：设置了就用它，不看 RANGE
 const priceRange = (opt['price-range'].match(/\d*\.?\d+(?:e-?\d+)?/gi) ?? []).map(Number)
 if (opt['price-range'] && (priceRange.length !== 2 || !(priceRange[0] > 0) || !(priceRange[1] > priceRange[0]))) die(`PRICE_RANGE / --price-range 写法：最低价,最高价（计价币/代币），如 0.006,0.01，当前 "${opt['price-range']}"`)
-const swapSlippage = Number(opt.slippage), lpSlippage = Number(opt['lp-slippage'])
-if (!(swapSlippage >= 0 && swapSlippage <= 50 && lpSlippage >= 0 && lpSlippage <= 50)) die('滑点必须是 [0, 50] 之间的百分比')
+const swapSlippage = num('SWAP_SLIPPAGE / --slippage', opt.slippage, 0, 50), lpSlippage = num('LP_SLIPPAGE / --lp-slippage', opt['lp-slippage'], 0, 50)
 const maxDev = Number(opt['max-deviation']) / 100
 if (!(maxDev > 0 && maxDev < 1)) die('MAX_DEVIATION / --max-deviation 必须是 (0, 100) 之间的百分比')
 const dryRun = opt['dry-run']
@@ -71,8 +73,16 @@ if (opt.spacing && !(Number.isInteger(spacing) && spacing >= 1 && spacing <= 327
 const balanceOf = (t: Address) => pub.readContract({ address: t, abi: erc20Abi, functionName: 'balanceOf', args: [wallet] })
 
 // ---- 钱包 / 代币 / 余额 / 池子（一次批量读取）----
-// 配置的费率这个协议不支持（v3 只有四档）：auto 模式下跳过它去找已有池，exact 模式直接报错
-let pool: Pool | null = await lp.pool(token, fee, spacing).catch((e) => (opt['pool-select'] === 'exact' ? die(String(e?.message)) : (log(`提示: ${String(e?.message)}，只看已有池`), null)))
+// 指定了池 id 就直接反查 PoolKey（带 hook 的池只能这样找到），费率/间距以链上为准；
+// 否则按配置的费率/间距。配置的费率这个协议不支持（v3 只有四档）：auto 模式下跳过它去找已有池，exact 模式直接报错
+let pool: Pool | null = poolId
+  ? await lp.poolById(poolId as Hex).then((p) => p ?? die(`池 ${poolId} 查不到 PoolKey（没人通过 PositionManager 建过仓）`))
+  : await lp.pool(token, fee, spacing).catch((e) => (opt['pool-select'] === 'exact' ? die(String(e?.message)) : (log(`提示: ${String(e?.message)}，只看已有池`), null)))
+if (poolId && pool) {
+  const has = (a: Address) => [pool!.currency0, pool!.currency1].some((x) => x.toLowerCase() === a.toLowerCase())
+  if (!has(token) || !has(Q.address)) die(`池 ${poolId} 不是 ${token} / ${Q.symbol} 池`)
+  fee = pool.fee; spacing = pool.spacing
+}
 let [{ symbol, name, decimals }, usdgStart, ethBal, tokenStart, ethPrice, poolSlot] = await Promise.all([
   tokenMeta(pub, token), balanceOf(Q.address), pub.getBalance({ address: wallet }), balanceOf(token), nativePriceUsd(clients), pool ? lp.slot0(pool) : { sqrtP: 0n, tick: 0, protocolFee: 0, lpFee: 0 },
 ])
@@ -99,7 +109,7 @@ if (initialized && (tick <= v4.MIN_TICK || tick >= v4.MAX_TICK)) {
   die(`池子处于不可用边界 tick ${tick}；请更换 fee/spacing 创建新池，或先在原池补回覆盖现价的流动性`)
 }
 // 配置的池不存在：看看这个币已有哪些计价币池。同费率的直接复用（间距以链上为准）；否则选流动性够、成交量最大的；都没有才新建
-if (!initialized && opt['pool-select'] === 'auto') {
+if (!initialized && opt['pool-select'] === 'auto' && !poolId) {
   const pools = (await discoverQuotePools(clients, token)).sort((a, b) => b.volume24h - a.volume24h)
   const usd$ = (x: number) => `$${Math.round(x).toLocaleString('en-US')}`
   if (pools.length) log(`已有 ${symbol}/${Q.symbol} 池: ${pools.slice(0, 4).map((p) => `${feeText(p.pool)}/${p.pool.spacing}${p.pool.hooks !== v4.ZERO_ADDRESS ? '(hook)' : ''} ${p.empty ? '空池' : `流动性${usd$(p.liquidityUsd)} 日成交${usd$(p.volume24h)}`}`).join('；')}${pools.length > 4 ? '…' : ''}`)
@@ -125,7 +135,7 @@ const tickFromProbe = (tokenOutPer1Usdg: bigint) => v4.tickFromPrice(tokenIs1 ? 
 const tokensForUsdg = (usdgBase: bigint, usdgPerToken: number) => BigInt(Math.floor((Number(usdgBase) / usdgPerToken) * 10 ** (decimals - Q.decimals)))
 const price = (t: number) => `${p6(usdgPerTokenAtTick(t))} ${Q.symbol}/${symbol}`
 const deviation = (poolTick: number, marketTick: number) => usdgPerTokenAtTick(poolTick) / usdgPerTokenAtTick(marketTick) - 1 // 池价相对市场价
-log(`池子 ${symbol}/${Q.symbol} 费率=${feeText(pool)} 间距=${spacing}: ${initialized ? `已存在，tick ${tick} = ${price(tick)}` : '不存在，将创建'}`)
+log(`池子 ${symbol}/${Q.symbol} 费率=${feeText(pool)} 间距=${spacing}${pool.hooks !== v4.ZERO_ADDRESS ? ` hook=${pool.hooks}` : ''}${poolId ? '（按 id 指定）' : ''}: ${initialized ? `已存在，tick ${tick} = ${price(tick)}` : '不存在，将创建'}`)
 
 // ---- 区间 ----
 // 代币价格 × m  <=>  代币是 currency0 时原始价格 × m，是 currency1 时原始价格 ÷ m
@@ -532,7 +542,7 @@ if (opt.json) console.log('@@positions ' + JSON.stringify(minted.map(String))) /
 
 // 6) 可选：继续监控本次建的仓位，跳出区间自动撤退（同一代币的其他仓位不管，可以再开一个进程做别的区间）
 if (opt.watch) await watchToken({
-  token, positions: minted.length ? minted : undefined, clients, interval: Math.max(3, Number(env('WATCH_INTERVAL', '10'))), confirm: Math.max(1, Number(env('WATCH_CONFIRM', '2'))),
-  upperGrace: Math.max(0, Number(env('WATCH_UPPER_GRACE', '600'))),
+  token, positions: minted.length ? minted : undefined, clients, interval: Math.max(3, num('WATCH_INTERVAL', env('WATCH_INTERVAL', '10'), 0, 86400)), confirm: Math.max(1, num('WATCH_CONFIRM', env('WATCH_CONFIRM', '2'), 0, 1000)),
+  upperGrace: num('WATCH_UPPER_GRACE', env('WATCH_UPPER_GRACE', '600'), 0, 86400 * 30),
   via: env('EXIT_SWAP_VIA', 'best'), slippage: swapSlippage, lpSlippage, dryRun: false, json: opt.json,
 })

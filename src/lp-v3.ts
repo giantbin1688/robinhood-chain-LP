@@ -148,7 +148,7 @@ export async function v3Lp(d: LpDeps): Promise<Lp> {
     },
     slot0,
     slot0At: (p, block) => slot0(p, block),
-    liquidityAt: (id, blockNumber) => pub.readContract({ address: NPM, abi: npmAbi, functionName: 'positions', args: [id], blockNumber }).then((r) => r[7], () => 0n),
+    liquidityAt: (id, blockNumber) => pub.readContract({ address: NPM, abi: npmAbi, functionName: 'positions', args: [id], blockNumber }).then((r) => r[7], (e) => { if (/Invalid token ID/i.test(String(e?.message))) return 0n; throw e }), // 已销毁的 NFT 会 revert 'Invalid token ID' = 0；读链失败照常抛出
     liquidity: (p) => pub.readContract({ address: p.id as Address, abi: poolAbi, functionName: 'liquidity' }),
     swapFee: (_s, _z, p) => p.fee, // 协议费从 LP 费里分，交易者付的就是池费率
     ownedIds, positions, fees,

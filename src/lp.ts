@@ -37,7 +37,7 @@ export interface Lp {
   poolById(id: Hex): Promise<Pool | null>            // 从 poolId / 池地址反查（复用已有池，Infinity 含 hook 池）
   slot0(pool: Pool): Promise<Slot0>
   slot0At(pool: Pool, block: bigint): Promise<Slot0>   // 历史区块的池价（资金流水按当时价格折算；需要归档节点）
-  liquidityAt(id: bigint, block: bigint): Promise<bigint> // 仓位在某区块的流动性（已销毁 / 不存在返回 0）
+  liquidityAt(id: bigint, block: bigint): Promise<bigint> // 仓位在某区块的流动性（已销毁 / 不存在返回 0；读链失败抛错，不要当成 0）
   liquidity(pool: Pool): Promise<bigint>
   swapFee(s: Slot0, zeroForOne: boolean, pool: Pool): number           // 这一方向的总换币费率（pips）
   ownedIds(): Promise<{ ids: bigint[]; mints: Map<string, { block: bigint; tx: Hex }>; complete: boolean }> // 链上扫到的钱包仓位；complete=false 表示只能靠 positions.json 补

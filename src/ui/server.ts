@@ -78,15 +78,16 @@ function startJob(sel: Sel, kind: Job['kind'], label: string, script: string, ar
     emit({ type: 'log', job: job.id, text })
   }
   // 发交易时会先写半行 "标签 hash ..."，等收据再补 " 成功…"：半行也推给页面（partial），补完再作为整行发出
-  const feed = (chunk: Buffer) => {
-    job.partial += chunk.toString('utf8')
+  const feed = (chunk: string) => {
+    job.partial += chunk
     const parts = job.partial.split(/\r?\n/)
     job.partial = parts.pop()!
     for (const p of parts) line(p)
     if (job.partial) emit({ type: 'partial', job: job.id, text: redact(job.partial) }) // 累加器保持原样，只脱敏推出去的那份
   }
-  proc.stdout!.on('data', feed)
-  proc.stderr!.on('data', feed)
+  // setEncoding 让 Node 按 UTF-8 流解码：一个中文字正好跨在两个 chunk 边界时不会变成 �（按 chunk 各自 toString 会）
+  proc.stdout!.setEncoding('utf8').on('data', feed)
+  proc.stderr!.setEncoding('utf8').on('data', feed)
   proc.on('close', (code) => {
     if (job.partial) { line(job.partial); job.partial = '' }
     job.exitCode = code; job.endedAt = Date.now()
@@ -343,6 +344,7 @@ function launchArgs(b: any) {
   if (!isAddress(token)) throw new Error('代币地址不合法')
   const args = [`--token=${token}`, `--usdg=${str(b.usdg)}`, `--fee=${str(b.fee)}`, `--slippage=${str(b.slippage)}`, `--lp-slippage=${str(b.lpSlippage)}`, `--max-deviation=${str(b.maxDeviation)}`, `--pool-select=${str(b.poolSelect)}`]
   if (str(b.spacing)) args.push(`--spacing=${str(b.spacing)}`)
+  if (/^0x[0-9a-fA-F]{64}$|^0x[0-9a-fA-F]{40}$/.test(str(b.pool))) args.push(`--pool=${str(b.pool)}`) // 池子列表里点"用这个池"选中的 id，带 hook 的池只能这样指定
   if (b.rangeMode === 'price') args.push(`--price-range=${str(b.priceRange)}`)
   else args.push(`--range=${str(b.range)}`)
   if (['curve', 'bidask'].includes(str(b.shape))) { args.push(`--shape=${str(b.shape)}`); if (str(b.layers)) args.push(`--layers=${str(b.layers)}`) }

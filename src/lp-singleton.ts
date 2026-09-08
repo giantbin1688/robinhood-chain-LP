@@ -197,7 +197,7 @@ export async function singletonLp(protocol: ProtocolName, d: LpDeps): Promise<Lp
     },
     slot0, liquidity,
     slot0At: (pool, block) => slot0(pool, block),
-    liquidityAt: (id, blockNumber) => pub.readContract({ address: POSM, abi: posmAbi, functionName: 'getPositionLiquidity', args: [id], blockNumber }).catch(() => 0n),
+    liquidityAt: (id, blockNumber) => pub.readContract({ address: POSM, abi: posmAbi, functionName: 'getPositionLiquidity', args: [id], blockNumber }), // 不存在 / 已销毁的仓位合约本身就返回 0；读链失败要抛出去，不能当成 0
     // v4 的 calculateSwapFee：协议费按方向取 12 位，与 LP 费合成
     swapFee: (s, zeroForOne, pool) => {
       const pf = zeroForOne ? s.protocolFee & 0xfff : s.protocolFee >> 12

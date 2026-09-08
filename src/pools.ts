@@ -43,7 +43,8 @@ export async function discoverQuotePools(c: Clients, token: Address): Promise<Fo
     if (s.sqrtP === 0n) continue
     const L = await lp.liquidity(pool)
     if (L === 0n) continue
-    const [a0, a1] = v4.amountsForLiquidity(s.sqrtP, v4.getSqrtRatioAtTick(s.tick - 953), v4.getSqrtRatioAtTick(s.tick + 953), L) // 1.0001^953 ≈ 1.1
+    // 1.0001^953 ≈ 1.1；归零的币 tick 会贴着 MIN/MAX_TICK，越界会抛错，钳一下
+    const [a0, a1] = v4.amountsForLiquidity(s.sqrtP, v4.getSqrtRatioAtTick(Math.max(v4.MIN_TICK, s.tick - 953)), v4.getSqrtRatioAtTick(Math.min(v4.MAX_TICK, s.tick + 953)), L)
     const quoteIs0 = pool.currency0.toLowerCase() === cfg.quote.address.toLowerCase()
     const [qAmt, tAmt] = quoteIs0 ? [a0, a1] : [a1, a0]
     const raw = v4.priceAtTick(s.tick) * 10 ** ((quoteIs0 ? cfg.quote.decimals : decimals) - (quoteIs0 ? decimals : cfg.quote.decimals))
