@@ -4,6 +4,7 @@ Robinhood Chain 上的 Uniswap v4 一键 LP 工具（进场 / 监控 / 撤退 + 
 
 ## 临时文件：用完必须删
 
+- **铁律：AI 测试过程中产生的任何缓存 / 临时文件（浏览器配置目录、下载的包、抓帧图片、日志、pip/npm 临时安装的东西）都必须在任务结束前清理干净，不得遗留在用户电脑的硬盘上。** 结束前主动 `ls` 一遍自己动过的目录（项目根、`.scratch/`、`%TEMP%`、`~/.cache`）确认没有残留，并在汇报里说明清理了什么。
 - 调试脚本、接口返回、日志、截图、临时安装的包，一律放在项目下的 `.scratch/`（已 git 忽略），不要散落在项目根目录、`/tmp` 或 `%TEMP%`。
 - 每次任务结束前删掉 `.scratch/`，以及自己在别处建的任何东西。曾经在 `%TEMP%` 里遗留过 826 MB 的无头 Edge 配置目录和一个 Playwright 目录，用户为此专门提过意见。
 - 需要真实浏览器验证网页时：Playwright 装到 `.scratch/pw/`，用 `chromium.launch({ channel: 'msedge', headless: true })` 调系统 Edge（不下载浏览器），`user-data-dir` 也放 `.scratch/`，测完整个目录删掉。别用 Edge 的 `--dump-dom`：页面有 SSE 长连接，会挂住不退出。

@@ -29,8 +29,11 @@ const [amount0, amount1] = amountsForLiquidity(sqrtP, sqrtA, sqrtB, liquidity)
 assert.equal(amount0, 25_000_000n)
 assert.equal(amount1, 15702640868205473793213n, 'matches the GRACE Transfer in the receipt')
 
-const unlockData = encodeMintUnlockData(key, 334000, 349000, liquidity, 25_000_000n, 16487772911615747482873n, WALLET)
+const unlockData = encodeMintUnlockData(key, [{ tickLower: 334000, tickUpper: 349000, liquidity, amount0Max: 25_000_000n, amount1Max: 16487772911615747482873n }], WALLET)
 assert.equal(keccak256(unlockData), '0x19e3852cd4d12f82843f099bf8d7c00dcce5caf72bad1bf06bb6b896b8154c78', 'byte-identical to on-chain unlockData')
+// 多仓位一笔交易：动作串是 02×n + 0d，参数数组是 n 个 mint + 1 个 settle
+const two = encodeMintUnlockData(key, [{ tickLower: 334000, tickUpper: 349000, liquidity, amount0Max: 1n, amount1Max: 1n }, { tickLower: 330000, tickUpper: 352000, liquidity, amount0Max: 1n, amount1Max: 1n }], WALLET)
+assert.ok(two.includes('02020d'.padEnd(64, '0')), 'actions 0x02020d')
 
 // 网页内联脚本只做语法解析（不执行）：一个重复声明就会让整个页面不动，右上角停在"连接中…"
 for (const [, src] of readFileSync(new URL('./ui/index.html', import.meta.url), 'utf8').matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)) new Function(src)

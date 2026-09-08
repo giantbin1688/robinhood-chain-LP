@@ -153,7 +153,7 @@ async function listPositions(full: boolean) {
     // 正在盯着这个仓位的任务：按仓位监控的看 positions；按代币整体监控的（positions 为空）看 token
     const watcher = [...jobs.values()].find((j) => isRunning(j) && (j.kind === 'watch' || j.phase === 'watch') && (j.positions.length ? j.positions.includes(id) : same(j.token ?? '', token)))
     return {
-      id, token, symbol: m.symbol, decimals: m.decimals, fee: p.key.fee / 10000, spacing: p.key.tickSpacing, kind: p.kind, poolId: v4.poolId(p.key),
+      id, token, symbol: m.symbol, decimals: m.decimals, fee: p.key.fee / 10000, spacing: p.key.tickSpacing, kind: p.kind, shape: p.shape, group: p.group, poolId: v4.poolId(p.key),
       tickLower: p.tickLower, tickUpper: p.tickUpper, tick: p.tick, lo: p6(lo), hi: p6(hi), price: p6(price), inRange: p.tick >= p.tickLower && p.tick < p.tickUpper,
       usdg: trim(u, 6), tokenAmount: trim(t, m.decimals), value: usd(u, t), liquidity: p.liquidity.toString(), watchJob: watcher?.id ?? null,
       feesUsdg: trim(fu, 6), feesToken: trim(ft, m.decimals), feesUsd: usd(fu, ft),
@@ -299,7 +299,7 @@ async function poolsFor(token: Address) {
 }
 
 async function state() {
-  const params = Object.fromEntries(['USDG_AMOUNT', 'POOL_FEE', 'POOL_SELECT', 'TICK_SPACING', 'PRICE_RANGE', 'RANGE', 'SWAP_SLIPPAGE', 'LP_SLIPPAGE', 'MAX_DEVIATION', 'SWAP_VIA', 'EXIT_SWAP_VIA', 'WATCH_INTERVAL', 'WATCH_CONFIRM', 'WATCH_UPPER_GRACE'].map((k) => [k, process.env[k] ?? '']))
+  const params = Object.fromEntries(['USDG_AMOUNT', 'POOL_FEE', 'POOL_SELECT', 'TICK_SPACING', 'PRICE_RANGE', 'RANGE', 'LP_SHAPE', 'LP_LAYERS', 'SWAP_SLIPPAGE', 'LP_SLIPPAGE', 'MAX_DEVIATION', 'SWAP_VIA', 'EXIT_SWAP_VIA', 'WATCH_INTERVAL', 'WATCH_CONFIRM', 'WATCH_UPPER_GRACE'].map((k) => [k, process.env[k] ?? '']))
   const base = { wallet, params, okx: !!process.env.OKX_API_KEY, uniswapKey: !!process.env.UNISWAP_API_KEY, explorer: EXPLORER, jobs: [...jobs.values()].map(summary) }
   if (!clients) return { ...base, usdg: null, eth: null, ethPrice: null }
   const { pub } = clients
@@ -320,6 +320,8 @@ function launchArgs(b: any) {
   if (str(b.spacing)) args.push(`--spacing=${str(b.spacing)}`)
   if (b.rangeMode === 'price') args.push(`--price-range=${str(b.priceRange)}`)
   else args.push(`--range=${str(b.range)}`)
+  if (['curve', 'bidask'].includes(str(b.shape))) { args.push(`--shape=${str(b.shape)}`); if (str(b.layers)) args.push(`--layers=${str(b.layers)}`) }
+  else args.push('--shape=spot')
   args.push(b.dryRun ? '--dry-run' : '--yes')
   if (b.watch && !b.dryRun) args.push('--watch')
   return args
@@ -393,7 +395,7 @@ const server = createServer(async (req, res) => {
       if (!ids(b.positions).length) throw new Error('要给仓位 id')
       const args = [`--position=${ids(b.positions).join(',')}`, '--collect', b.dryRun ? '--dry-run' : '--yes']
       if (b.sell) args.push('--sell', `--via=${via(b.via)}`)
-      const job = startJob('exit', `${b.dryRun ? '领手续费演练' : '领手续费'}${b.sell ? '+卖币' : ''} #${ids(b.positions).join(',#')}`, 'src/exit.ts', args, { dryRun: !!b.dryRun, positions: ids(b.positions) })
+      const job = startJob('exit', `${b.dryRun ? '领手续费演练' : '领手续费'}${b.sell ? '+卖币' : ''} ${ids(b.positions).length > 3 ? `${ids(b.positions).length} 个仓位` : '#' + ids(b.positions).join(',#')}`, 'src/exit.ts', args, { dryRun: !!b.dryRun, positions: ids(b.positions) })
       return json(res, 200, { job: summary(job) })
     }
     if (req.method === 'POST' && url.pathname === '/api/watch') {

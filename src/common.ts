@@ -235,7 +235,31 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
     const est = await pub.estimateGas({ account: wallet, ...tx })
     return send(label, { ...tx, gas: ((est > refGas ? est : refGas) * 13n) / 10n })
   }
-  return { send, sendEstimated, ensureErc20Approval, permitFor, stats }
+  // 一批互不依赖的交易同时广播（同一区块内按 nonce 顺序执行），一起等回执。先逐笔估 gas，估不过的剔除——它不占 nonce，不会留下空洞卡住后面的；
+  // 上链后回滚的交易照样消耗 nonce，也不影响其他。广播本身失败（RPC 出错）的把 nonce 退回去再跳过。返回每笔成败，不因为个别失败退出
+  async function sendBatch(items: { label: string; tx: { to: Address; data: Hex; value?: bigint }; refGas?: bigint }[]) {
+    const est = await Promise.all(items.map((it) => pub.estimateGas({ account: wallet, ...it.tx }).then((g) => g as bigint | null, (e: any) => { log(`${it.label} 模拟失败，跳过: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`); return null })))
+    const ready = items.map((it, i) => ({ ...it, gas: est[i] })).filter((x): x is typeof x & { gas: bigint } => x.gas !== null)
+    if (ready.length === 0) return []
+    if (nonce === undefined || !fees) [nonce, fees] = await Promise.all([pub.getTransactionCount({ address: wallet, blockTag: 'pending' }), pub.estimateFeesPerGas()])
+    const sent: (typeof ready[number] & { hash: Hex })[] = []
+    for (const it of ready) {
+      const ref = it.refGas ?? 0n, gas = ((it.gas > ref ? it.gas : ref) * 13n) / 10n
+      try {
+        const hash = await wc!.sendTransaction({ ...it.tx, gas, account: wc!.account!, chain, nonce: nonce++, maxFeePerGas: fees.maxFeePerGas * 3n, maxPriorityFeePerGas: fees.maxPriorityFeePerGas })
+        sent.push({ ...it, hash })
+      } catch (e: any) { nonce--; log(`${it.label} 广播失败，跳过: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`) }
+    }
+    log(`同时广播 ${sent.length} 笔交易，等待上链…`)
+    const rcs = await Promise.all(sent.map((s) => pub.waitForTransactionReceipt({ hash: s.hash, retryDelay: 150, retryCount: 60 })))
+    return sent.map((s, i) => {
+      const rc = rcs[i], cost = rc.gasUsed * rc.effectiveGasPrice, ok = rc.status === 'success'
+      stats.txCount++; stats.gasTotal += cost
+      log(`${s.label} ${s.hash} ${ok ? `成功，${rc.gasUsed} gas $${usd(cost)}` : `失败(revert) ${EXPLORER}/tx/${s.hash}`}`)
+      return { label: s.label, hash: s.hash, ok, block: rc.blockNumber }
+    })
+  }
+  return { send, sendEstimated, sendBatch, ensureErc20Approval, permitFor, stats }
 }
 
 // PositionManager 的滑点回滚：MaximumAmountExceeded(uint128 max, uint128 requested) / MinimumAmountInsufficient(uint128 min, uint128 received)，
@@ -267,25 +291,31 @@ export async function swapOffers(d: SwapDeps, tokenIn: Address, tokenOut: Addres
   const ok = all.filter((x): x is SwapOffer => !!x)
   return type === 'EXACT_INPUT' ? ok.sort((a, b) => (a.out > b.out ? -1 : 1)) : ok.sort((a, b) => (a.amountIn < b.amountIn ? -1 : 1))
 }
-// 执行一个报价：授权（Uniswap 走 Permit2 签名，OKX 走它的授权合约）-> 发交易。返回收到的 tokenOut 数量
+// 把一个报价变成可发送的交易：先做 ERC20 授权（Uniswap 给 Permit2，OKX 给它的授权合约；额度够就不发），Uniswap 再签 Permit2 消息拿到路由的 calldata
+export async function prepareSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typeof txKit>, c: Clients, tokenIn: Address) {
+  if (o.via === 'okx') {
+    await kit.ensureErc20Approval(tokenIn, o.amountIn, await d.okx!.approver(), 'OKX DEX')
+    return { via: 'OKX', tx: o.okx!.tx, refGas: o.okx!.tx.gasLimit }
+  }
+  await kit.ensureErc20Approval(tokenIn, o.amountInMax)
+  const tx = await d.uni.swapTx(o.uni!, c.wc!)
+  return { via: 'Uniswap', tx, refGas: tx.gasLimit }
+}
+// 执行一个报价：授权 -> 发交易。返回收到的 tokenOut 数量
 export async function executeSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typeof txKit>, c: Clients, tokenIn: Address, tokenOut: Address, label: string) {
   const balance = () => c.pub.readContract({ address: tokenOut, abi: erc20Abi, functionName: 'balanceOf', args: [c.wallet] })
   const before = await balance()
-  if (o.via === 'okx') {
-    await kit.ensureErc20Approval(tokenIn, o.amountIn, await d.okx!.approver(), 'OKX DEX')
-    await kit.sendEstimated(`${label} (OKX)`, o.okx!.tx, o.okx!.tx.gasLimit)
-  } else {
-    await kit.ensureErc20Approval(tokenIn, o.amountInMax)
-    const tx = await d.uni.swapTx(o.uni!, c.wc!)
-    await kit.sendEstimated(`${label} (Uniswap)`, tx, tx.gasLimit)
-  }
+  const p = await prepareSwap(o, d, kit, c, tokenIn)
+  await kit.sendEstimated(`${label} (${p.via})`, p.tx, p.refGas)
   const got = (await balance()) - before
   if (got <= 0n) die(`${label}交易成功但没有收到代币?`)
   return got
 }
 
 // ---- 本地仓位记录 positions.json（进场时追加，撤退时读取）----
-export type PositionRecord = { id: string; token: Address; symbol: string; poolId: Hex; kind: 'lp' | 'bridge'; at: string }
+// shape / group：curve、bidask 一次进场建的几个仓位共用一个 group（= mint 交易哈希），仓位页按形状分区、按 group 成组显示；没记录的（链上扫到的）按 spot 处理
+export type Shape = 'spot' | 'curve' | 'bidask'
+export type PositionRecord = { id: string; token: Address; symbol: string; poolId: Hex; kind: 'lp' | 'bridge'; at: string; shape?: Shape; group?: Hex }
 const POSITIONS_FILE = 'positions.json'
 export const loadPositions = (): PositionRecord[] => (existsSync(POSITIONS_FILE) ? JSON.parse(readFileSync(POSITIONS_FILE, 'utf8')) : [])
 export function savePosition(p: PositionRecord) { writeFileSync(POSITIONS_FILE, JSON.stringify([...loadPositions(), p], null, 2) + '\n') }

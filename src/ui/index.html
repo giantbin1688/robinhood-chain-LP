@@ -28,6 +28,9 @@
   .row { display:grid; grid-template-columns:132px 1fr; gap:7px 12px; align-items:center; margin:9px 0 }
   .row label { color:#393835; font-weight:480 }
   .row .hint { grid-column:2; font-size:11px; line-height:1.45; color:#98958e; margin-top:-3px }
+  .shapeviz svg { width:100%; max-width:340px; display:block; background:rgba(255,255,255,.5); border:1px solid var(--line-soft); border-radius:8px }
+  .shapeviz text { font-size:9px; fill:var(--muted) }
+  .shapeviz .note { font-size:11px; line-height:1.45; color:#98958e; margin-top:4px }
   input[type=text],select { width:100%; min-height:35px; padding:7px 10px; border:1px solid #d9d7d0; border-radius:9px; color:var(--text); font:inherit; background:rgba(255,255,255,.85); transition:border-color .15s,box-shadow .15s }
   input[type=text]:hover,select:hover { border-color:#c7c4bc }
   input[type=text]:focus,select:focus { outline:none; border-color:#b76f57; box-shadow:0 0 0 3px rgba(217,119,87,.12) }
@@ -83,6 +86,9 @@
   dialog { border:1px solid var(--line); border-radius:14px; padding:18px 20px; max-width:440px; box-shadow:var(--shadow); font:inherit; color:var(--text) }
   dialog::backdrop { background:rgba(25,25,24,.35) }
   #pos-table .btns .btn { min-height:25px; padding:3px 8px }
+  #pos-table tr.grp td { background:rgba(0,0,0,.045); font-size:12px; padding:7px 10px; border-top:1px solid rgba(0,0,0,.08) }
+  #pos-table tr.sub td { background:rgba(255,255,255,.35); font-size:12px; padding:6px 10px 6px 18px }
+  #pos-table tr.sub .btns { width:auto }
   .small { font-size:11px; color:var(--muted) }
   .mono { font-family:var(--mono) }
   .toast { position:fixed; right:22px; bottom:22px; background:#252522; color:#fff; padding:10px 14px; border:1px solid rgba(255,255,255,.1); border-radius:10px; font-size:12px; opacity:0; transform:translateY(8px); transition:.2s ease; pointer-events:none; max-width:420px; box-shadow:0 12px 36px rgba(0,0,0,.18) }
@@ -141,6 +147,9 @@
         <div class="row"><label>区间写法</label><select id="f-rangeMode"><option value="pct">相对现价（百分比）</option><option value="price">绝对价格（USDG/代币）</option></select></div>
         <div class="row" id="row-range"><label>区间（%）</label><input type="text" id="f-range" placeholder="-50%,+100%"><div class="hint">-50%,+100% 双边；只填 -50% = 只做下方（全 USDG）；只填 +100% = 只做上方（全代币）</div></div>
         <div class="row" id="row-priceRange" style="display:none"><label>最低价,最高价</label><input type="text" id="f-priceRange" placeholder="0.006,0.01"><div class="hint">整体在现价下方 = 纯 USDG 等跌；整体在上方 = 全换成代币等涨</div></div>
+        <div class="row"><label>形状</label><select id="f-shape"><option value="spot">Spot：一个仓位，区间内均匀</option><option value="curve">Curve：同心嵌套，越靠现价越厚</option><option value="bidask">Bid-Ask：两侧分段，越远越厚</option></select><div class="hint" id="shape-hint"></div></div>
+        <div class="row" id="row-layers" style="display:none"><label>层数</label><input type="text" id="f-layers" placeholder="3"><div class="hint">Curve 的层数 / Bid-Ask 每侧的段数（2~8）；每层一个仓位，全部在同一笔交易里创建</div></div>
+        <div class="row"><label>示意图</label><div id="shape-viz" class="shapeviz"></div></div>
       </div>
       <div class="section">
         <h4>滑点</h4>
@@ -192,6 +201,7 @@
   <div class="toolbar">
     <button class="btn" id="btn-rescan">重新扫描链上仓位</button>
     <button class="btn" id="btn-refresh">刷新价格</button>
+    <button class="btn" id="btn-collect-all" title="一次领取所有仓位的未领手续费（≥ $0.01 的），本金不动；确认框里可勾选顺便把领到的各种币都卖成 USDG">领取全部手续费</button>
     <label>自动刷新 <select id="p-auto"><option value="0">关</option><option value="5">5 秒</option><option value="15" selected>15 秒</option><option value="60">60 秒</option></select></label>
     <span class="sp"></span>
     <label>卖币走 <select id="p-via"><option value="best">best（Uniswap / OKX 取高者）</option><option value="uniswap">uniswap</option><option value="okx">okx</option></select></label>
@@ -380,6 +390,7 @@ async function loadState(fillForm) {
     $('#f-poolSelect').value = p.POOL_SELECT || 'auto'; $('#f-maxDeviation').value = p.MAX_DEVIATION || '10'
     $('#f-range').value = p.RANGE || '-50%,+100%'; $('#f-priceRange').value = p.PRICE_RANGE || ''
     $('#f-rangeMode').value = p.PRICE_RANGE ? 'price' : 'pct'; onRangeMode()
+    $('#f-shape').value = ['curve', 'bidask'].includes(p.LP_SHAPE) ? p.LP_SHAPE : 'spot'; $('#f-layers').value = p.LP_LAYERS || '3'; onShape()
     $('#f-slippage').value = p.SWAP_SLIPPAGE || '5'; $('#f-lpSlippage').value = p.LP_SLIPPAGE || '5'
     $('#p-via').value = p.EXIT_SWAP_VIA || 'best'
     $('#btn-plan').disabled = !w
@@ -387,14 +398,75 @@ async function loadState(fillForm) {
     renderTasks()
   }
 }
-function onRangeMode() { const m = $('#f-rangeMode').value; $('#row-range').style.display = m === 'pct' ? '' : 'none'; $('#row-priceRange').style.display = m === 'price' ? '' : 'none' }
+function onRangeMode() { const m = $('#f-rangeMode').value; $('#row-range').style.display = m === 'pct' ? '' : 'none'; $('#row-priceRange').style.display = m === 'price' ? '' : 'none'; if (typeof drawShape === 'function') drawShape() }
 $('#f-rangeMode').onchange = onRangeMode
+const SHAPE_HINT = {
+  spot: '',
+  curve: '每层宽度减半、资金相同，全部跨着现价：中间被所有层覆盖最厚，适合震荡；内层跳出后只剩外层在吃手续费',
+  bidask: '现价两侧各分几段、互不重叠，越远的段流动性越厚：跌得越深买得越多、涨得越高卖得越多；含现价的那一格空着，横盘时没有手续费',
+}
+function onShape() { const s = $('#f-shape').value; $('#row-layers').style.display = s === 'spot' ? 'none' : ''; $('#shape-hint').textContent = SHAPE_HINT[s] || ''; drawShape() }
+$('#f-shape').onchange = onShape
+// ---- 形状示意图：按填写的区间 / 形状 / 层数画流动性厚度（横轴 = 对数价格，虚线 = 现价）。拆法和 cli.ts 一致，只是不做 tick 取整；
+//      绝对价格模式下现价来自最近一次计划（没有就先按区间几何中点画）----
+let lastMarketPrice = null
+const shapeLegs = (lo, hi, a, shape, layers) => {
+  if (shape === 'curve') return Array.from({ length: layers }, (_, i) => { const f = 0.5 ** i; return [a - (a - lo) * f, a + (hi - a) * f, 1] })
+  if (shape === 'bidask') { const out = []; for (let k = 1; k <= layers; k++) { if (a > lo) out.push([a - ((a - lo) * k) / layers, a - ((a - lo) * (k - 1)) / layers, k]); if (hi > a) out.push([a + ((hi - a) * (k - 1)) / layers, a + ((hi - a) * k) / layers, k]) } return out }
+  return [[lo, hi, 1]]
+}
+function drawShape() {
+  const el = $('#shape-viz'), shape = $('#f-shape').value, layers = Math.min(8, Math.max(2, Number($('#f-layers').value) || 3))
+  const spct = (v) => (v > 0 ? '+' : '') + v + '%'
+  let lo, hi, labels, spot = 0, approx = false
+  if ($('#f-rangeMode').value === 'price') {
+    const m = ($('#f-priceRange').value.match(/\d*\.?\d+(?:e-?\d+)?/gi) || []).map(Number).filter((x) => x > 0).sort((x, y) => x - y)
+    if (m.length !== 2 || m[0] >= m[1]) { el.innerHTML = ''; return }
+    approx = !lastMarketPrice
+    const ref = lastMarketPrice || Math.sqrt(m[0] * m[1])
+    lo = Math.log(m[0] / ref); hi = Math.log(m[1] / ref)
+    labels = [fmtPrice(m[0]), approx ? '现价?' : '现价 ' + fmtPrice(ref), fmtPrice(m[1])]
+  } else {
+    const m = ($('#f-range').value.match(/[+-]?\d+(\.\d+)?/g) || []).map(Number)
+    if (m.length === 1) m.push(0)
+    if (m.length !== 2 || m[0] === m[1] || Math.min(...m) <= -100) { el.innerHTML = ''; return }
+    const [pLo, pHi] = [Math.min(...m), Math.max(...m)]
+    lo = Math.log(1 + pLo / 100); hi = Math.log(1 + pHi / 100)
+    labels = [spct(pLo), '现价', spct(pHi)]
+  }
+  const a = Math.max(lo, Math.min(hi, spot))
+  const legs = shapeLegs(lo, hi, a, shape, layers)
+  const pts = [...new Set(legs.flatMap((l) => [l[0], l[1]]).concat(spot > lo && spot < hi ? [spot] : []))].sort((x, y) => x - y)
+  const W = 340, H = 92, pad = 8, base = 70, maxH = 54, span = hi - lo
+  const x0 = Math.min(lo, spot) - span * 0.06, x1 = Math.max(hi, spot) + span * 0.06
+  const X = (v) => pad + ((v - x0) / (x1 - x0)) * (W - 2 * pad)
+  const dens = pts.slice(0, -1).map((p, i) => { const mid = (p + pts[i + 1]) / 2; return legs.reduce((s, l) => s + (mid >= l[0] && mid < l[1] ? l[2] : 0), 0) })
+  const dmax = Math.max(...dens, 1)
+  const rects = dens.map((d, i) => { if (!d) return ''; const mid = (pts[i] + pts[i + 1]) / 2, h = (d / dmax) * maxH; return `<rect x="${X(pts[i]).toFixed(1)}" y="${(base - h).toFixed(1)}" width="${Math.max(0.6, X(pts[i + 1]) - X(pts[i])).toFixed(1)}" height="${h.toFixed(1)}" fill="${mid < spot ? 'var(--blue)' : 'var(--green)'}" opacity=".6"/>` }).join('')
+  // 资金拆分（现价 = 1）：每单位流动性在现价下方的部分要 √pb−√pa 的 USDG，上方的部分要 1/√pa−1/√pb 的代币（按现价折成同样单位）
+  let u = 0, t = 0
+  for (const [l, h, g] of legs) { const pa = Math.exp(l), pb = Math.exp(h), ua = Math.min(pb, 1), ta = Math.max(pa, 1); if (ua > pa) u += g * (Math.sqrt(ua) - Math.sqrt(pa)); if (pb > ta) t += g * (1 / Math.sqrt(ta) - 1 / Math.sqrt(pb)) }
+  const tokPct = u + t > 0 ? Math.round((t / (u + t)) * 100) : 0
+  const xs = X(spot), inner = xs > X(lo) + 24 && xs < X(hi) - 24
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
+    ${rects}
+    <line x1="${pad}" y1="${base}" x2="${W - pad}" y2="${base}" stroke="var(--line)"/>
+    <line x1="${xs.toFixed(1)}" y1="6" x2="${xs.toFixed(1)}" y2="${base + 4}" stroke="var(--text)" stroke-width="1.2" stroke-dasharray="3 2"/>
+    <text x="${X(lo).toFixed(1)}" y="${base + 14}" text-anchor="${xs <= X(lo) + 1 ? 'start' : 'start'}">${esc(labels[0])}</text>
+    <text x="${xs.toFixed(1)}" y="${inner ? base + 14 : 14}" text-anchor="${xs <= X(lo) + 1 ? 'start' : xs >= X(hi) - 1 ? 'end' : 'middle'}">${esc(labels[1])}</text>
+    <text x="${X(hi).toFixed(1)}" y="${base + 14}" text-anchor="end">${esc(labels[2])}</text>
+  </svg>
+  <div class="note">柱高 = 流动性厚度；蓝 = 现价下方（USDG，等跌买入），绿 = 上方（代币，等涨卖出）。${legs.length} 个仓位，预算约 ${100 - tokPct}% USDG + ${tokPct}% 换成代币${approx ? '；现价未知，先按区间中点画，点"计划"后按真实现价重画' : ''}</div>`
+}
+for (const id of ['f-range', 'f-priceRange', 'f-layers']) $('#' + id).addEventListener('input', drawShape)
+$('#f-token').addEventListener('input', () => { lastMarketPrice = null; drawShape() })
 
 // ---- 进场：计划（演练任务）-> 执行（真实任务）。执行按钮只在"当前参数的演练成功"后可用 ----
 let plannedJob = null, plannedSig = null
 const form = (dryRun) => ({
   token: $('#f-token').value.trim(), usdg: $('#f-usdg').value, fee: $('#f-fee').value, spacing: $('#f-spacing').value, poolSelect: $('#f-poolSelect').value,
   maxDeviation: $('#f-maxDeviation').value, rangeMode: $('#f-rangeMode').value, range: $('#f-range').value, priceRange: $('#f-priceRange').value,
+  shape: $('#f-shape').value, layers: $('#f-layers').value,
   slippage: $('#f-slippage').value, lpSlippage: $('#f-lpSlippage').value, watch: $('#f-watch').checked, dryRun,
 })
 const sig = (b) => JSON.stringify({ ...b, dryRun: undefined, watch: undefined })
@@ -419,7 +491,8 @@ $('#btn-exec').onclick = async () => {
   const b = form(false), P = job(plannedJob).plan
   if (!P || sig(b) !== plannedSig) return toast('请先计划')
   const s = P.swap ? `换币 ≈${P.swap.usdgIn} USDG -> ≈${P.swap.out} ${P.token.symbol}（${P.swap.via}）\n` : '无需换币\n'
-  const msg = `将在主网发送交易：\n\n${s}LP ≈${P.lp.usdg} USDG + ${P.lp.token} ${P.token.symbol}\n区间 ${P.range.lo} .. ${P.range.hi} USDG/${P.token.symbol}（${P.range.label}）\n池 ${P.pool.fee}% / ${P.pool.spacing}（${P.pool.state === 'reuse' ? '复用' : '新建'}）${P.correction ? '\n\n注意：' + P.correction : ''}${b.watch ? '\n\n执行完成后继续监控，跳出区间自动撤退。' : ''}\n\n确认执行？`
+  const multi = P.legs && P.legs.length > 1 ? `\n形状 ${P.shape.label}，拆成 ${P.legs.length} 个仓位（同一笔交易创建）：\n${P.legs.map((l, i) => `  #${i + 1} ${l.lo} .. ${l.hi}，≈${l.share}%`).join('\n')}` : ''
+  const msg = `将在主网发送交易：\n\n${s}LP ≈${P.lp.usdg} USDG + ${P.lp.token} ${P.token.symbol}\n区间 ${P.range.lo} .. ${P.range.hi} USDG/${P.token.symbol}（${P.range.label}）${multi}\n池 ${P.pool.fee}% / ${P.pool.spacing}（${P.pool.state === 'reuse' ? '复用' : '新建'}）${P.correction ? '\n\n注意：' + P.correction : ''}${b.watch ? '\n\n执行完成后继续监控，跳出区间自动撤退。' : ''}\n\n确认执行？`
   if (!confirm(msg)) return
   try {
     const r = await api('/api/launch', b)
@@ -468,6 +541,7 @@ function renderLaunchPlan(p, id) {
   if (p.kind !== 'launch') return
   $('#launch-empty').style.display = 'none'; $('#launch-plan').style.display = ''
   $('#launch-plan').dataset.job = id
+  lastMarketPrice = Number(p.market.price) || null; drawShape()
   const sym = p.token.symbol
   $('#card-swap').innerHTML = kv([
     ['动作', p.swap ? `${p.swap.usdgIn} USDG → ≈${p.swap.out} ${sym}` : '无需换币'],
@@ -480,8 +554,10 @@ function renderLaunchPlan(p, id) {
     ['状态', p.pool.state === 'reuse' ? `复用已有池，池价 ${p.pool.price}（偏离市场 ${p.pool.deviation}）` : '新建（初始价 = 市场价）'],
     ['pool id', `<span class="mono small">${p.pool.id}</span>`],
   ])
+  const sideText = { usdg: '全 USDG', token: '全代币', both: '双边' }
   $('#card-pos').innerHTML = kv([
     ['区间', `${p.range.lo} .. ${p.range.hi} USDG/${sym}<br><span class="small">${esc(p.range.label)}，ticks [${p.range.tickLower}, ${p.range.tickUpper}]</span>`],
+    ['形状', p.shape && p.shape.kind !== 'spot' ? `${esc(p.shape.label)}<br><span class="small">${p.legs.map((l, i) => `#${i + 1} ${l.lo} .. ${l.hi}（${sideText[l.side] || ''}，≈${l.share}%）`).join('<br>')}</span>` : ''],
     ['LP 投入', `≈${p.lp.usdg} USDG + ${p.lp.token} ${sym}${p.lp.held !== '0' ? `<br><span class="small">钱包已持有 ${p.lp.held} ${sym}</span>` : ''}`],
     ['滑点', `换币 ${p.slippage.swap}% / LP ${p.slippage.lp}%`],
   ])
@@ -493,9 +569,10 @@ function renderLaunchPlan(p, id) {
 }
 function renderExitPlan(p) {
   if (p.kind === 'collect') {
+    const sellText = (t) => (!p.sell ? '不卖，领到的币留在钱包' : t.offers.length ? `≈${t.expectToken} ${t.token.symbol}：${t.offers.map((o) => esc(o.text)).join('；')}，走 ${t.offers[0].via}` : Number(t.expectToken) ? `${t.token.symbol} 报不出价，领到的留在钱包` : `领到的 ${t.token.symbol} 为 0，没有要卖的`)
     $('#card-exit').innerHTML = kv([
-      ['领手续费', `仓位 ${p.positions.map((x) => '#' + x).join(', ')}，${p.txCount} 笔交易，≈${p.expectUsdg} USDG + ${p.expectToken} ${p.token.symbol}，本金不动`],
-      ['卖币', !p.sell ? '不卖，领到的币留在钱包' : p.offers.length ? `≈${p.expectToken} ${p.token.symbol}：${p.offers.map((o) => esc(o.text)).join('；')}，走 ${p.offers[0].via}` : `领到的 ${p.token.symbol} 为 0，没有要卖的`],
+      ['领手续费', `${p.tokens.reduce((n, t) => n + t.positions.length, 0)} 个仓位合成 ${p.txCount} 笔交易${p.sellCount ? `，再同时广播 ${p.sellCount} 笔卖币（同一区块）` : ''}，≈${p.expectUsdg} USDG + ${p.tokens.filter((t) => Number(t.expectToken)).map((t) => `${t.expectToken} ${t.token.symbol}`).join(' + ') || '0 代币'}，本金不动`],
+      ...p.tokens.map((t) => [`${esc(t.token.symbol)}`, `仓位 ${t.positions.map((x) => '#' + x).join(', ')}，≈${t.expectUsdg} USDG + ${t.expectToken} ${esc(t.token.symbol)}<br>卖币：${sellText(t)}`]),
     ])
     return
   }
@@ -553,7 +630,7 @@ async function loadPositions(full) {
   const noLedger = POS.filter((p) => p.pnlUsd === null).length
   sum.textContent = `${POS.length} 个仓位，按当前池价折算 · ${new Date().toLocaleTimeString()}${noLedger ? `（${noLedger} 个没有资金流水，未计入投入 / 已领手续费 / 盈亏）` : ''}`
   const tb = $('#pos-table tbody'); tb.innerHTML = ''
-  for (const p of POS) {
+  const addRow = (p) => {
     const lo = Math.log(Number(p.lo)), hi = Math.log(Number(p.hi)), cur = Math.log(Number(p.price))
     const span = (hi - lo) * 1.6, left = lo - (hi - lo) * 0.3
     const pos = (x) => Math.max(0, Math.min(100, ((x - left) / span) * 100))
@@ -591,6 +668,29 @@ async function loadPositions(full) {
       hr.innerHTML = `<td colspan="8"><div id="hist-${p.id}" class="small">加载资金明细…</div></td>`
       tb.appendChild(hr)
       loadHistory(p)
+    }
+  }
+  // 按形状分区（Spot / Curve / Bid-Ask）；curve、bidask 里同一次进场建的仓位（同一 group = 同一笔 mint 交易）连在一起，组头一行汇总 + 整组操作
+  const shapeOf = (p) => (p.shape === 'curve' || p.shape === 'bidask' ? p.shape : 'spot')
+  const sumUsd = (list, k) => list.reduce((s, p) => s + (p[k] === null ? 0 : Number(p[k])), 0)
+  const summary = (list) => { const led = list.filter((p) => p.pnlUsd !== null); const pnl = sumUsd(led, 'pnlUsd'); return `价值 ${fmtUsd(sumUsd(list, 'value'))} · 手续费 ${fmtUsd(sumUsd(list, 'feesUsd') + sumUsd(led, 'collectedUsd'))}${led.length ? ` · uPNL <span style="color:${pnlCol(pnl)}">${money(pnl)}</span>` : ''}` }
+  for (const [key, name, desc] of [['spot', 'Spot', '单个仓位，区间内均匀'], ['curve', 'Curve', '同心嵌套，越靠现价越厚'], ['bidask', 'Bid-Ask', '两侧分段，越远越厚']]) {
+    const list = POS.filter((p) => shapeOf(p) === key)
+    if (!list.length) continue
+    const hr = document.createElement('tr'); hr.className = 'grp'
+    hr.innerHTML = `<td colspan="8"><b>${name}</b> <span class="small">${desc}</span> · ${list.length} 个仓位 · ${summary(list)}</td>`
+    tb.appendChild(hr)
+    if (key === 'spot') { list.forEach(addRow); continue }
+    const groups = new Map()
+    for (const p of list) { const g = p.group || p.id; groups.set(g, [...(groups.get(g) || []), p]) }
+    for (const [g, ps] of groups) {
+      ps.sort((x, y) => Number(x.lo) - Number(y.lo))
+      const ids = ps.map((p) => p.id).join(','), sym = esc(ps[0].symbol), watching = ps.filter((p) => p.watchJob !== null).length
+      const sr = document.createElement('tr'); sr.className = 'sub'
+      sr.innerHTML = `<td colspan="7"><b>${sym}/USDG</b> <span class="badge wait">${ps[0].fee}%</span> ${ps.length} 段 ${fmtPrice(ps[0].lo)} – ${fmtPrice(ps[ps.length - 1].hi)} · ${summary(ps)}${g.startsWith('0x') ? ` · <a class="tx small" href="${STATE.explorer}/tx/${g}" target="_blank">建仓交易</a>` : ''}</td>
+        <td><span class="btns"><button class="btn sm danger" data-act="exit-group" data-ids="${ids}" data-sym="${sym}" data-n="${ps.length}" title="撤掉这一组全部 ${ps.length} 个仓位（同一个池合成 1 笔交易），卖掉撤出来的币">整组撤退</button>${watching ? '' : `<button class="btn sm" data-act="watch-group" data-ids="${ids}" data-token="${ps[0].token}" data-sym="${sym}" title="一个监控盯整组：任一段进入区间后又跳出就整组撤退">整组监控</button>`}</span></td>`
+      tb.appendChild(sr)
+      ps.forEach(addRow)
     }
   }
   if (!POS.length) tb.innerHTML = '<tr><td colspan="8" class="placeholder">钱包名下没有 USDG 池的仓位</td></tr>'
@@ -664,6 +764,11 @@ $('#pos-table').onclick = async (e) => {
     if (d.act === 'watch-stop') { await stopJob(Number(d.job)); return }
     let r
     if (d.act === 'watch') r = await api('/api/watch', { token: d.token, positions: d.id, symbol: d.sym })
+    else if (d.act === 'watch-group') r = await api('/api/watch', { token: d.token, positions: d.ids, symbol: d.sym })
+    else if (d.act === 'exit-group') {
+      const a = await askTx(`撤退 <b>${esc(d.sym)}/USDG</b> 这一组全部 <b>${d.n}</b> 个仓位（#${d.ids.split(',').join('、#')}）：撤仓 + 领手续费合成 1 笔交易${keepTokens ? '，不卖币' : '，再把撤出来的 ' + esc(d.sym) + ' 卖成 USDG'}。`, keepTokens ? null : `顺便把钱包里全部 <b>${esc(d.sym)}</b> 卖光（含不在仓位里的余额）`)
+      if (!a) return; $('#card-exit').innerHTML = ''; r = await api('/api/exit', { positions: d.ids, via, keepTokens, sellAll: a.checked, dryRun: false })
+    }
     else if (d.act === 'collect') {
       const a = await askTx(`领取仓位 <b>#${d.id}</b> 的未领手续费（≈${d.fees}），本金不动，1 笔交易。`, d.feetoken === '0' ? null : `顺便把领到的 ≈${d.feetoken} <b>${esc(d.sym)}</b> 卖成 USDG（另外 1~2 笔交易；USDG 那部分本来就是 USDG）`)
       if (!a) return; $('#card-exit').innerHTML = ''; r = await api('/api/collect', { positions: d.id, sell: a.checked, via, dryRun: false })
@@ -678,6 +783,22 @@ $('#pos-table').onclick = async (e) => {
 }
 $('#btn-rescan').onclick = () => loadPositions(true)
 $('#btn-refresh').onclick = () => loadPositions(false)
+// 领取全部：只送未领手续费 ≥ $0.01 的仓位（单个按钮同样的门槛），勾选项 = 把领到的各种币都卖成 USDG
+$('#btn-collect-all').onclick = async () => {
+  const list = POS.filter((p) => Number(p.feesUsd) >= 0.01)
+  if (!list.length) { toast('没有可领的手续费'); return }
+  const total = list.reduce((s, p) => s + Number(p.feesUsd), 0)
+  const syms = [...new Set(list.filter((p) => Number(p.feesToken) > 0).map((p) => p.symbol))]
+  const pools = new Set(list.map((p) => `${p.token}/${p.fee}`)).size
+  const a = await askTx(`领取 <b>${list.length}</b> 个仓位的未领手续费（合计 ≈${fmtUsd(total)}）：${list.map((p) => `#${p.id} ${esc(p.symbol)} ${fmtUsd(Number(p.feesUsd))}`).join('、')}。本金不动，${pools} 个池合成 1 笔交易。`,
+    syms.length ? `顺便把领到的 <b>${syms.map(esc).join(' / ')}</b> 都卖成 USDG（每种币 1 笔卖币交易，同时广播落在同一区块；报不出价的留在钱包）` : null)
+  if (!a) return
+  try {
+    $('#card-exit').innerHTML = ''
+    const r = await api('/api/collect', { positions: list.map((p) => p.id).join(','), sell: a.checked, via: $('#p-via').value, dryRun: false })
+    job(r.job.id).meta = r.job; panes.pos.show(r.job.id); setTimeout(() => loadPositions(false), 800)
+  } catch (err) { toast(err.message) }
+}
 function setAuto() { clearInterval(posTimer); const s = Number($('#p-auto').value); if (s > 0) posTimer = setInterval(() => { if ($('#page-positions').classList.contains('on')) loadPositions(false) }, s * 1000) }
 $('#p-auto').onchange = setAuto
 

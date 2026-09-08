@@ -139,16 +139,17 @@ export function encodeV4SwapCalldata(
 }
 const UR_ABI = parseAbi(['function execute(bytes commands, bytes[] inputs, uint256 deadline) payable'])
 
-// PositionManager.modifyLiquidities unlockData for MINT_POSITION (0x02) + SETTLE_PAIR (0x0d). ERC20 pairs only (no SWEEP).
-export function encodeMintUnlockData(
-  key: PoolKey, tickLower: number, tickUpper: number, liquidity: bigint, amount0Max: bigint, amount1Max: bigint, owner: Address,
-): Hex {
-  const mint = encodeAbiParameters(
+// PositionManager.modifyLiquidities unlockData for MINT_POSITION (0x02) ×n + SETTLE_PAIR (0x0d): several positions of one pool in one transaction,
+// each with its own amountMax, one settlement of the summed deltas. ERC20 pairs only (no SWEEP).
+export type MintSpec = { tickLower: number; tickUpper: number; liquidity: bigint; amount0Max: bigint; amount1Max: bigint }
+export function encodeMintUnlockData(key: PoolKey, mints: MintSpec[], owner: Address): Hex {
+  const encoded = mints.map((m) => encodeAbiParameters(
     [POOL_KEY_ABI, { type: 'int24' }, { type: 'int24' }, { type: 'uint256' }, { type: 'uint128' }, { type: 'uint128' }, { type: 'address' }, { type: 'bytes' }],
-    [key, tickLower, tickUpper, liquidity, amount0Max, amount1Max, owner, '0x'],
-  )
+    [key, m.tickLower, m.tickUpper, m.liquidity, m.amount0Max, m.amount1Max, owner, '0x'],
+  ))
   const settle = encodeAbiParameters([{ type: 'address' }, { type: 'address' }], [key.currency0, key.currency1])
-  return encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], ['0x020d', [mint, settle]])
+  const actions = ('0x' + '02'.repeat(mints.length) + '0d') as Hex
+  return encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [actions, [...encoded, settle]])
 }
 
 // unlockData for burning whole positions of one pool: BURN_POSITION (0x03) per position + TAKE_PAIR (0x11) to the recipient
