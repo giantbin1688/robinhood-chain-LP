@@ -6,8 +6,8 @@ import { feeText, log, tokenMeta, type Clients } from './common.ts'
 import type { Pool } from './lp.ts'
 
 export type FoundPool = { pool: Pool; liquidityUsd: number; volume24h: number; name: string; empty: boolean }
-// GeckoTerminal 的 dex id 按链不同：Robinhood 上 Uniswap v4 是 uniswap-v4，BSC 上是 uniswap-v4-bsc
-const GECKO_DEX: Record<string, Record<string, string>> = { robinhood: { v4: 'uniswap-v4' }, bsc: { v4: 'uniswap-v4-bsc', infinity: 'pancakeswap-infinity-clmm', v3: 'pancakeswap-v3-bsc' } }
+// GeckoTerminal 的 dex id（/networks/{net}/dexes 里的原值，按链带不同后缀）：Robinhood 上 Uniswap v4 是 uniswap-v4-robinhood，BSC 上是 uniswap-v4-bsc
+const GECKO_DEX: Record<string, Record<string, string>> = { robinhood: { v4: 'uniswap-v4-robinhood' }, bsc: { v4: 'uniswap-v4-bsc', infinity: 'pancakeswap-infinity-clmm', v3: 'pancakeswap-v3-bsc' } }
 
 // GeckoTerminal 上这个代币的全部池子（任何 DEX、任何计价币），失败返回 []
 async function fetchGeckoPools(network: string, token: Address): Promise<any[]> {
