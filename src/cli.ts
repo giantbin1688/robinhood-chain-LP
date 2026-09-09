@@ -76,7 +76,7 @@ const balanceOf = (t: Address) => pub.readContract({ address: t, abi: erc20Abi, 
 // 指定了池 id 就直接反查 PoolKey（带 hook 的池只能这样找到），费率/间距以链上为准；
 // 否则按配置的费率/间距。配置的费率这个协议不支持（v3 只有四档）：auto 模式下跳过它去找已有池，exact 模式直接报错
 let pool: Pool | null = poolId
-  ? await lp.poolById(poolId as Hex).then((p) => p ?? die(`池 ${poolId} 查不到 PoolKey（没人通过 PositionManager 建过仓）`))
+  ? await lp.poolById(poolId as Hex).then((p) => p ?? die(`池 ${poolId} 查不到 PoolKey（PositionManager 没记录，链上也没有它的 Initialize 事件）`))
   : await lp.pool(token, fee, spacing).catch((e) => (opt['pool-select'] === 'exact' ? die(String(e?.message)) : (log(`提示: ${String(e?.message)}，只看已有池`), null)))
 if (poolId && pool) {
   const has = (a: Address) => [pool!.currency0, pool!.currency1].some((x) => x.toLowerCase() === a.toLowerCase())
@@ -112,10 +112,10 @@ if (initialized && (tick <= v4.MIN_TICK || tick >= v4.MAX_TICK)) {
 if (!initialized && opt['pool-select'] === 'auto' && !poolId) {
   const pools = (await discoverQuotePools(clients, token)).sort((a, b) => b.volume24h - a.volume24h)
   const usd$ = (x: number) => `$${Math.round(x).toLocaleString('en-US')}`
-  if (pools.length) log(`已有 ${symbol}/${Q.symbol} 池: ${pools.slice(0, 4).map((p) => `${feeText(p.pool)}/${p.pool.spacing}${p.pool.hooks !== v4.ZERO_ADDRESS ? '(hook)' : ''} ${p.empty ? '空池' : `流动性${usd$(p.liquidityUsd)} 日成交${usd$(p.volume24h)}`}`).join('；')}${pools.length > 4 ? '…' : ''}`)
+  if (pools.length) log(`已有 ${symbol}/${Q.symbol} 池: ${pools.slice(0, 4).map((p) => `${feeText(p.pool)}/${p.pool.spacing}${p.pool.hooks !== v4.ZERO_ADDRESS ? '(hook)' : ''} ${p.empty === null ? '流动性未知(读链失败)' : p.empty ? '空池' : `流动性${usd$(p.liquidityUsd)} 日成交${usd$(p.volume24h)}`}`).join('；')}${pools.length > 4 ? '…' : ''}`)
   const minLiq = Math.max(5000, Number(fmtU(usdgBudget)))
-  // 空池不复用：复用要先花钱纠价，新建一个不同间距的池反而是免费的
-  const pick = pools.find((p) => !p.empty && p.pool.fee === fee) ?? pools.find((p) => !p.empty && p.liquidityUsd >= minLiq)
+  // 空池不复用：复用要先花钱纠价，新建一个不同间距的池反而是免费的。流动性没读到的（empty=null）也不自动选，别拿真金白银赌一个未知状态
+  const pick = pools.find((p) => p.empty === false && p.pool.fee === fee) ?? pools.find((p) => p.empty === false && p.liquidityUsd >= minLiq)
   if (pick) {
     pool = pick.pool; fee = pool.fee; spacing = pool.spacing
     ;({ sqrtP, tick } = await lp.slot0(pool))

@@ -5,7 +5,7 @@ import * as v4 from './v4.ts'
 import { feeText, log, tokenMeta, type Clients } from './common.ts'
 import type { Pool } from './lp.ts'
 
-export type FoundPool = { pool: Pool; liquidityUsd: number; volume24h: number; name: string; empty: boolean }
+export type FoundPool = { pool: Pool; liquidityUsd: number; volume24h: number; name: string; empty: boolean | null } // empty=null：链上流动性读不到，未知
 // GeckoTerminal 的 dex id（/networks/{net}/dexes 里的原值，按链带不同后缀）：Robinhood 上 Uniswap v4 是 uniswap-v4-robinhood，BSC 上是 uniswap-v4-bsc
 const GECKO_DEX: Record<string, Record<string, string>> = { robinhood: { v4: 'uniswap-v4-robinhood' }, bsc: { v4: 'uniswap-v4-bsc', infinity: 'pancakeswap-infinity-clmm', v3: 'pancakeswap-v3-bsc' } }
 
@@ -18,8 +18,9 @@ async function fetchGeckoPools(network: string, token: Address): Promise<any[]> 
   } catch (e: any) { log(`查询已有池失败（GeckoTerminal ${String(e?.message).slice(0, 80)}），按配置的费率处理`); return [] }
 }
 const feeFromName = (name: string) => { const m = name.match(/([\d.]+)%/); return m ? Math.round(Number(m[1]) * 10_000) : null }
-// GeckoTerminal 的流动性 / 成交量会滞后：流动性全撤走的池它还照旧显示旧数字。以链上现价处的活跃流动性为准，为 0 就当空池、旧数字作废
-const isEmpty = async (c: Clients, pool: Pool) => (await c.lp.liquidity(pool).catch(() => 0n)) === 0n
+// GeckoTerminal 的流动性 / 成交量会滞后：流动性全撤走的池它还照旧显示旧数字。以链上现价处的活跃流动性为准，为 0 就当空池、旧数字作废。
+// 读链失败返回 null（未知），不能当成空池：否则节点抖一下就会把好池标成"空"，auto 模式跳过它去新建
+const isEmpty = (c: Clients, pool: Pool): Promise<boolean | null> => c.lp.liquidity(pool).then((L) => L === 0n).catch((e) => { log(`池 ${pool.id.slice(0, 10)}… 流动性读取失败: ${String(e?.shortMessage ?? e?.message).slice(0, 60)}`); return null })
 
 export async function discoverQuotePools(c: Clients, token: Address): Promise<FoundPool[]> {
   const { lp, cfg } = c
@@ -70,12 +71,16 @@ export async function listTokenPools(c: Clients, token: Address): Promise<TokenP
     if (String(p.relationships?.dex?.data?.id ?? '') !== GECKO_DEX[cfg.name]?.[c.protocol]) out.push({ ...base, status: `不是 ${lp.label}（${dex}）` })
     else if (!new RegExp(cfg.quote.symbol).test(name)) out.push({ ...base, status: `计价不是 ${cfg.quote.symbol}（${name.split('/')[1]?.trim().split(' ')[0] ?? '?'}）` })
     else {
-      const pool = await lp.poolById(id).catch(() => null)
-      if (!pool) out.push({ ...base, status: c.protocol === 'v3' ? '不是 PancakeSwap 工厂建的池' : '查不到 PoolKey（没人通过 PositionManager 建过仓），不复用' })
+      let err = ''
+      const pool = await lp.poolById(id).catch((e) => { err = String(e?.shortMessage ?? e?.message).slice(0, 80); return null })
+      if (err) out.push({ ...base, status: `读链失败（${err}），刷新再试` })
+      else if (!pool) out.push({ ...base, status: c.protocol === 'v3' ? '不是 PancakeSwap 工厂建的池' : '查不到 PoolKey（PositionManager 没记录，链上也没有它的 Initialize 事件），不复用' })
       else {
         const hasHook = pool.hooks !== '0x0000000000000000000000000000000000000000'
         const row = { ...base, fee: pool.fee, feeText: feeText(pool) + (pool.dynamic && feeN ? `≈${feeN / 10000}%` : ''), spacing: pool.spacing, hooks: hasHook ? pool.hooks : null, usable: true }
-        if (await isEmpty(c, pool)) out.push({ ...row, liquidityUsd: 0, volume24h: 0, empty: true, status: `空池：链上没有流动性，Gecko 的 ${usd$(base.liquidityUsd)} / 日成交 ${usd$(base.volume24h)} 是旧数据；进场要先花预算 1% 纠价，之后也没人来成交` })
+        const empty = await isEmpty(c, pool)
+        if (empty === null) out.push({ ...row, usable: false, status: '链上流动性读取失败，刷新再试' })
+        else if (empty) out.push({ ...row, liquidityUsd: 0, volume24h: 0, empty: true, status: `空池：链上没有流动性，Gecko 的 ${usd$(base.liquidityUsd)} / 日成交 ${usd$(base.volume24h)} 是旧数据；进场要先花预算 1% 纠价，之后也没人来成交` })
         else {
           const warn = base.liquidityUsd < 5000 ? '，流动性 < $5k（auto 不会自动选）' : ''
           out.push({ ...row, status: (hasHook ? '可用，带 hook（费率由 hook 决定）' : '可用') + warn })

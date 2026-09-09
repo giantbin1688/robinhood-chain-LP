@@ -56,6 +56,8 @@ const clpmAbi = parseAbi([
   'function getPosition(bytes32 id, address owner, int24 tickLower, int24 tickUpper, bytes32 salt) view returns ((uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128))',
 ])
 const modifyLiquidityEvent = parseAbiItem('event ModifyLiquidity(bytes32 indexed id, address indexed sender, int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)')
+// v4 PoolManager 建池事件，字段就是完整 PoolKey（Infinity 的同名事件布局不同，这里不用）
+const v4InitializeEvent = parseAbiItem('event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)')
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 
 export async function singletonLp(protocol: ProtocolName, d: LpDeps): Promise<Lp> {
@@ -189,10 +191,28 @@ export async function singletonLp(protocol: ProtocolName, d: LpDeps): Promise<Lp
     tiers: infi ? [{ fee: 100, spacing: 1 }, { fee: 500, spacing: 10 }, { fee: 2500, spacing: 50 }, { fee: 10000, spacing: 200 }] : [{ fee: 500, spacing: 10 }, { fee: 3000, spacing: 60 }, { fee: 10000, spacing: 200 }],
     spacingFor: (fee) => Math.max(1, Math.round(fee / 50)),
     pool: async (token, fee, spacing) => fromKey(makeKey(cfg.quote.address, token, fee, spacing)) as Pool,
+    // poolKeys 只记录有人通过 PositionManager 建过仓的池；发行平台直接调 PoolManager 建的池查不到，
+    // 退到公共节点按 topics[1]=poolId 全链查 Initialize 事件——过滤够窄，Robinhood 公共节点几百毫秒能返回；Alchemy 免费档 eth_getLogs 只给 10 个区块，BSC 公共节点全链扫不动
     poolById: async (id) => {
       const key = await pub.readContract({ address: POSM, abi: posmAbi, functionName: 'poolKeys', args: [id.slice(0, 52) as Hex] })
-      if (BigInt((key as { currency1: Address }).currency1) === 0n) return null
-      const p = fromKey(key)
+      if (BigInt((key as { currency1: Address }).currency1) !== 0n) {
+        const p = fromKey(key)
+        return p.id === id ? withDynamic(p) : null
+      }
+      if (infi || cfg.name !== 'robinhood') return null
+      const scan = createPublicClient({ transport: http(cfg.publicRpc) })
+      // 公共节点偶发 "log query timed out" / 429，隔几秒重试；三次都不行就抛错，别把读链失败说成"没有这个池"
+      let logs: { args: { currency0?: Address; currency1?: Address; fee?: number; tickSpacing?: number; hooks?: Address } }[] = []
+      for (let attempt = 1; ; attempt++) {
+        try { logs = await scan.getLogs({ address: PM, event: v4InitializeEvent, args: { id }, fromBlock: 0n }); break }
+        catch (e: any) {
+          if (attempt >= 3) throw new Error(`查 Initialize 事件失败: ${String(e?.details ?? e?.shortMessage ?? e?.message).slice(0, 80)}`)
+          await new Promise((r) => setTimeout(r, 3000 * attempt))
+        }
+      }
+      const [l] = logs
+      if (!l) return null
+      const p = fromKey({ currency0: l.args.currency0!, currency1: l.args.currency1!, fee: l.args.fee!, tickSpacing: l.args.tickSpacing!, hooks: l.args.hooks! } satisfies v4.PoolKey)
       return p.id === id ? withDynamic(p) : null
     },
     slot0, liquidity,
