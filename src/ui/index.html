@@ -4,115 +4,278 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>rh-uni</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300..700;1,6..72,300..600&display=swap" rel="stylesheet">
 <style>
-  :root { --bg:#f7f6f2; --card:rgba(255,255,255,.78); --line:#deddd7; --line-soft:#ebe9e3; --text:#191918; --muted:#77756f; --accent:#d97757; --accent-dark:#bd5e40; --blue:#3565a8; --red:#c6534f; --green:#417a5b; --amber:#9a6a2c; --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace; --shadow:0 1px 2px rgba(32,30,26,.04),0 12px 32px rgba(32,30,26,.055) }
+  /* ── rh-uni 视觉语言：暖色出版物 ─────────────────────────────────────────
+     方向经 design-demos/direction-approved.md 确认（方向一 · 秒数轮盘 #12）。
+     骨架：栏线代替卡片 · 目录行代替胶囊 tab · 区间 = 印刷刻度尺 · 危险操作 = 盖章。
+     色板全部沿用原有变量，只新增栏线色和纸纹；盈亏红绿一个像素都没动。 */
+  :root {
+    --bg:#f7f6f2; --paper:#fbf9f5; --card:rgba(255,255,255,.62);
+    --line:#deddd7; --line-soft:#ebe9e3; --rule:#d8d0c2; --rule-hair:#e6e0d4;
+    --text:#191918; --muted:#77756f; --faint:#98958e;
+    --accent:#d97757; --accent-dark:#bd5e40; --accent-deep:#a04a2f;
+    --blue:#3565a8; --red:#c6534f; --green:#417a5b; --amber:#9a6a2c;
+    --serif:"Newsreader",Georgia,"Songti SC","Source Han Serif SC",serif;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+    --shadow:0 1px 2px rgba(32,30,26,.045)
+  }
   * { box-sizing:border-box }
+  /* 脚注角标也要过可读性底线，不靠 sup 默认的 .83em 缩下去 */
+  sup { font-size:12px; line-height:0; vertical-align:super; color:var(--accent-deep); font-weight:600 }
   html { min-width:720px; background:var(--bg) }
-  body { margin:0; min-height:100vh; background:radial-gradient(circle at 8% 0%,rgba(217,119,87,.09),transparent 28rem),radial-gradient(circle at 92% 8%,rgba(53,101,168,.06),transparent 24rem),var(--bg); color:var(--text); font:13px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; letter-spacing:-.005em }
-  header { display:flex; align-items:center; gap:5px; height:60px; padding:0 max(24px,calc((100vw - 1440px)/2)); background:rgba(247,246,242,.82); border-bottom:1px solid rgba(222,221,215,.8); backdrop-filter:blur(18px); position:sticky; top:0; z-index:5 }
-  header .brand { display:flex; align-items:center; gap:10px; font-size:15px; font-weight:650; margin-right:22px; letter-spacing:-.03em }
-  header .brand:before { content:"R"; display:grid; place-items:center; width:28px; height:28px; border-radius:9px; background:var(--text); color:#fff; font:600 13px/1 Georgia,serif; box-shadow:0 4px 12px rgba(25,25,24,.16) }
-  header a.tab { padding:7px 12px; border-radius:9px; color:var(--muted); text-decoration:none; cursor:pointer; transition:.16s ease }
-  header a.tab:hover { color:var(--text); background:rgba(255,255,255,.6) }
-  header a.tab.on { background:#fff; color:var(--text); box-shadow:0 1px 3px rgba(30,28,24,.09) }
-  header select.chain { width:auto; min-height:32px; padding:5px 26px 5px 10px; margin-right:14px; border-radius:9px; font-weight:600; font-size:12px; background:rgba(255,255,255,.85) }
-  header .wallet { margin-left:auto; padding:7px 11px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,.65); font-family:var(--mono); font-size:11px; color:var(--muted) }
+  body {
+    margin:0; min-height:100vh; color:var(--text);
+    font:13px/1.55 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    letter-spacing:-.005em;
+    /* 纸感：极淡横向纹理，不是渐变（渐变是 slop） */
+    background:
+      repeating-linear-gradient(0deg,rgba(160,140,110,.026) 0 1px,transparent 1px 3px),
+      var(--bg);
+  }
+
+  /* ── 报头 ─────────────────────────────────────────────────────────── */
+  header {
+    display:flex; align-items:center; gap:10px; height:60px;
+    padding:0 max(24px,calc((100vw - 1440px)/2));
+    background:rgba(247,246,242,.9); border-bottom:2px solid var(--text);
+    backdrop-filter:blur(14px); position:sticky; top:0; z-index:5;
+  }
+  header .brand {
+    display:flex; align-items:baseline; gap:7px; margin-right:20px;
+    font:600 21px/1 var(--serif); letter-spacing:-.02em; white-space:nowrap;
+  }
+  /* 目录行式导航：纯文字 + 底部指示条，压在页头的黑线上（不用胶囊） */
+  header a.tab {
+    display:flex; align-items:center; align-self:stretch; padding:0 2px; margin-right:22px;
+    white-space:nowrap; flex:none;
+    color:var(--muted); text-decoration:none; cursor:pointer; font-size:13.5px;
+    transition:color .15s;
+  }
+  header a.tab:hover { color:var(--text) }
+  header a.tab.on { color:var(--text); font-weight:560; box-shadow:inset 0 -3px 0 var(--accent) }
+  header select.chain {
+    width:auto; min-height:30px; padding:4px 24px 4px 9px; margin-right:16px; flex:none;
+    border:1px solid var(--rule); border-radius:3px; font-weight:560; font-size:12.5px;
+    background:rgba(255,255,255,.7);
+  }
+  /* 钱包位可能塞进一整条 RPC 错误——必须夹住，否则会把整个页头撑爆、tab 挤成竖排 */
+  header .wallet {
+    margin-left:auto; flex:0 1 auto; min-width:0; max-width:44%;
+    padding:4px 9px; border:1px solid var(--rule-hair); border-radius:3px;
+    background:rgba(255,255,255,.5);
+    font-family:var(--mono); font-size:12px; color:var(--muted);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
   header .wallet b { color:var(--text); font-weight:550 }
-  main { max-width:1488px; margin:auto; padding:26px 24px 42px }
+
+  main { max-width:1488px; margin:auto; padding:22px 24px 46px }
   .page { display:none } .page.on { display:block; animation:reveal .25s ease-out }
   @keyframes reveal { from { opacity:0; transform:translateY(3px) } }
-  .grid { display:grid; grid-template-columns:minmax(360px,410px) minmax(0,1fr); gap:18px; align-items:start }
-  .card { background:var(--card); border:1px solid rgba(222,221,215,.9); border-radius:14px; padding:16px 18px; box-shadow:var(--shadow); backdrop-filter:blur(12px) }
+  /* 左栏加宽 + 标签列收窄：提示文字从 11px 提到 12px 后更容易折行，得给回空间 */
+  .grid { display:grid; grid-template-columns:minmax(380px,438px) minmax(0,1fr); gap:20px; align-items:start }
+
+  /* 卡片降级为「纸面分区」：细栏线 + 极淡底，不要投影和毛玻璃 */
+  .card {
+    background:var(--card); border:1px solid var(--rule-hair); border-radius:4px;
+    padding:16px 18px; box-shadow:var(--shadow);
+  }
   .section { margin-bottom:20px }
   .section:last-of-type { margin-bottom:8px }
-  .section h4,.cards .card h4,.run .head h4 { margin:0 0 10px; font-size:10px; font-weight:700; letter-spacing:.11em; color:#929089; text-transform:uppercase }
-  .row { display:grid; grid-template-columns:132px 1fr; gap:7px 12px; align-items:center; margin:9px 0 }
+  .section h4, .card > h4, .cards .card h4, .run .head h4 {
+    margin:0 0 11px; padding-bottom:6px; border-bottom:1px solid var(--rule-hair);
+    font:600 12px/1 var(--serif); letter-spacing:.02em; color:var(--muted); text-transform:none;
+  }
+  .row { display:grid; grid-template-columns:118px 1fr; gap:7px 12px; align-items:center; margin:9px 0 }
   .row label { color:#393835; font-weight:480 }
-  .row .hint { grid-column:2; font-size:11px; line-height:1.45; color:#98958e; margin-top:-3px }
-  .shapeviz svg { width:100%; max-width:340px; display:block; background:rgba(255,255,255,.5); border:1px solid var(--line-soft); border-radius:8px }
-  .shapeviz text { font-size:9px; fill:var(--muted) }
-  .shapeviz .note { font-size:11px; line-height:1.45; color:#98958e; margin-top:4px }
-  input[type=text],select { width:100%; min-height:35px; padding:7px 10px; border:1px solid #d9d7d0; border-radius:9px; color:var(--text); font:inherit; background:rgba(255,255,255,.85); transition:border-color .15s,box-shadow .15s }
-  input[type=text]:hover,select:hover { border-color:#c7c4bc }
-  input[type=text]:focus,select:focus { outline:none; border-color:#b76f57; box-shadow:0 0 0 3px rgba(217,119,87,.12) }
+  .row .hint { grid-column:2; font-size:12px; line-height:1.45; color:var(--faint); margin-top:-2px }
+  /* 示意图占满整行：挤在 1fr 列里时 340 宽的 viewBox 被压到 ~210px，
+     刻度字会缩到 5px 左右——改版前就有的可读性问题，顺手修掉 */
+  .shapeviz { grid-column:1/-1 }
+  .shapeviz svg { width:100%; max-width:340px; display:block; background:rgba(255,255,255,.55); border:1px solid var(--rule-hair); border-radius:3px }
+  .shapeviz text { font-size:12px; fill:var(--muted) }
+  .shapeviz .note { font-size:12px; line-height:1.45; color:var(--faint); margin-top:4px }
+
+  input[type=text],select {
+    width:100%; min-height:34px; padding:7px 10px; border:1px solid #d5d0c4; border-radius:3px;
+    color:var(--text); font:inherit; background:rgba(255,255,255,.8);
+    transition:border-color .15s,box-shadow .15s;
+  }
+  input[type=text]:hover,select:hover { border-color:#c2bcae }
+  input[type=text]:focus,select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(217,119,87,.13) }
   input[type=checkbox] { accent-color:var(--accent-dark) }
-  .btn { min-height:35px; padding:7px 13px; border:1px solid #d7d5cf; border-radius:9px; background:rgba(255,255,255,.82); color:var(--text); font:600 12px/1.3 inherit; cursor:pointer; white-space:nowrap; box-shadow:0 1px 2px rgba(25,25,24,.04); transition:.15s ease }
-  .btn:hover { background:#fff; border-color:#c7c4bd; transform:translateY(-1px) }
-  .btn:active { transform:translateY(0) }
-  .btn.primary { background:var(--text); color:#fff; border-color:var(--text) }
+
+  /* 按钮：普通操作是「排字」，不可逆操作是「盖章」—— 两者不是一个量级 */
+  .btn {
+    min-height:33px; padding:6px 13px; border:1px solid var(--rule); border-radius:3px;
+    background:rgba(255,255,255,.7); color:var(--text); font:560 12.5px/1.35 inherit;
+    cursor:pointer; white-space:nowrap; transition:.14s ease;
+  }
+  .btn:hover { background:#fff; border-color:#c2bcae }
+  .btn.primary { background:var(--text); color:var(--paper); border-color:var(--text) }
   .btn.primary:hover { background:#33322f }
-  .btn.danger { background:var(--accent); color:#fff; border-color:var(--accent) }
-  .btn.danger:hover { background:var(--accent-dark); border-color:var(--accent-dark) }
-  .btn.sm { min-height:28px; padding:4px 9px; font-size:11px }
-  .btn:disabled { opacity:.4; cursor:not-allowed; transform:none }
+  .btn.danger {
+    background:rgba(198,83,79,.05); color:var(--red); border-color:var(--red);
+    letter-spacing:.03em; font-weight:600;
+  }
+  .btn.danger:hover { background:var(--red); color:#fff }
+  .btn.sm { min-height:26px; padding:3px 9px; font-size:12px }
+  .btn:disabled { opacity:.36; cursor:not-allowed }
   .actions { display:flex; gap:8px; align-items:center; margin-top:14px; flex-wrap:wrap }
+
+  /* ── 报头统计：竖栏线分隔的 figures，不是四方卡片 ─────────────────── */
   .cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:14px }
   .cards .card { min-height:112px }
-  .stats { grid-template-columns:repeat(5,minmax(0,1fr)) }
-  .stats .card { min-height:0; padding:13px 18px 12px }
-  .stats .stat { font-size:22px; font-weight:600; letter-spacing:-.02em; line-height:1.2; margin:-3px 0 3px }
-  .kv { display:grid; grid-template-columns:auto 1fr; gap:5px 11px; font-size:12px }
+  /* 空的时候整块收掉，否则那条 2px 黑顶线会变成一根横穿页面的孤立黑线 */
+  .cards:empty { display:none; border:0; margin:0 }
+  .cards.stats {
+    grid-template-columns:repeat(5,minmax(0,1fr)); gap:0;
+    margin:0 0 18px; border-top:2px solid var(--text); border-bottom:1px solid var(--rule);
+  }
+  .cards.stats .card {
+    min-height:0; padding:17px 20px 15px; background:none; border:0; border-left:1px solid var(--rule-hair);
+    border-radius:0; box-shadow:none;
+  }
+  .cards.stats .card:first-child { padding-left:0; border-left:0 }
+  .cards.stats .card h4 { margin:0 0 8px; padding:0; border:0; font:500 12.5px/1 inherit; color:var(--muted); letter-spacing:.02em }
+  .stats .stat {
+    font:400 28px/1.15 var(--serif); letter-spacing:-.018em; margin:0 0 6px;
+    font-variant-numeric:tabular-nums;
+  }
+  .stats .card .small { font-size:12px; line-height:1.5 }
+
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:5px 11px; font-size:12.5px }
   .kv .k { color:var(--muted); white-space:nowrap } .kv .v { word-break:break-all; font-weight:510 }
-  .badge { display:inline-flex; align-items:center; padding:2px 7px; border-radius:999px; font-size:10px; line-height:17px; font-weight:650; white-space:nowrap }
-  .badge.ok { background:#e7f0e9; color:var(--green) } .badge.warn { background:#f6e8e5; color:var(--red) } .badge.wait { background:#efeee9; color:var(--muted) } .badge.run { background:#e7ecf4; color:var(--blue) } .badge.amber { background:#f4ecdd; color:var(--amber) }
+
+  /* 徽章：印刷品的「铅字标签」，方角不圆角 */
+  .badge {
+    display:inline-flex; align-items:center; padding:1px 6px; border-radius:2px;
+    font-size:12px; line-height:16px; font-weight:600; white-space:nowrap;
+  }
+  .badge.ok { background:#e7f0e9; color:var(--green) }
+  .badge.warn { background:#f6e8e5; color:var(--red) }
+  .badge.wait { background:#efeee9; color:var(--muted) }
+  .badge.run { background:#e7ecf4; color:var(--blue) }
+  .badge.amber { background:#f4ecdd; color:var(--amber) }
+
   .run { margin-bottom:14px }
   .run .head { display:flex; align-items:center; gap:10px; margin-bottom:10px }
-  .run .head h4 { margin:0 }
-  .run .phase { color:var(--muted); font-size:12px }
+  .run .head h4 { margin:0; padding:0; border:0 }
+  .run .phase { color:var(--muted); font-size:12.5px }
   .sp { flex:1 }
-  table { width:100%; border-collapse:separate; border-spacing:0; font-size:12px }
-  th { text-align:left; color:#85827b; font-weight:580; padding:8px 9px; border-bottom:1px solid var(--line) }
-  td { padding:9px; border-bottom:1px solid var(--line-soft); vertical-align:top }
+
+  /* ── 表：只有顶线和栏线，行间用发丝线 ─────────────────────────────── */
+  table { width:100%; border-collapse:separate; border-spacing:0; font-size:12.5px }
+  th {
+    text-align:left; color:var(--muted); font-weight:500; padding:7px 9px 7px 0;
+    border-bottom:1px solid var(--text); font-size:12.5px;
+  }
+  td { padding:8px 9px 8px 0; border-bottom:1px solid var(--rule-hair); vertical-align:top }
   tbody tr:last-child td { border-bottom:0 }
   tbody tr { transition:background .12s }
-  tbody tr:hover td { background:rgba(255,255,255,.55) }
+  tbody tr:hover td { background:rgba(255,255,255,.5) }
   tr.sel td { background:#f2eee8 }
   a.tx,.exp { color:var(--blue); text-decoration:none }
   a.tx { font-family:var(--mono) }
-  pre.log { margin:0; background:#20201e; color:#deddd8; font:11.5px/1.65 var(--mono); padding:15px 17px; border:1px solid #292926; border-radius:11px; height:340px; overflow:auto; white-space:pre-wrap; word-break:break-all; box-shadow:inset 0 1px 0 rgba(255,255,255,.04) }
+
+  pre.log {
+    margin:0; background:#20201e; color:#deddd8; font:12px/1.65 var(--mono);
+    padding:15px 17px; border:1px solid #292926; border-radius:3px; height:340px;
+    overflow:auto; white-space:pre-wrap; word-break:break-all;
+  }
   pre.log .err { color:#ef9388 } pre.log .ok { color:#93c6a2 } pre.log .dim { color:#8d8c87 }
-  .placeholder { margin:0 0 14px; padding:42px 24px; border:1px dashed #d4d1c9; border-radius:14px; color:var(--muted); text-align:center; background:rgba(255,255,255,.3) }
-  .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:14px; padding:12px 14px; border:1px solid var(--line); border-radius:13px; background:rgba(255,255,255,.5); flex-wrap:wrap }
-  .toolbar select { width:auto; min-height:30px; padding:4px 28px 4px 8px }
-  .rangebar { position:relative; display:inline-block; vertical-align:middle; height:7px; background:#e5e3dc; border-radius:99px; margin:0 8px 2px 0; width:120px; overflow:visible }
-  .rangebar .in { position:absolute; top:0; bottom:0; background:#dca58f; border-radius:99px }
-  .rangebar .now { position:absolute; top:-3px; width:2px; height:13px; background:var(--red); border-radius:2px }
-  .rangebar .now.ok { background:var(--green) }
-  /* 仓位表：每格不换行、垂直居中，数字列右对齐等宽数字，主数字大一号、次要信息小字第二行 */
+
+  .placeholder {
+    margin:0 0 14px; padding:42px 24px; border:1px dashed var(--rule); border-radius:3px;
+    color:var(--muted); text-align:center; background:rgba(255,255,255,.3);
+  }
+  .toolbar {
+    display:flex; gap:14px; align-items:center; margin-bottom:12px; padding:10px 0;
+    border-top:1px solid var(--rule-hair); border-bottom:1px solid var(--rule-hair);
+    background:none; flex-wrap:wrap; font-size:12.5px;
+  }
+  .toolbar select { width:auto; min-height:28px; padding:3px 24px 3px 7px }
+
+  /* ★ 母题：印刷刻度尺 ──────────────────────────────────────────────
+     旧版是 120px 的小条，被当成一个不起眼的单元格。现在它是这一列的主角：
+     通栏标尺 + 两端刻度数字 + 压在纸上的池价标记线。 */
+  .rangebar {
+    position:relative; display:block; height:7px; margin:5px 0 3px;
+    background:transparent; border-radius:0; width:100%; min-width:150px;
+  }
+  .rangebar:before { content:""; position:absolute; left:0; right:0; top:3px; height:1px; background:var(--rule) }
+  .rangebar .in {
+    position:absolute; top:0; bottom:0; background:rgba(201,96,63,.2);
+    border-left:1px solid var(--accent); border-right:1px solid var(--accent); border-radius:0;
+  }
+  .rangebar .now { position:absolute; top:-4px; width:1.5px; height:15px; background:var(--red); border-radius:0 }
+  .rangebar .now.ok { background:var(--text) }
+  .rangeends {
+    display:flex; justify-content:space-between; gap:10px;
+    font:400 12px/1.3 var(--mono); color:var(--faint);
+  }
+
+  /* ── 仓位表 ───────────────────────────────────────────────────────── */
   #pos-table tr.pos > td, #pos-table th { white-space:nowrap; vertical-align:middle }
+  #pos-table tr.pos > td { padding-top:9px; padding-bottom:9px }
   #pos-table .num { text-align:right; font-variant-numeric:tabular-nums }
-  #pos-table .big { font-size:14px; font-weight:600; letter-spacing:-.01em }
-  #pos-table .sub { display:block; font-size:11px; color:var(--muted); margin-top:2px }
-  #pos-table .btns { display:flex; flex-wrap:wrap; gap:4px; width:104px } /* 两行：领取 撤退 / 监控（监控中：日志 停止） */
-  dialog { border:1px solid var(--line); border-radius:14px; padding:18px 20px; max-width:440px; box-shadow:var(--shadow); font:inherit; color:var(--text) }
-  dialog::backdrop { background:rgba(25,25,24,.35) }
-  #pos-table .btns .btn { min-height:25px; padding:3px 8px }
-  #pos-table tr.grp td { background:rgba(0,0,0,.045); font-size:12px; padding:7px 10px; border-top:1px solid rgba(0,0,0,.08) }
-  #pos-table tr.sub td { background:rgba(255,255,255,.35); font-size:12px; padding:6px 10px 6px 18px }
+  #pos-table .big { font:400 16px/1.2 var(--serif); font-variant-numeric:tabular-nums; letter-spacing:-.012em }
+  #pos-table .sub { display:block; font-size:12px; color:var(--muted); margin-top:2px }
+  #pos-table td:first-child .sub { color:var(--faint) }
+  /* 领取 / 撤退 / 监控 排在一行，别换行把行撑高一倍 */
+  #pos-table .btns { display:flex; flex-wrap:wrap; gap:5px; width:158px }
+  #pos-table .btns .btn { min-height:24px; padding:2px 8px; font-size:12px }
+  /* DPR 右对齐、操作左对齐，两列会贴在一起 */
+  #pos-table th:last-child, #pos-table tr.pos > td:last-child { padding-left:14px }
+  #pos-table tr.grp td { background:rgba(0,0,0,.04); font-size:12.5px; padding:7px 10px 7px 0; border-top:1px solid var(--rule) }
+  #pos-table tr.sub td { background:rgba(255,255,255,.35); font-size:12.5px; padding:6px 10px 6px 18px }
   #pos-table tr.sub .btns { width:auto }
-  .small { font-size:11px; color:var(--muted) }
+  #pos-table .pair { font-weight:600; font-size:13.5px; letter-spacing:-.012em }
+
+  dialog {
+    border:1px solid var(--text); border-radius:4px; padding:20px 22px; max-width:440px;
+    box-shadow:0 24px 60px rgba(32,30,26,.18); font:inherit; color:var(--text); background:var(--paper);
+  }
+  dialog::backdrop { background:rgba(25,25,24,.38) }
+
+  .small { font-size:12px; color:var(--muted) }
   .mono { font-family:var(--mono) }
-  .toast { position:fixed; right:22px; bottom:22px; background:#252522; color:#fff; padding:10px 14px; border:1px solid rgba(255,255,255,.1); border-radius:10px; font-size:12px; opacity:0; transform:translateY(8px); transition:.2s ease; pointer-events:none; max-width:420px; box-shadow:0 12px 36px rgba(0,0,0,.18) }
+  .toast {
+    position:fixed; right:22px; bottom:22px; background:#252522; color:#fff; padding:10px 14px;
+    border:1px solid rgba(255,255,255,.1); border-radius:3px; font-size:12.5px; opacity:0;
+    transform:translateY(8px); transition:.2s ease; pointer-events:none; max-width:420px;
+    box-shadow:0 12px 36px rgba(0,0,0,.18);
+  }
   .toast.show { opacity:1; transform:translateY(0) }
-  .exp { cursor:pointer; display:inline-block; user-select:none; padding:2px 4px; margin-left:-4px; border-radius:5px }
+  .exp { cursor:pointer; display:inline-block; user-select:none; padding:1px 3px; margin-left:-3px; border-radius:2px }
   .exp:hover { background:#ede9e2 }
   tr.depthrow td { background:#f5f3ee; padding:10px 14px 14px }
   .depth svg { width:100%; display:block }
-  .depth .legend { display:flex; gap:16px; font-size:11px; color:var(--muted); margin-top:5px }
-  .depth .legend i { display:inline-block; width:9px; height:9px; border-radius:3px; margin-right:5px; vertical-align:-1px }
-  .cal { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:8px }
-  .cal .dow { font-size:10px; font-weight:700; letter-spacing:.11em; color:#929089; text-transform:uppercase; text-align:center; padding:2px 0 4px }
-  .cal .day { min-height:86px; padding:8px 11px; border:1px solid var(--line-soft); border-radius:11px; background:rgba(255,255,255,.45) }
+  .depth .legend { display:flex; gap:16px; font-size:12px; color:var(--muted); margin-top:5px }
+  .depth .legend i { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; vertical-align:-1px }
+
+  /* ── 盈亏日历 ─────────────────────────────────────────────────────── */
+  .cal { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:6px }
+  .cal .dow { font:500 12px/1 inherit; letter-spacing:.02em; color:var(--muted); text-align:center; padding:2px 0 6px }
+  .cal .day { min-height:86px; padding:8px 11px; border:1px solid var(--rule-hair); border-radius:3px; background:rgba(255,255,255,.45) }
   .cal .day.blank { border-color:transparent; background:transparent }
-  .cal .day.has { cursor:pointer; transition:.15s ease } .cal .day.has:hover { transform:translateY(-1px); box-shadow:var(--shadow) }
+  .cal .day.has { cursor:pointer; transition:.15s ease } .cal .day.has:hover { border-color:var(--rule); background:#fff }
   .cal .day.up { background:#e7f0e9; border-color:#cfe0d4 } .cal .day.down { background:#f6e8e5; border-color:#ead0cb }
-  .cal .day.today .n { color:var(--accent-dark); font-weight:700 }
+  .cal .day.today .n { color:var(--accent-deep); font-weight:700 }
   .cal .day.sel { box-shadow:0 0 0 2px var(--text) }
-  .cal .day .n { font-size:11px; color:var(--muted) }
-  .cal .day .v { font-size:16px; font-weight:600; letter-spacing:-.01em; margin:5px 0 2px }
+  .cal .day .n { font-size:12px; color:var(--muted) }
+  .cal .day .v { font:400 17px/1.15 var(--serif); font-variant-numeric:tabular-nums; margin:5px 0 2px }
+
   ::selection { background:rgba(217,119,87,.2) }
-  ::-webkit-scrollbar { width:9px; height:9px } ::-webkit-scrollbar-thumb { background:#c9c7c0; border:3px solid transparent; border-radius:9px; background-clip:padding-box }
-  @media(max-width:1050px) { .grid { grid-template-columns:1fr } .cards { grid-template-columns:repeat(2,1fr) } .stats { grid-template-columns:repeat(5,minmax(0,1fr)) } }
+  ::-webkit-scrollbar { width:9px; height:9px }
+  ::-webkit-scrollbar-thumb { background:#c9c7c0; border:3px solid transparent; border-radius:9px; background-clip:padding-box }
+
+  @media(max-width:1050px) {
+    .grid { grid-template-columns:1fr }
+    .cards { grid-template-columns:repeat(2,1fr) }
+    .cards.stats { grid-template-columns:repeat(5,minmax(0,1fr)) }
+  }
 </style>
 </head>
 <body>
@@ -172,7 +335,7 @@
 
   <div>
     <div class="card" id="pools-card" style="display:none;margin-bottom:10px">
-      <h4 style="margin:0 0 6px;font-size:11px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase">该代币的全部池子 <span class="small" id="pools-note" style="text-transform:none;letter-spacing:0"></span></h4>
+      <h4 style="margin:0 0 8px">该代币的全部池子 <span class="small" id="pools-note" style="text-transform:none;letter-spacing:0"></span></h4>
       <table id="pools-table"><thead><tr><th>池子</th><th>费率 / 间距</th><th>池价（<span class="q">USDG</span>/代币）</th><th>流动性</th><th>24h 成交</th><th>状态</th><th>pool id</th><th></th></tr></thead><tbody></tbody></table>
     </div>
     <div id="launch-empty" class="placeholder">填好代币地址，点"计划"先看方案；计划无误再执行。</div>
@@ -674,10 +837,11 @@ async function loadPositions(full) {
     const tr = document.createElement('tr'); tr.className = 'pos'
     const hold = p.mintedAt ? fmtHold(Date.now() - p.mintedAt) : '—'
     tr.innerHTML = `
-      <td><b>${sym}/${QS}</b> <span class="badge wait" title="${p.hooks ? 'hook ' + p.hooks : ''}">${p.feeText || p.fee + '%'}${p.hooks ? ' ⚓' : ''}</span>${p.kind === 'bridge' ? ' <span class="badge amber">过渡</span>' : ''}
+      <td><span class="pair">${sym}/${QS}</span> <span class="badge wait" title="${p.hooks ? 'hook ' + p.hooks : ''}">${p.feeText || p.fee + '%'}${p.hooks ? ' ⚓' : ''}</span>${p.kind === 'bridge' ? ' <span class="badge amber">过渡</span>' : ''}
         <span class="sub"><span class="exp mono" data-act="toggle" data-id="${p.id}" title="展开/收起池子流动性分布">${open ? '▾' : '▸'} #${p.id}</span> · <span title="${p.mintedAt ? '开仓 ' + new Date(p.mintedAt).toLocaleString() : ''}">${hold}</span></span></td>
-      <td>${fmtPrice(p.lo)} – ${fmtPrice(p.hi)} <span class="badge ${p.inRange ? 'ok' : 'warn'}">${p.inRange ? '区间内' : Number(p.price) > Number(p.hi) ? '涨破上沿' : '跌破下沿'}</span>${p.watchJob !== null ? ` <span class="badge run" title="${esc(w?.label ?? '')}">监控中 #${p.watchJob}</span>` : ''}
-        <span class="sub"><span class="rangebar" title="竖线 = 现价"><span class="in" style="left:${pos(lo)}%;width:${pos(hi) - pos(lo)}%"></span><span class="now ${p.inRange ? 'ok' : ''}" style="left:${pos(cur)}%"></span></span>现价 ${fmtPrice(p.price)}</span></td>
+      <td><span class="badge ${p.inRange ? 'ok' : 'warn'}">${p.inRange ? '区间内' : Number(p.price) > Number(p.hi) ? '涨破上沿' : '跌破下沿'}</span>${p.watchJob !== null ? ` <span class="badge run" title="${esc(w?.label ?? '')}">监控中 #${p.watchJob}</span>` : ''}
+        <span class="rangebar" title="橙带 = 你铺流动性的区间，竖线 = 当前池价"><span class="in" style="left:${pos(lo)}%;width:${pos(hi) - pos(lo)}%"></span><span class="now ${p.inRange ? 'ok' : ''}" style="left:${pos(cur)}%"></span></span>
+        <span class="rangeends"><span>${fmtPrice(p.lo)}</span><span style="color:${p.inRange ? 'var(--text)' : 'var(--red)'}">现价 ${fmtPrice(p.price)}</span><span>${fmtPrice(p.hi)}</span></span></td>
       <td class="num">${led ? `<span class="big" title="${withdrawn > 0.005 ? `存入 ${fmtUsd(entry)}，已撤本金 ${fmtUsd(withdrawn)}` : '按存入当时的池价折算'}">${fmtUsd(invested)}</span>` : `<span class="small" title="${NO_LEDGER}">—</span>`}</td>
       <td class="num"><span class="big" title="${fmtAmt(p.usdg)} ${QS} + ${fmtAmt(p.tokenAmount)} ${sym}，按当前池价">${fmtUsd(Number(p.value))}</span></td>
       <td class="num"><span class="big" style="color:${pnlCol(unclaimed + collected)}" title="未领 ${fmtUsd(unclaimed)}（${fmtAmt(p.feesUsdg)} ${QS} + ${fmtAmt(p.feesToken)} ${sym}）${collected > 0.005 ? `，已领 ${fmtUsd(collected)}` : ''}">${fmtUsd(unclaimed + collected)}</span></td>
@@ -870,7 +1034,7 @@ function renderCalendar() {
   $('#cal-note').textContent = `共 ${CAL.closed.length} 个已平仓仓位（本地时间归日）${CAL.nonUsdg ? `，${CAL.nonUsdg} 个非 ${QS} 池的未计入` : ''}${CAL.failed ? `，${CAL.failed} 个读取失败` : ''}`
   const sel = byDay.get(calSel), box = $('#cal-day')
   box.style.display = sel ? '' : 'none'
-  if (sel) box.innerHTML = `<h4 style="margin:0 0 10px;font-size:11px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase">${mo + 1} 月 ${calSel} 日平仓 ${sel.length} 个，合计 <b style="color:${pnlCol(sel.reduce((s, c) => s + c.pnl, 0))}">${money(sel.reduce((s, c) => s + c.pnl, 0))}</b></h4>
+  if (sel) box.innerHTML = `<h4 style="margin:0 0 10px">${mo + 1} 月 ${calSel} 日平仓 ${sel.length} 个，合计 <b style="color:${pnlCol(sel.reduce((s, c) => s + c.pnl, 0))}">${money(sel.reduce((s, c) => s + c.pnl, 0))}</b></h4>
     <table><thead><tr><th>平仓时间</th><th>仓位</th><th>交易对</th><th>存入</th><th>拿回本金</th><th>手续费</th><th>盈亏</th><th>持仓时间</th><th>交易</th></tr></thead><tbody>${[...sel].sort((a, b) => b.closedAt - a.closedAt).map((c) => `<tr>
       <td>${new Date(c.closedAt).toLocaleTimeString()}</td><td class="mono">#${c.id}</td><td>${esc(c.symbol)}/${QS} ${c.feeText || c.fee + '%'}</td>
       <td>${fmtUsd(c.deposits)}</td><td>${fmtUsd(c.withdrawn)}</td><td>${fmtUsd(c.fees)}</td>
