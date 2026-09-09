@@ -172,13 +172,15 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
   const stats = { txCount: 0, gasTotal: 0n }
   async function send(label: string, tx: { to: Address; data: Hex; value?: bigint; gas: bigint }) {
     if (nonce === undefined || !fees) [nonce, fees] = await Promise.all([pub.getTransactionCount({ address: wallet, blockTag: 'pending' }), pub.estimateFeesPerGas()])
-    const hash = await wc!.sendTransaction({ ...tx, account: wc!.account!, chain, nonce: nonce++, maxFeePerGas: fees.maxFeePerGas * 3n, maxPriorityFeePerGas: fees.maxPriorityFeePerGas })
+    // 广播失败（RPC 出错、被节点拒收）时 nonce 退回去，否则重试的下一笔会用到跳号的 nonce 卡住
+    const hash = await wc!.sendTransaction({ ...tx, account: wc!.account!, chain, nonce: nonce++, maxFeePerGas: fees.maxFeePerGas * 3n, maxPriorityFeePerGas: fees.maxPriorityFeePerGas }).catch((e) => { nonce!--; throw e })
     process.stdout.write(`${ts()} ${label} ${hash} ...`)
     const rc = await pub.waitForTransactionReceipt({ hash, retryDelay: 150, retryCount: 60 })
     const cost = rc.gasUsed * rc.effectiveGasPrice
     stats.txCount++; stats.gasTotal += cost
     process.stdout.write(rc.status === 'success' ? ` 成功，${rc.gasUsed} gas $${usd(cost)}\n` : ' 失败(revert)\n')
-    if (rc.status !== 'success') die(`${label} 交易回滚: ${cfg.explorer}/tx/${hash}`)
+    // 抛出而不是直接退出：卖币那层要接住重试；没人接的照样由 failFast 打印 shortMessage 后退出。onchain 标记这次是真花了 gas 的回滚
+    if (rc.status !== 'success') throw Object.assign(new Error(`${label} 交易回滚`), { shortMessage: `${label} 交易回滚: ${cfg.explorer}/tx/${hash}`, onchain: true })
     return rc
   }
   // ERC20 无限额授权给 spender（默认这个协议的 Permit2），额度够就跳过
