@@ -316,7 +316,7 @@ async function poolsFor(x: Ctx, token: Address) {
       const pool = await lp.poolById(q.id).catch(() => null)
       if (pool) { const { sqrtP, tick } = await lp.slot0(pool); if (sqrtP !== 0n) price = p6(priceFn(x, same(pool.currency1, token), m.decimals)(tick)) }
     }
-    return { id: q.id, name: q.name, dex: q.dex, fee: q.fee / 10000, feeText: q.feeText, spacing: q.spacing, hooks: q.hooks, usable: q.usable, empty: q.empty, status: q.status, liquidityUsd: Math.round(q.liquidityUsd), volume24h: Math.round(q.volume24h), price }
+    return { id: q.id, name: q.name, dex: q.dex, fee: q.fee / 10000, feeText: q.feeText, spacing: q.spacing, hooks: q.hooks, usable: q.usable, empty: q.empty, status: q.status, liquidityUsd: Math.round(q.liquidityUsd), volume24h: Math.round(q.volume24h), fee24h: q.fee24h === null ? null : Math.round(q.fee24h), price }
   }))
   return { symbol: m.symbol, pools: rows }
 }

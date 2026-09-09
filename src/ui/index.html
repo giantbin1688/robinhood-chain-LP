@@ -340,7 +340,7 @@
   <div>
     <div class="card" id="pools-card" style="display:none;margin-bottom:10px">
       <h4 style="margin:0 0 8px">该代币的全部池子 <span class="small" id="pools-note" style="text-transform:none;letter-spacing:0"></span></h4>
-      <table id="pools-table"><thead><tr><th>池子</th><th>费率 / 间距</th><th>池价（<span class="q">USDG</span>/代币）</th><th>流动性</th><th>24h 成交</th><th>状态</th><th>pool id</th><th></th></tr></thead><tbody></tbody></table>
+      <table id="pools-table"><thead><tr><th>池子</th><th>费率 / 间距</th><th>池价（<span class="q">USDG</span>/代币）</th><th>流动性</th><th>24h 成交</th><th title="24h 成交 × 费率 = 这个池一天分给全部 LP 的手续费；下面的百分比是它占流动性的比例，即整池每天的费率回报">手续费 (24h)</th><th title="左边填的预算投进去后占池子流动性的比例（预算 ÷ (流动性 + 预算)），以及按这个比例分到的 24h 手续费。按整池平摊算的；做窄区间时实际更高">你的份额</th><th>状态</th><th></th></tr></thead><tbody></tbody></table>
     </div>
     <div id="launch-empty" class="placeholder">填好代币地址，点"计划"先看方案；计划无误再执行。</div>
     <div id="launch-plan" style="display:none">
@@ -713,21 +713,40 @@ async function loadPools() {
     $('#pools-note').textContent = r.pools.length ? `${r.symbol}：${r.pools.length} 个（按流动性排序，数据来自 GeckoTerminal）` : `${r.symbol}：GeckoTerminal 上没有这个代币的池子，会按下面的费率/间距新建`
     r.pools.forEach((p, i) => {
       const tr = document.createElement('tr')
-      if (!p.usable) tr.style.color = 'var(--muted)'
+      if (!p.usable) { tr.style.color = 'var(--muted)'; tr.title = p.status }
       if (i >= 10) { tr.className = 'pool-more'; tr.style.display = 'none' } // 只展示流动性前 10 个，其余折叠
-      tr.innerHTML = `<td>${esc(p.name)}<br><span class="small">${esc(p.dex)}</span></td><td>${p.feeText || (p.fee ? p.fee + '%' : '—')}${p.spacing ? ' / ' + p.spacing : ''}${p.hooks ? `<br><span class="small mono" title="${p.hooks}">hook ${p.hooks.slice(0, 8)}…</span>` : ''}</td><td>${p.price ?? '—'}</td><td>$${p.liquidityUsd.toLocaleString('en-US')}</td><td>$${p.volume24h.toLocaleString('en-US')}</td>
-        <td><span class="badge ${p.empty ? 'amber' : p.usable ? 'ok' : 'wait'}">${esc(p.status)}</span></td>
-        <td class="mono small" title="${p.id}">${p.id.slice(0, 10)}…${p.id.slice(-6)}</td><td>${p.usable ? `<button class="btn sm${p.empty ? ' danger' : ''}" data-fee="${p.fee}" data-spacing="${p.spacing}" data-id="${p.id}" title="${p.empty ? '空池，不建议：进场要先纠价，之后也没有成交量' : ''}">${p.empty ? '仍要用' : '用这个池'}</button>` : ''}</td>`
+      // 手续费 (24h) = 成交 × 费率；再除以流动性就是整池一天的费率回报，选池时比成交额直观
+      const yieldPct = p.fee24h !== null && p.liquidityUsd > 0 ? (p.fee24h / p.liquidityUsd) * 100 : null
+      const feeCell = p.fee24h === null ? '—' : `$${p.fee24h.toLocaleString('en-US')}${yieldPct !== null ? `<br><span class="small" title="手续费 ÷ 流动性">${yieldPct >= 10 ? yieldPct.toFixed(0) : yieldPct.toFixed(yieldPct >= 1 ? 1 : 2)}%/天</span>` : ''}`
+      // 状态只标"可用 / 空池"，理由放在悬停提示里；不能用的池整行灰掉、悬停看原因（读链失败这种要重试的例外，直接显示）
+      const statusCell = p.empty ? `<span class="badge amber" title="${esc(p.status)}">空池</span>` : p.usable ? `<span class="badge ok" title="${esc(p.status)}">可用</span>` : /失败/.test(p.status) ? `<span class="small">${esc(p.status)}</span>` : ''
+      tr.innerHTML = `<td title="pool id ${p.id}">${esc(p.name)}<br><span class="small">${esc(p.dex)}</span></td><td>${p.feeText || (p.fee ? p.fee + '%' : '—')}${p.spacing ? ' / ' + p.spacing : ''}${p.hooks ? `<br><span class="small mono" title="${p.hooks}">hook ${p.hooks.slice(0, 8)}…</span>` : ''}</td><td>${p.price ?? '—'}</td><td>$${p.liquidityUsd.toLocaleString('en-US')}</td><td>$${p.volume24h.toLocaleString('en-US')}</td>
+        <td>${feeCell}</td><td class="share" data-liq="${p.liquidityUsd}" data-fee="${p.fee24h ?? ''}"></td><td>${statusCell}</td>
+        <td>${p.usable ? `<button class="btn sm${p.empty ? ' danger' : ''}" data-fee="${p.fee}" data-spacing="${p.spacing}" data-id="${p.id}" title="${p.empty ? '空池，不建议：进场要先纠价，之后也没有成交量' : ''}">${p.empty ? '仍要用' : '用这个池'}</button>` : ''}</td>`
       tb.appendChild(tr)
     })
+    renderShares()
     if (r.pools.length > 10) {
       const tr = document.createElement('tr')
-      tr.innerHTML = `<td colspan="8" style="text-align:center"><a href="#" id="pools-more" style="color:var(--blue)">显示其余 ${r.pools.length - 10} 个</a></td>`
+      tr.innerHTML = `<td colspan="9" style="text-align:center"><a href="#" id="pools-more" style="color:var(--blue)">显示其余 ${r.pools.length - 10} 个</a></td>`
       tr.querySelector('a').onclick = (e) => { e.preventDefault(); const rows = tb.querySelectorAll('.pool-more'); const hidden = rows[0].style.display === 'none'; rows.forEach((x) => (x.style.display = hidden ? '' : 'none')); e.target.textContent = hidden ? '只看前 10 个' : `显示其余 ${r.pools.length - 10} 个` }
       tb.appendChild(tr)
     }
   } catch (e) { $('#pools-note').textContent = '查询失败: ' + e.message }
 }
+// "你的份额"列：预算投进去后占池子流动性的比例 = 预算 ÷ (流动性 + 预算)，按这个比例分 24h 手续费就是预估日收。
+// 这是把预算摊到整个池的算法，实际做窄区间时份额和日收都会更高（区间越窄越高，但跳出区间就是 0）；改预算时实时重算
+function renderShares() {
+  const budget = Number($('#f-usdg').value) || 0
+  for (const td of document.querySelectorAll('#pools-table td.share')) {
+    const liq = Number(td.dataset.liq), fee = td.dataset.fee === '' ? null : Number(td.dataset.fee)
+    if (!budget || liq + budget <= 0) { td.innerHTML = '—'; continue }
+    const share = budget / (liq + budget)
+    const pct = share * 100, pctText = pct >= 10 ? pct.toFixed(0) : pct.toFixed(pct >= 1 ? 1 : 2)
+    td.innerHTML = `${pctText}%${fee !== null ? `<br><span class="small" title="按份额分 24h 手续费：$${fee.toLocaleString('en-US')} × ${pctText}%">≈$${(fee * share).toFixed(fee * share >= 100 ? 0 : 2)}/天</span>` : ''}`
+  }
+}
+$('#f-usdg').addEventListener('input', renderShares)
 $('#pools-table').onclick = (e) => {
   const b = e.target.closest('button'); if (!b) return
   $('#f-fee').value = b.dataset.fee; $('#f-spacing').value = b.dataset.spacing; $('#f-poolSelect').value = 'exact'; $('#f-pool').value = b.dataset.id

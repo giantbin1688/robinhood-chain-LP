@@ -56,8 +56,8 @@ export async function discoverQuotePools(c: Clients, token: Address): Promise<Fo
   return out
 }
 
-// 网页界面用：该代币的全部池子，每个标出能不能被本工具复用及原因
-export type TokenPool = { id: Hex; name: string; dex: string; liquidityUsd: number; volume24h: number; fee: number; feeText: string; spacing: number; hooks: Address | null; usable: boolean; empty: boolean; status: string }
+// 网页界面用：该代币的全部池子，每个标出能不能被本工具复用及原因。fee24h = 24h 成交 × 费率，是这个池一天分给全体 LP 的手续费（动态费率池按 Gecko 名字里的估计值算，费率不明的为 null）
+export type TokenPool = { id: Hex; name: string; dex: string; liquidityUsd: number; volume24h: number; fee24h: number | null; fee: number; feeText: string; spacing: number; hooks: Address | null; usable: boolean; empty: boolean; status: string }
 export async function listTokenPools(c: Clients, token: Address): Promise<TokenPool[]> {
   const { lp, cfg } = c
   const out: TokenPool[] = []
@@ -67,7 +67,8 @@ export async function listTokenPools(c: Clients, token: Address): Promise<TokenP
     const dex = String(p.relationships?.dex?.data?.id ?? '').replace(new RegExp(`-${cfg.gecko}$`), '')
     const name = String(a.name ?? ''), id = String(a.address).toLowerCase() as Hex
     const feeN = feeFromName(name) ?? 0
-    const base: TokenPool = { id, name, dex, liquidityUsd: Number(a.reserve_in_usd ?? 0), volume24h: Number(a.volume_usd?.h24 ?? 0), fee: feeN, feeText: feeN ? `${feeN / 10000}%` : '—', spacing: 0, hooks: null, usable: false, empty: false, status: '' }
+    const volume24h = Number(a.volume_usd?.h24 ?? 0)
+    const base: TokenPool = { id, name, dex, liquidityUsd: Number(a.reserve_in_usd ?? 0), volume24h, fee24h: feeN ? (volume24h * feeN) / 1_000_000 : null, fee: feeN, feeText: feeN ? `${feeN / 10000}%` : '—', spacing: 0, hooks: null, usable: false, empty: false, status: '' }
     if (String(p.relationships?.dex?.data?.id ?? '') !== GECKO_DEX[cfg.name]?.[c.protocol]) out.push({ ...base, status: `不是 ${lp.label}（${dex}）` })
     else if (!new RegExp(cfg.quote.symbol).test(name)) out.push({ ...base, status: `计价不是 ${cfg.quote.symbol}（${name.split('/')[1]?.trim().split(' ')[0] ?? '?'}）` })
     else {
@@ -77,10 +78,10 @@ export async function listTokenPools(c: Clients, token: Address): Promise<TokenP
       else if (!pool) out.push({ ...base, status: c.protocol === 'v3' ? '不是 PancakeSwap 工厂建的池' : '查不到 PoolKey（PositionManager 没记录，链上也没有它的 Initialize 事件），不复用' })
       else {
         const hasHook = pool.hooks !== '0x0000000000000000000000000000000000000000'
-        const row = { ...base, fee: pool.fee, feeText: feeText(pool) + (pool.dynamic && feeN ? `≈${feeN / 10000}%` : ''), spacing: pool.spacing, hooks: hasHook ? pool.hooks : null, usable: true }
+        const row = { ...base, fee: pool.fee, fee24h: pool.fee ? (volume24h * pool.fee) / 1_000_000 : base.fee24h, feeText: feeText(pool) + (pool.dynamic && feeN ? `≈${feeN / 10000}%` : ''), spacing: pool.spacing, hooks: hasHook ? pool.hooks : null, usable: true }
         const empty = await isEmpty(c, pool)
         if (empty === null) out.push({ ...row, usable: false, status: '链上流动性读取失败，刷新再试' })
-        else if (empty) out.push({ ...row, liquidityUsd: 0, volume24h: 0, empty: true, status: `空池：链上没有流动性，Gecko 的 ${usd$(base.liquidityUsd)} / 日成交 ${usd$(base.volume24h)} 是旧数据；进场要先花预算 1% 纠价，之后也没人来成交` })
+        else if (empty) out.push({ ...row, liquidityUsd: 0, volume24h: 0, fee24h: 0, empty: true, status: `空池：链上没有流动性，Gecko 的 ${usd$(base.liquidityUsd)} / 日成交 ${usd$(base.volume24h)} 是旧数据；进场要先花预算 1% 纠价，之后也没人来成交` })
         else {
           const warn = base.liquidityUsd < 5000 ? '，流动性 < $5k（auto 不会自动选）' : ''
           out.push({ ...row, status: (hasHook ? '可用，带 hook（费率由 hook 决定）' : '可用') + warn })
