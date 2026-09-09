@@ -231,6 +231,10 @@
   #pos-table tr.grp td { background:rgba(0,0,0,.04); font-size:12.5px; padding:7px 10px 7px 0; border-top:1px solid var(--rule) }
   #pos-table tr.sub td { background:rgba(255,255,255,.35); font-size:12.5px; padding:6px 10px 6px 18px }
   #pos-table tr.sub .btns { width:auto }
+  #pos-table td[data-act=fold] { cursor:pointer; user-select:none }
+  #pos-table td[data-act=fold]:hover { background:rgba(0,0,0,.07) }
+  #pos-table tr.shut td { color:var(--muted) }
+  #pos-table .fold { margin:0 4px 0 0; font-size:11px; color:var(--muted) }
   #pos-table .pair { font-weight:600; font-size:13.5px; letter-spacing:-.012em }
 
   dialog {
@@ -797,6 +801,10 @@ const NO_LEDGER = '资金流水需要 Alchemy 节点（.env 里这条链的 RPC�
 let POS = [], posTimer = null
 const expanded = new Set() // 展开了深度图的仓位 id
 const histOpen = new Set() // 展开了资金明细的仓位 id
+// 折叠起来的分区（shape:<形状>）/ 整组（group:<链>:<建仓交易或仓位 id>），默认全部平铺；记在浏览器里，刷新后保持
+const collapsed = new Set(JSON.parse(localStorage.getItem('pos-collapsed') || '[]'))
+const fold = (key) => { collapsed.has(key) ? collapsed.delete(key) : collapsed.add(key); localStorage.setItem('pos-collapsed', JSON.stringify([...collapsed])) }
+const foldMark = (key, hint) => `<span class="exp fold" title="${collapsed.has(key) ? '展开' : '折叠'}${hint}">${collapsed.has(key) ? '▸' : '▾'}</span>`
 // 页顶四格汇总：投入价值 = 存入 − 已撤本金；现金价值 = 本金现值 + 未领手续费；手续费收益 = 已领 + 未领；
 // 总盈亏 = 现金价值 + 已领手续费 − 投入价值 = 各仓位 uPNL 之和。没有资金流水的仓位（无 Alchemy 节点 / 别处转进来的）只计入现金价值和未领手续费
 // DPR（日收益率）= 总盈亏 ÷ Σ(各仓位投入 × 持仓天数)：仓位大小和持仓时间不同时按"投入×天数"加权，等价于单个仓位的 盈亏% ÷ 天数
@@ -872,20 +880,23 @@ async function loadPositions(full) {
   for (const [key, name, desc] of [['spot', 'Spot', '单个仓位，区间内均匀'], ['curve', 'Curve', '同心嵌套，越靠现价越厚'], ['bidask', 'Bid-Ask', '两侧分段，越远越厚']]) {
     const list = POS.filter((p) => shapeOf(p) === key)
     if (!list.length) continue
-    const hr = document.createElement('tr'); hr.className = 'grp'
-    hr.innerHTML = `<td colspan="8"><b>${name}</b> <span class="small">${desc}</span> · ${list.length} 个仓位 · ${summary(list)}</td>`
+    const sk = 'shape:' + key, shut = collapsed.has(sk)
+    const hr = document.createElement('tr'); hr.className = 'grp' + (shut ? ' shut' : '')
+    hr.innerHTML = `<td colspan="8" data-act="fold" data-key="${sk}">${foldMark(sk, '这个分区')}<b>${name}</b> <span class="small">${desc}</span> · ${list.length} 个仓位 · ${summary(list)}</td>`
     tb.appendChild(hr)
+    if (shut) continue
     if (key === 'spot') { list.forEach(addRow); continue }
     const groups = new Map()
     for (const p of list) { const g = p.group || p.id; groups.set(g, [...(groups.get(g) || []), p]) }
     for (const [g, ps] of groups) {
       ps.sort((x, y) => Number(x.lo) - Number(y.lo))
       const ids = ps.map((p) => p.id).join(','), sym = esc(ps[0].symbol), watching = ps.filter((p) => p.watchJob !== null).length
-      const sr = document.createElement('tr'); sr.className = 'sub'
-      sr.innerHTML = `<td colspan="7"><b>${sym}/${QS}</b> <span class="badge wait">${ps[0].feeText || ps[0].fee + '%'}</span> ${ps.length} 段 ${fmtPrice(ps[0].lo)} – ${fmtPrice(ps[ps.length - 1].hi)} · ${summary(ps)}${g.startsWith('0x') ? ` · <a class="tx small" href="${STATE.explorer}/tx/${g}" target="_blank">建仓交易</a>` : ''}</td>
+      const gk = `group:${SEL.chain}:${g}`, gShut = collapsed.has(gk)
+      const sr = document.createElement('tr'); sr.className = 'sub' + (gShut ? ' shut' : '')
+      sr.innerHTML = `<td colspan="7" data-act="fold" data-key="${gk}">${foldMark(gk, '这一组')}<b>${sym}/${QS}</b> <span class="badge wait">${ps[0].feeText || ps[0].fee + '%'}</span> ${ps.length} 段 ${fmtPrice(ps[0].lo)} – ${fmtPrice(ps[ps.length - 1].hi)}${gShut ? `（${ps.filter((p) => p.inRange).length} 段在区间内）` : ''} · ${summary(ps)}${g.startsWith('0x') ? ` · <a class="tx small" href="${STATE.explorer}/tx/${g}" target="_blank">建仓交易</a>` : ''}</td>
         <td><span class="btns"><button class="btn sm danger" data-act="exit-group" data-ids="${ids}" data-sym="${sym}" data-n="${ps.length}" title="撤掉这一组全部 ${ps.length} 个仓位（同一个池合成 1 笔交易），卖掉撤出来的币">整组撤退</button>${watching ? '' : `<button class="btn sm" data-act="watch-group" data-ids="${ids}" data-token="${ps[0].token}" data-sym="${sym}" title="一个监控盯整组：任一段进入区间后又跳出就整组撤退">整组监控</button>`}</span></td>`
       tb.appendChild(sr)
-      ps.forEach(addRow)
+      if (!gShut) ps.forEach(addRow)
     }
   }
   if (!POS.length) tb.innerHTML = `<tr><td colspan="8" class="placeholder">钱包名下没有 ${QS} 池的仓位</td></tr>`
@@ -948,6 +959,9 @@ function renderDepth(el, d, p) {
   el.innerHTML = s + `<div class="legend"><span><i style="background:#1f9d55"></i>${esc(d.symbol)}（现价上方）</span><span><i style="background:#2f6fed"></i>${QS}（现价下方）</span><span><i style="background:#c8d3e6"></i>你的区间外</span><span>池内活跃流动性 ${d.initializedTicks} 个已初始化 tick · 鼠标悬停看每段数量</span></div>`
 }
 $('#pos-table').onclick = async (e) => {
+  if (e.target.closest('a')) return
+  const fd = e.target.closest('[data-act=fold]')
+  if (fd) { fold(fd.dataset.key); loadPositions(false); return }
   const tg = e.target.closest('[data-act=toggle]')
   if (tg) { const id = tg.dataset.id; expanded.has(id) ? expanded.delete(id) : expanded.add(id); loadPositions(false); return }
   const hg = e.target.closest('[data-act=hist]')
