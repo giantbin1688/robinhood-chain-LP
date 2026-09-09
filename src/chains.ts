@@ -21,6 +21,9 @@ export type ChainConfig = {
   // 每个协议自己的合约；permit2 按协议而不是按链（BSC 上 Uniswap 用 0x22D4…，PancakeSwap 用自己部署的 0x31c2…）
   // urMinHop：UniversalRouter 2.1.1 的 v4 swap 参数多一个 minHopPriceX36 字段（Robinhood 只有 2.1.1）；2.0 及 PancakeSwap 的没有
   contracts: Partial<Record<ProtocolName, { permit2: Address; urMinHop?: boolean } & Record<string, Address | boolean | undefined>>>
+  // fomo.family 在这条链上的合约（信号页盯 FOMO 交易者的钱包用）。fomo 的交易是 ERC-4337 UserOp：买入时代币从 router 转进用户钱包（钱由 fomo 资金池垫付），
+  // 卖出时代币从钱包转给 router、USDG 回到 vault。没配的链不能加交易者
+  fomo?: { router: Address; vault: Address; entryPoint: Address }
 }
 
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11' as Address
@@ -36,6 +39,8 @@ export const CHAINS: Record<ChainName, ChainConfig> = {
     explorer: 'https://robinhoodchain.blockscout.com', gecko: 'robinhood', okxChainIndex: 4663,
     protocols: ['v4'], multicall3: MULTICALL3,
     nativePrice: { protocol: 'v4', fee: 500, spacing: 10 },
+    // 从 @unipcs 钱包（0x0a6e…119e）的历史交易里核对：每笔买入代币都由 0xb92f… 转入，卖出的 USDG 都进 0x4cd0…；tx.to 都是 EntryPoint v0.8
+    fomo: { router: getAddress('0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f'), vault: getAddress('0x4cd00e387622c35bddb9b4c962c136462338bc31'), entryPoint: getAddress('0x4337084d9e255ff0702461cf8895ce9e3b5ff108') },
     contracts: {
       v4: {
         permit2: UNI_PERMIT2, urMinHop: true,

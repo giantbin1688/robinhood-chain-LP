@@ -4,22 +4,60 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>rh-uni</title>
+<!-- 主题要在首屏绘制前定下来，否则暗色用户每次打开都先闪一下白纸 -->
+<script>document.documentElement.dataset.theme = localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')</script>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300..700;1,6..72,300..600&display=swap" rel="stylesheet">
 <style>
   /* ── rh-uni 视觉语言：暖色出版物 ─────────────────────────────────────────
      方向经 design-demos/direction-approved.md 确认（方向一 · 秒数轮盘 #12）。
      骨架：栏线代替卡片 · 目录行代替胶囊 tab · 区间 = 印刷刻度尺 · 危险操作 = 盖章。
-     色板全部沿用原有变量，只新增栏线色和纸纹；盈亏红绿一个像素都没动。 */
+     进场页的表单是贴左通高的侧栏（参照 rh-uni 原版），其余页面是居中版心。
+     颜色全部走变量：明暗两套只改 :root 这里，下面的规则一律不写死色值。
+     明色是"纸"，暗色是同一套暖灰调压暗的"夜纸"，不是蓝黑的赛博风；盈亏红绿只在暗色下提亮。 */
   :root {
+    color-scheme:light;
     --bg:#f7f6f2; --paper:#fbf9f5; --card:rgba(255,255,255,.62);
     --line:#deddd7; --line-soft:#ebe9e3; --rule:#d8d0c2; --rule-hair:#e6e0d4;
-    --text:#191918; --muted:#77756f; --faint:#98958e;
+    --text:#191918; --muted:#77756f; --faint:#98958e; --label:#393835;
     --accent:#d97757; --accent-dark:#bd5e40; --accent-deep:#a04a2f;
     --blue:#3565a8; --red:#c6534f; --green:#417a5b; --amber:#9a6a2c;
+    --up:#1a7f37; --down:#c62828;
     --serif:"Newsreader",Georgia,"Songti SC","Source Han Serif SC",serif;
     --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
-    --shadow:0 1px 2px rgba(32,30,26,.045)
+    --shadow:0 1px 2px rgba(32,30,26,.045);
+    --grain:rgba(160,140,110,.026); --header-bg:rgba(247,246,242,.9);
+    --tint:rgba(255,255,255,.5); --tint-strong:rgba(255,255,255,.75);
+    --input-bg:rgba(255,255,255,.8); --input-border:#d5d0c4; --input-border-hover:#c2bcae; --focus-ring:rgba(217,119,87,.13);
+    --btn-bg:rgba(255,255,255,.7); --btn-bg-hover:#fff; --primary-hover:#33322f;
+    --sel-bg:#f2eee8; --grp-bg:rgba(0,0,0,.04); --grp-hover:rgba(0,0,0,.07); --exp-hover:#ede9e2; --depthrow-bg:#f5f3ee;
+    --ok-bg:#e7f0e9; --warn-bg:#f6e8e5; --wait-bg:#efeee9; --run-bg:#e7ecf4; --amber-bg:#f4ecdd;
+    --log-bg:#20201e; --log-fg:#deddd8; --log-border:#292926; --log-err:#ef9388; --log-ok:#93c6a2; --log-dim:#8d8c87;
+    --toast-bg:#252522; --toast-fg:#fff; --backdrop:rgba(25,25,24,.38); --dialog-shadow:0 24px 60px rgba(32,30,26,.18);
+    --range-in:rgba(201,96,63,.2); --scroll:#c9c7c0; --selection:rgba(217,119,87,.2);
+    --cal-up-bg:#e7f0e9; --cal-up-line:#cfe0d4; --cal-down-bg:#f6e8e5; --cal-down-line:#ead0cb;
+    --chart-token:#1f9d55; --chart-quote:#2f6fed; --chart-out:#c8d3e6; --chart-band:#e2f5e9; --chart-text:#6b7280; --chart-axis:#1d2129;
+  }
+  :root[data-theme=dark] {
+    color-scheme:dark;
+    --bg:#151412; --paper:#1b1a18; --card:rgba(255,255,255,.035);
+    --line:#2e2c29; --line-soft:#262421; --rule:#3b3833; --rule-hair:#2a2825;
+    --text:#e9e7e2; --muted:#9c9991; --faint:#77746d; --label:#cfcdc6;
+    --accent:#e08a6a; --accent-dark:#d97757; --accent-deep:#f0a98e;
+    --blue:#83a6de; --red:#e37d75; --green:#84bd9a; --amber:#d3a563;
+    --up:#62cf88; --down:#f08080;
+    --shadow:none;
+    --grain:rgba(255,255,255,.014); --header-bg:rgba(21,20,18,.88);
+    --tint:rgba(255,255,255,.04); --tint-strong:rgba(255,255,255,.07);
+    --input-bg:rgba(255,255,255,.05); --input-border:#3d3a35; --input-border-hover:#57534c; --focus-ring:rgba(224,138,106,.22);
+    --btn-bg:rgba(255,255,255,.05); --btn-bg-hover:rgba(255,255,255,.1); --primary-hover:#fff;
+    --sel-bg:#2b2824; --grp-bg:rgba(255,255,255,.05); --grp-hover:rgba(255,255,255,.09); --exp-hover:rgba(255,255,255,.08); --depthrow-bg:#1a1917;
+    --ok-bg:rgba(132,189,154,.16); --warn-bg:rgba(227,125,117,.16); --wait-bg:rgba(255,255,255,.07); --run-bg:rgba(131,166,222,.16); --amber-bg:rgba(211,165,99,.16);
+    --log-bg:#0e0e0d; --log-fg:#cfcdc6; --log-border:#262421;
+    --toast-bg:#e9e7e2; --toast-fg:#151412; --backdrop:rgba(0,0,0,.6); --dialog-shadow:0 24px 60px rgba(0,0,0,.5);
+    --range-in:rgba(224,138,106,.28); --scroll:#454239; --selection:rgba(224,138,106,.3);
+    --cal-up-bg:rgba(98,207,136,.12); --cal-up-line:rgba(98,207,136,.3); --cal-down-bg:rgba(240,128,128,.12); --cal-down-line:rgba(240,128,128,.3);
+    --chart-token:#4fbf7c; --chart-quote:#6b95f5; --chart-out:#363d4c; --chart-band:rgba(79,191,124,.14); --chart-text:#9c9991; --chart-axis:#e9e7e2;
   }
   * { box-sizing:border-box }
   /* 脚注角标也要过可读性底线，不靠 sup 默认的 .83em 缩下去 */
@@ -31,44 +69,58 @@
     letter-spacing:-.005em;
     /* 纸感：极淡横向纹理，不是渐变（渐变是 slop） */
     background:
-      repeating-linear-gradient(0deg,rgba(160,140,110,.026) 0 1px,transparent 1px 3px),
+      repeating-linear-gradient(0deg,var(--grain) 0 1px,transparent 1px 3px),
       var(--bg);
   }
 
-  /* ── 报头 ─────────────────────────────────────────────────────────── */
+  /* ── 版式：左侧竖排导航 + 右侧（顶栏 + 内容）。参照用户给的驾驶舱截图 ─────── */
+  body { display:grid; grid-template-columns:212px minmax(0,1fr) }
+  nav.side {
+    position:sticky; top:0; height:100vh; display:flex; flex-direction:column; gap:1px;
+    padding:14px 10px 12px; border-right:1px solid var(--rule); background:var(--paper);
+  }
+  nav .brand { display:flex; align-items:center; gap:9px; padding:4px 10px 16px; font:600 16px/1.25 var(--serif); letter-spacing:-.01em }
+  nav .brand i { flex:none; width:8px; height:8px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 3px var(--range-in) }
+  nav .grp { margin:12px 10px 4px; font-size:10.5px; letter-spacing:.1em; color:var(--faint); text-transform:uppercase }
+  nav a.tab {
+    display:flex; align-items:center; gap:9px; padding:8px 10px; border-radius:6px;
+    color:var(--muted); text-decoration:none; cursor:pointer; font-size:13.5px; white-space:nowrap;
+    transition:background .12s,color .12s;
+  }
+  nav a.tab .ic { flex:none; width:16px; text-align:center; font-size:12.5px; opacity:.75 }
+  nav a.tab:hover { color:var(--text); background:var(--tint) }
+  nav a.tab.on { color:var(--text); background:var(--sel-bg); font-weight:600 }
+  nav a.tab.on .ic { opacity:1; color:var(--accent) }
+  nav a.tab .badge { margin-left:auto; padding:0 6px; line-height:17px }
+  nav .foot { margin-top:auto; padding:10px 10px 0; font-size:11.5px; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  .wrap { min-width:0 }
+
+  /* 顶栏：左边一排信息块（钱包 / 余额 / 价格 / 链），右边状态灯 + 明暗切换 */
   header {
-    display:flex; align-items:center; gap:10px; height:60px;
-    padding:0 max(24px,calc((100vw - 1440px)/2));
-    background:rgba(247,246,242,.9); border-bottom:2px solid var(--text);
+    display:flex; align-items:center; gap:8px; height:54px; padding:0 20px;
+    background:var(--header-bg); border-bottom:1px solid var(--rule);
     backdrop-filter:blur(14px); position:sticky; top:0; z-index:5;
   }
-  header .brand {
-    display:flex; align-items:baseline; gap:7px; margin-right:20px;
-    font:600 21px/1 var(--serif); letter-spacing:-.02em; white-space:nowrap;
+  .chip {
+    display:flex; flex-direction:column; justify-content:center; gap:1px; min-width:0; flex:0 1 auto;
+    padding:3px 10px; height:38px; border:1px solid var(--rule-hair); border-radius:4px; background:var(--tint);
   }
-  /* 目录行式导航：纯文字 + 底部指示条，压在页头的黑线上（不用胶囊） */
-  header a.tab {
-    display:flex; align-items:center; align-self:stretch; padding:0 2px; margin-right:22px;
-    white-space:nowrap; flex:none;
-    color:var(--muted); text-decoration:none; cursor:pointer; font-size:13.5px;
-    transition:color .15s;
-  }
-  header a.tab:hover { color:var(--text) }
-  header a.tab.on { color:var(--text); font-weight:560; box-shadow:inset 0 -3px 0 var(--accent) }
-  header select.chain {
-    width:auto; min-height:30px; padding:4px 24px 4px 9px; margin-right:16px; flex:none;
-    border:1px solid var(--rule); border-radius:3px; font-weight:560; font-size:12.5px;
-    background:rgba(255,255,255,.7);
-  }
-  /* 钱包位可能塞进一整条 RPC 错误——必须夹住，否则会把整个页头撑爆、tab 挤成竖排 */
-  header .wallet {
-    margin-left:auto; flex:0 1 auto; min-width:0; max-width:44%;
-    padding:4px 9px; border:1px solid var(--rule-hair); border-radius:3px;
-    background:rgba(255,255,255,.5);
-    font-family:var(--mono); font-size:12px; color:var(--muted);
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-  }
-  header .wallet b { color:var(--text); font-weight:550 }
+  .chip .k { font-size:10px; letter-spacing:.08em; color:var(--faint); text-transform:uppercase; white-space:nowrap }
+  .chip .v { font:600 12.5px/1.2 var(--mono); color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  .chip .v small { font-weight:400; color:var(--muted); font-family:inherit }
+  /* 钱包块可能塞进一整条 RPC 错误——必须夹住，否则会把整个顶栏撑爆 */
+  .chip.wallet { max-width:34% }
+  .chip select.chain { width:auto; min-height:0; height:20px; margin:-1px 0 0; padding:0 16px 0 0; border:0; background:transparent; font:600 12.5px/20px inherit; color:var(--text) }
+  .chip select.chain:focus { box-shadow:none }
+  .lights { margin-left:auto; display:flex; gap:13px; font-size:12px; color:var(--muted); white-space:nowrap }
+  .lights span { display:inline-flex; align-items:center; gap:5px; cursor:default }
+  .lights span:before { content:""; width:7px; height:7px; border-radius:50%; background:var(--faint); opacity:.5 }
+  .lights span.ok:before { background:var(--up); opacity:1 }
+  .lights span.warn:before { background:var(--amber); opacity:1 }
+  .lights span.bad:before { background:var(--down); opacity:1 }
+  .lights span.run:before { background:var(--blue); opacity:1; animation:blink 1.2s ease-in-out infinite }
+  @keyframes blink { 50% { opacity:.35 } }
+  header .theme { flex:none; min-height:28px; padding:0 10px; font-size:12px; border-radius:4px }
 
   main { max-width:1488px; margin:auto; padding:22px 24px 46px }
   .page { display:none } .page.on { display:block; animation:reveal .25s ease-out }
@@ -88,38 +140,38 @@
     font:600 12px/1 var(--serif); letter-spacing:.02em; color:var(--muted); text-transform:none;
   }
   .row { display:grid; grid-template-columns:118px 1fr; gap:7px 12px; align-items:center; margin:9px 0 }
-  .row label { color:#393835; font-weight:480 }
+  .row label { color:var(--label); font-weight:480 }
   .row .hint { grid-column:2; font-size:12px; line-height:1.45; color:var(--faint); margin-top:-2px }
   /* 示意图占满整行：挤在 1fr 列里时 340 宽的 viewBox 被压到 ~210px，
      刻度字会缩到 5px 左右——改版前就有的可读性问题，顺手修掉 */
   .shapeviz { grid-column:1/-1 }
-  .shapeviz svg { width:100%; max-width:340px; display:block; background:rgba(255,255,255,.55); border:1px solid var(--rule-hair); border-radius:3px }
+  .shapeviz svg { width:100%; max-width:340px; display:block; background:var(--tint); border:1px solid var(--rule-hair); border-radius:3px }
   .shapeviz text { font-size:12px; fill:var(--muted) }
   .shapeviz .note { font-size:12px; line-height:1.45; color:var(--faint); margin-top:4px }
 
   input[type=text],select {
-    width:100%; min-height:34px; padding:7px 10px; border:1px solid #d5d0c4; border-radius:3px;
-    color:var(--text); font:inherit; background:rgba(255,255,255,.8);
+    width:100%; min-height:34px; padding:7px 10px; border:1px solid var(--input-border); border-radius:3px;
+    color:var(--text); font:inherit; background:var(--input-bg);
     transition:border-color .15s,box-shadow .15s;
   }
-  input[type=text]:hover,select:hover { border-color:#c2bcae }
-  input[type=text]:focus,select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(217,119,87,.13) }
+  input[type=text]:hover,select:hover { border-color:var(--input-border-hover) }
+  input[type=text]:focus,select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--focus-ring) }
   input[type=checkbox] { accent-color:var(--accent-dark) }
 
   /* 按钮：普通操作是「排字」，不可逆操作是「盖章」—— 两者不是一个量级 */
   .btn {
     min-height:33px; padding:6px 13px; border:1px solid var(--rule); border-radius:3px;
-    background:rgba(255,255,255,.7); color:var(--text); font:560 12.5px/1.35 inherit;
+    background:var(--btn-bg); color:var(--text); font:560 12.5px/1.35 inherit;
     cursor:pointer; white-space:nowrap; transition:.14s ease;
   }
-  .btn:hover { background:#fff; border-color:#c2bcae }
+  .btn:hover { background:var(--btn-bg-hover); border-color:var(--input-border-hover) }
   .btn.primary { background:var(--text); color:var(--paper); border-color:var(--text) }
-  .btn.primary:hover { background:#33322f }
+  .btn.primary:hover { background:var(--primary-hover) }
   .btn.danger {
     background:rgba(198,83,79,.05); color:var(--red); border-color:var(--red);
     letter-spacing:.03em; font-weight:600;
   }
-  .btn.danger:hover { background:var(--red); color:#fff }
+  .btn.danger:hover { background:var(--red); color:var(--paper) }
   .btn.sm { min-height:26px; padding:3px 9px; font-size:12px }
   .btn:disabled { opacity:.36; cursor:not-allowed }
   .actions { display:flex; gap:8px; align-items:center; margin-top:14px; flex-wrap:wrap }
@@ -153,11 +205,11 @@
     display:inline-flex; align-items:center; padding:1px 6px; border-radius:2px;
     font-size:12px; line-height:16px; font-weight:600; white-space:nowrap;
   }
-  .badge.ok { background:#e7f0e9; color:var(--green) }
-  .badge.warn { background:#f6e8e5; color:var(--red) }
-  .badge.wait { background:#efeee9; color:var(--muted) }
-  .badge.run { background:#e7ecf4; color:var(--blue) }
-  .badge.amber { background:#f4ecdd; color:var(--amber) }
+  .badge.ok { background:var(--ok-bg); color:var(--green) }
+  .badge.warn { background:var(--warn-bg); color:var(--red) }
+  .badge.wait { background:var(--wait-bg); color:var(--muted) }
+  .badge.run { background:var(--run-bg); color:var(--blue) }
+  .badge.amber { background:var(--amber-bg); color:var(--amber) }
 
   .run { margin-bottom:14px }
   .run .head { display:flex; align-items:center; gap:10px; margin-bottom:10px }
@@ -174,21 +226,21 @@
   td { padding:8px 9px 8px 0; border-bottom:1px solid var(--rule-hair); vertical-align:top }
   tbody tr:last-child td { border-bottom:0 }
   tbody tr { transition:background .12s }
-  tbody tr:hover td { background:rgba(255,255,255,.5) }
-  tr.sel td { background:#f2eee8 }
+  tbody tr:hover td { background:var(--tint) }
+  tr.sel td { background:var(--sel-bg) }
   a.tx,.exp { color:var(--blue); text-decoration:none }
   a.tx { font-family:var(--mono) }
 
   pre.log {
-    margin:0; background:#20201e; color:#deddd8; font:12px/1.65 var(--mono);
-    padding:15px 17px; border:1px solid #292926; border-radius:3px; height:340px;
+    margin:0; background:var(--log-bg); color:var(--log-fg); font:12px/1.65 var(--mono);
+    padding:15px 17px; border:1px solid var(--log-border); border-radius:3px; height:340px;
     overflow:auto; white-space:pre-wrap; word-break:break-all;
   }
-  pre.log .err { color:#ef9388 } pre.log .ok { color:#93c6a2 } pre.log .dim { color:#8d8c87 }
+  pre.log .err { color:var(--log-err) } pre.log .ok { color:var(--log-ok) } pre.log .dim { color:var(--log-dim) }
 
   .placeholder {
     margin:0 0 14px; padding:42px 24px; border:1px dashed var(--rule); border-radius:3px;
-    color:var(--muted); text-align:center; background:rgba(255,255,255,.3);
+    color:var(--muted); text-align:center; background:var(--tint);
   }
   .toolbar {
     display:flex; gap:14px; align-items:center; margin-bottom:12px; padding:10px 0;
@@ -206,7 +258,7 @@
   }
   .rangebar:before { content:""; position:absolute; left:0; right:0; top:3px; height:1px; background:var(--rule) }
   .rangebar .in {
-    position:absolute; top:0; bottom:0; background:rgba(201,96,63,.2);
+    position:absolute; top:0; bottom:0; background:var(--range-in);
     border-left:1px solid var(--accent); border-right:1px solid var(--accent); border-radius:0;
   }
   .rangebar .now { position:absolute; top:-4px; width:1.5px; height:15px; background:var(--red); border-radius:0 }
@@ -228,33 +280,33 @@
   #pos-table .btns .btn { min-height:24px; padding:2px 8px; font-size:12px }
   /* DPR 右对齐、操作左对齐，两列会贴在一起 */
   #pos-table th:last-child, #pos-table tr.pos > td:last-child { padding-left:14px }
-  #pos-table tr.grp td { background:rgba(0,0,0,.04); font-size:12.5px; padding:7px 10px 7px 0; border-top:1px solid var(--rule) }
-  #pos-table tr.sub td { background:rgba(255,255,255,.35); font-size:12.5px; padding:6px 10px 6px 18px }
+  #pos-table tr.grp td { background:var(--grp-bg); font-size:12.5px; padding:7px 10px 7px 0; border-top:1px solid var(--rule) }
+  #pos-table tr.sub td { background:var(--tint); font-size:12.5px; padding:6px 10px 6px 18px }
   #pos-table tr.sub .btns { width:auto }
   #pos-table td[data-act=fold] { cursor:pointer; user-select:none }
-  #pos-table td[data-act=fold]:hover { background:rgba(0,0,0,.07) }
+  #pos-table td[data-act=fold]:hover { background:var(--grp-hover) }
   #pos-table tr.shut td { color:var(--muted) }
   #pos-table .fold { margin:0 4px 0 0; font-size:11px; color:var(--muted) }
   #pos-table .pair { font-weight:600; font-size:13.5px; letter-spacing:-.012em }
 
   dialog {
     border:1px solid var(--text); border-radius:4px; padding:20px 22px; max-width:440px;
-    box-shadow:0 24px 60px rgba(32,30,26,.18); font:inherit; color:var(--text); background:var(--paper);
+    box-shadow:var(--dialog-shadow); font:inherit; color:var(--text); background:var(--paper);
   }
-  dialog::backdrop { background:rgba(25,25,24,.38) }
+  dialog::backdrop { background:var(--backdrop) }
 
   .small { font-size:12px; color:var(--muted) }
   .mono { font-family:var(--mono) }
   .toast {
-    position:fixed; right:22px; bottom:22px; background:#252522; color:#fff; padding:10px 14px;
-    border:1px solid rgba(255,255,255,.1); border-radius:3px; font-size:12.5px; opacity:0;
+    position:fixed; right:22px; bottom:22px; background:var(--toast-bg); color:var(--toast-fg); padding:10px 14px;
+    border:1px solid var(--rule); border-radius:3px; font-size:12.5px; opacity:0;
     transform:translateY(8px); transition:.2s ease; pointer-events:none; max-width:420px;
     box-shadow:0 12px 36px rgba(0,0,0,.18);
   }
   .toast.show { opacity:1; transform:translateY(0) }
   .exp { cursor:pointer; display:inline-block; user-select:none; padding:1px 3px; margin-left:-3px; border-radius:2px }
-  .exp:hover { background:#ede9e2 }
-  tr.depthrow td { background:#f5f3ee; padding:10px 14px 14px }
+  .exp:hover { background:var(--exp-hover) }
+  tr.depthrow td { background:var(--depthrow-bg); padding:10px 14px 14px }
   .depth svg { width:100%; display:block }
   .depth .legend { display:flex; gap:16px; font-size:12px; color:var(--muted); margin-top:5px }
   .depth .legend i { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; vertical-align:-1px }
@@ -262,35 +314,86 @@
   /* ── 盈亏日历 ─────────────────────────────────────────────────────── */
   .cal { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:6px }
   .cal .dow { font:500 12px/1 inherit; letter-spacing:.02em; color:var(--muted); text-align:center; padding:2px 0 6px }
-  .cal .day { min-height:86px; padding:8px 11px; border:1px solid var(--rule-hair); border-radius:3px; background:rgba(255,255,255,.45) }
+  .cal .day { min-height:86px; padding:8px 11px; border:1px solid var(--rule-hair); border-radius:3px; background:var(--tint) }
   .cal .day.blank { border-color:transparent; background:transparent }
-  .cal .day.has { cursor:pointer; transition:.15s ease } .cal .day.has:hover { border-color:var(--rule); background:#fff }
-  .cal .day.up { background:#e7f0e9; border-color:#cfe0d4 } .cal .day.down { background:#f6e8e5; border-color:#ead0cb }
+  .cal .day.has { cursor:pointer; transition:.15s ease } .cal .day.has:hover { border-color:var(--rule); background:var(--btn-bg-hover) }
+  .cal .day.up { background:var(--cal-up-bg); border-color:var(--cal-up-line) } .cal .day.down { background:var(--cal-down-bg); border-color:var(--cal-down-line) }
   .cal .day.today .n { color:var(--accent-deep); font-weight:700 }
   .cal .day.sel { box-shadow:0 0 0 2px var(--text) }
   .cal .day .n { font-size:12px; color:var(--muted) }
   .cal .day .v { font:400 17px/1.15 var(--serif); font-variant-numeric:tabular-nums; margin:5px 0 2px }
 
-  ::selection { background:rgba(217,119,87,.2) }
+  /* ── 信号页：交易者卡片 + 信号流 ─────────────────────────────────── */
+  .sig-h { margin:18px 0 10px; font:600 14px/1.3 inherit; letter-spacing:-.01em }
+  .sig-h:first-of-type { margin-top:4px }
+  .traders { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px; align-items:start }
+  .trader { position:relative; padding:12px 14px; border:1px solid var(--rule-hair); border-radius:4px; background:var(--card) }
+  .trader.off { opacity:.55 }
+  .trader .who { display:flex; align-items:center; gap:9px; margin-bottom:6px }
+  .trader .av { flex:none; position:relative; overflow:hidden; width:28px; height:28px; border-radius:50%; background:var(--sel-bg); border:1px solid var(--rule); color:var(--accent-dark); font:600 13px/26px inherit; text-align:center; text-transform:uppercase }
+  /* 头像：fomo 没有公开接口，但每个人的分享卡片图（1200×630，头像在正中 x 500~700 / y 90~290）不用登录就能取，裁出中间那块；取不到就留首字母 */
+  .trader .av img { position:absolute; left:-70px; top:-12.6px; width:168px; height:88.2px; max-width:none }
+  .trader .hd { font-weight:600; font-size:13.5px } .trader .hd a { color:inherit; text-decoration:none } .trader .hd a:hover { color:var(--accent-dark) }
+  .trader .sw { margin-left:auto; cursor:pointer; user-select:none }
+  .trader .addr { font:12px var(--mono); color:var(--blue) } .trader .addr a { color:inherit; text-decoration:none }
+  .trader .note { font-size:12px; color:var(--faint); margin:4px 0 8px }
+  .trader .ops { display:flex; gap:6px; flex-wrap:wrap } .trader .ops .btn { min-height:24px; padding:2px 8px; font-size:12px }
+  .trader.add input { width:100%; margin:0 0 6px }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:10px; font-size:12.5px }
+  .chips .chip2 { display:inline-flex; gap:5px; align-items:center; padding:2px 9px; border:1px solid var(--rule-hair); border-radius:12px; background:var(--tint); cursor:pointer; user-select:none; color:var(--muted) }
+  .chips .chip2.on { color:var(--text); border-color:var(--text); background:var(--sel-bg) } .chips .chip2 b { font-weight:500; color:var(--faint) }
+  .chips .sep { width:1px; height:16px; background:var(--rule) }
+  .chips input { width:200px; min-height:26px; margin-left:auto; padding:3px 8px; font-size:12.5px }
+  #sig-table td { vertical-align:middle } #sig-table .num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap }
+  #sig-table .tok { font-weight:600 } #sig-table .tok .sub { display:block; font:12px var(--mono); color:var(--blue); font-weight:400 }
+  #sig-table .why { font-size:12px; color:var(--muted); display:block; margin-top:2px; max-width:360px }
+  #sig-table tr.unseen td { background:var(--run-bg) }
+  .cp { cursor:pointer; color:var(--faint); font-size:11px; margin-left:3px } .cp:hover { color:var(--text) }
+
+  /* ── 设置页 ─────────────────────────────────────────────────────── */
+  .settings { display:grid; grid-template-columns:repeat(auto-fit,minmax(360px,1fr)); gap:14px; align-items:start }
+  .settings .card h4 { margin:0 0 4px } .settings .card .lead { font-size:12.5px; color:var(--muted); margin:0 0 12px; line-height:1.55 }
+  .settings .row { margin-bottom:9px } .settings textarea { width:100%; min-height:54px; font:12px/1.4 var(--mono); resize:vertical }
+  .settings .st { margin-top:8px; font-size:12.5px } .settings ol { margin:6px 0 0; padding-left:18px; font-size:12px; color:var(--muted); line-height:1.6 }
+
+  ::selection { background:var(--selection) }
   ::-webkit-scrollbar { width:9px; height:9px }
-  ::-webkit-scrollbar-thumb { background:#c9c7c0; border:3px solid transparent; border-radius:9px; background-clip:padding-box }
+  ::-webkit-scrollbar-thumb { background:var(--scroll); border:3px solid transparent; border-radius:9px; background-clip:padding-box }
 
   @media(max-width:1050px) {
     .grid { grid-template-columns:1fr }
+    body { grid-template-columns:1fr }
+    nav.side { position:static; height:auto; flex-direction:row; flex-wrap:wrap; align-items:center; gap:2px; padding:8px 10px; border-right:0; border-bottom:1px solid var(--rule) }
+    nav .brand { padding:4px 10px; margin-right:8px }
+    nav .grp, nav .foot { display:none }
     .cards { grid-template-columns:repeat(2,1fr) }
     .cards.stats { grid-template-columns:repeat(5,minmax(0,1fr)) }
   }
 </style>
 </head>
 <body>
+<nav class="side">
+  <div class="brand"><i></i>rh-uni</div>
+  <div class="grp">交易</div>
+  <a class="tab on" data-page="launch"><span class="ic">➤</span>进场</a>
+  <a class="tab" data-page="positions"><span class="ic">▤</span>仓位 <span class="badge run" id="posCount" style="display:none" title="仓位数">0</span></a>
+  <a class="tab" data-page="signals"><span class="ic">◉</span>信号 <span class="badge amber" id="sigCount" style="display:none" title="还没看的新信号">0</span></a>
+  <div class="grp">记录</div>
+  <a class="tab" data-page="calendar"><span class="ic">▦</span>盈亏日历</a>
+  <a class="tab" data-page="tasks"><span class="ic">☰</span>任务 <span class="badge run" id="jobCount" style="display:none" title="运行中的任务数">0</span></a>
+  <div class="grp">系统</div>
+  <a class="tab" data-page="settings"><span class="ic">⚙</span>设置</a>
+  <div class="foot" id="navFoot">连接中…</div>
+</nav>
+<div class="wrap">
 <header>
-  <span class="brand">rh-uni</span>
-  <select id="sel-chain" class="chain" title="链：切换后进场、仓位、盈亏日历都按这条链显示；任务列表是全部链的"></select>
-  <a class="tab on" data-page="launch">进场</a>
-  <a class="tab" data-page="positions">仓位</a>
-  <a class="tab" data-page="calendar">盈亏日历</a>
-  <a class="tab" data-page="tasks">任务 <span class="badge run" id="jobCount" style="display:none">0</span></a>
-  <span class="wallet" id="walletChip">连接中…</span>
+  <div class="chip wallet"><span class="k">钱包</span><span class="v" id="chipWallet">连接中…</span></div>
+  <div class="chip"><span class="k">余额</span><span class="v" id="chipBal">—</span></div>
+  <div class="chip"><span class="k" id="chipEthK">ETH 价格</span><span class="v" id="chipEth">—</span></div>
+  <div class="chip" title="链：切换后进场、仓位、盈亏日历都按这条链显示；任务列表是全部链的"><span class="k">链</span><select id="sel-chain" class="chain"></select></div>
+  <!-- 状态灯：节点 / 钱包 / 聚合器 key / 事件流 / 任务，悬停看说明 -->
+  <div class="lights" id="lights"></div>
+  <button class="btn theme" id="btn-theme" title="切换明暗模式"></button>
 </header>
 
 <main>
@@ -393,6 +496,27 @@
   </div>
 </section>
 
+<!-- ===================== 信号：FOMO 交易者的链上买卖 + 安全检查 ===================== -->
+<section class="page" id="page-signals">
+  <div class="toolbar">
+    <span class="badge wait" id="sig-state">连接中…</span><span class="small" id="sig-meta"></span>
+    <span class="sp"></span>
+    <button class="btn sm" id="sig-notify" title="浏览器桌面通知：有买入 / 卖出信号时弹出（页面不在前台也能看到）">开启桌面通知</button>
+    <button class="btn sm" id="sig-refresh">刷新</button>
+    <button class="btn sm" id="sig-clear" title="清掉这条链上已记录的信号（交易者名单不动）">清空</button>
+  </div>
+  <div class="sig-h">盯着的交易者 <span class="small" style="font-weight:400;margin-left:6px">fomo.family 没有公开接口，直接盯钱包：买入 = 代币从 fomo 路由进钱包，卖出 = 代币从钱包回路由；别人空投的碎币记成"空投"不提醒</span></div>
+  <div class="traders" id="sig-traders"></div>
+  <div class="sig-h">信号流</div>
+  <div class="card">
+    <div class="chips" id="sig-chips"></div>
+    <div style="overflow-x:auto"><table id="sig-table">
+      <thead><tr><th>时间</th><th>交易者</th><th>类型</th><th>代币</th><th class="num">金额</th><th>说明</th><th>安全检查</th><th>交易</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </div>
+</section>
+
 <!-- ===================== 盈亏日历 ===================== -->
 <section class="page" id="page-calendar">
   <div class="cards stats" id="cal-stats"></div>
@@ -416,6 +540,40 @@
   <div class="actions" style="justify-content:flex-end"><button class="btn" value="cancel">取消</button><button class="btn danger" value="ok">确认发送交易</button></div>
 </form></dialog>
 
+<!-- ===================== 设置：fomo 账号 / Telegram / FomoScan（存 settings.json，同名项优先于 .env）===================== -->
+<section class="page" id="page-settings">
+<div class="settings">
+  <div class="card">
+    <h4>fomo 账号</h4>
+    <p class="lead">fomo.family 没有公开接口，用你自己的登录态调它的后端：按 handle 查钱包 / 头像，拉交易者的历史交易。两个都要贴：access token 1 小时过期，服务拿它 + refresh token 自动续期，续下来的新值自己存。</p>
+    <div class="row"><label>privy-token（access token）</label><textarea id="st-fomo-token" placeholder="eyJ…" spellcheck="false"></textarea></div>
+    <div class="row"><label>privy-refresh-token</label><textarea id="st-fomo-refresh" placeholder="…" spellcheck="false"></textarea></div>
+    <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-fomo-save">保存并验证</button><button class="btn" id="st-fomo-test">重新验证</button><button class="btn" id="st-fomo-clear">清除</button></div>
+    <div class="st" id="st-fomo-status">—</div>
+    <ol>
+      <li><b>开一个无痕窗口</b>登录 fomo.family（refresh token 是一次性的，和你日常用的浏览器共用同一次登录会互相踢下线）</li>
+      <li>F12 → Application → Cookies → fomo.family，复制 <code>privy-token</code> 和 <code>privy-refresh-token</code> 的值（localStorage 里的 <code>privy:token</code> / <code>privy:refresh_token</code> 也是同一对）</li>
+      <li>贴到上面，保存；然后<b>关掉无痕窗口</b>，别再用它。日常浏览器不受影响</li>
+    </ol>
+  </div>
+  <div class="card">
+    <h4>Telegram 推送</h4>
+    <p class="lead">买入 / 卖出信号、安全检查不通过时推消息。@BotFather 建 bot 拿 token，@userinfobot 查自己的 chat id，先给 bot 发一句话它才能给你发。</p>
+    <div class="row"><label>bot token</label><input type="password" id="st-tg-token" placeholder="123456:ABC…" spellcheck="false"></div>
+    <div class="row"><label>chat id</label><input type="text" id="st-tg-chat" placeholder="123456789" spellcheck="false"></div>
+    <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-tg-save">保存</button><button class="btn" id="st-tg-test">发测试消息</button></div>
+    <div class="st" id="st-tg-status">—</div>
+  </div>
+  <div class="card">
+    <h4>FomoScan</h4>
+    <p class="lead">第三方 handle ↔ 钱包查询（https://www.fomoscan.sh，付费）。配了 fomo 账号就用不上它。</p>
+    <div class="row"><label>API key</label><input type="password" id="st-fs-key" spellcheck="false"></div>
+    <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-fs-save">保存</button></div>
+    <div class="st" id="st-fs-status">—</div>
+  </div>
+</div>
+</section>
+
 <!-- ===================== 任务 ===================== -->
 <section class="page" id="page-tasks">
   <div class="card">
@@ -431,6 +589,7 @@
 </section>
 </main>
 <div class="toast" id="toast"></div>
+</div>
 
 <script>
 const $ = (s) => document.querySelector(s)
@@ -518,21 +677,25 @@ const panes = {}
 // ---- 事件流 ----
 function connectEvents() {
   const es = new EventSource('/api/events')
+  es.onopen = () => setLight('events', 'ok', '实时事件流已连接')
   es.onmessage = (e) => {
     const ev = JSON.parse(e.data)
+    if (ev.type === 'signal' || ev.type === 'watcher') return onSignalEvent(ev)
+    if (ev.type === 'fomo') return onFomoStatus(ev.status)
     const j = job(ev.job?.id ?? ev.job)
     if (ev.type === 'status') { const was = j.meta; j.meta = ev.job; if (!was) j.loaded = true; onStatus(ev.job, was) }
     else if (ev.type === 'log') { j.lines.push(ev.text); j.partial = ''; for (const p of Object.values(panes)) if (p.jobId === ev.job) p.append(ev.text, false) }
     else if (ev.type === 'partial') { j.partial = ev.text; for (const p of Object.values(panes)) if (p.jobId === ev.job) p.append(ev.text, true) }
     else if (ev.type === 'plan') { j.plan = ev.plan; if (panes.launch.jobId === ev.job) renderLaunchPlan(ev.plan, ev.job); if (panes.pos.jobId === ev.job) renderExitPlan(ev.plan) }
   }
-  es.onerror = () => setTimeout(() => { es.close(); connectEvents() }, 3000)
+  es.onerror = () => { setLight('events', 'bad', '事件流断开，3 秒后重连'); setTimeout(() => { es.close(); connectEvents() }, 3000) }
 }
 function onStatus(m, was) {
   for (const p of Object.values(panes)) if (p.jobId === m.id) p.status()
   renderTasks(); updateExecButton()
   const n = running().length
   $('#jobCount').style.display = n ? '' : 'none'; $('#jobCount').textContent = n
+  setLight('jobs', n ? 'run' : '', n ? `${n} 个任务运行中` : '没有任务在跑')
   // 任务结束 / 进入监控阶段：仓位和余额可能变了
   if ((was && was.running && !m.running) || (m.phase === 'watch' && (!was || was.phase !== 'watch'))) { loadState(false); if ($('#page-positions').classList.contains('on')) loadPositions(m.kind !== 'watch' && !m.dryRun); if ($('#page-calendar').classList.contains('on') && !m.dryRun) loadCalendar() }
 }
@@ -561,19 +724,35 @@ async function stopJob(id) {
   try { await api('/api/stop', { id }) } catch (e) { toast(e.message) }
 }
 
+// ---- 顶栏状态灯：绿 = 正常，黄 = 降级，红 = 不可用，蓝闪 = 在跑，灰 = 未配置 ----
+const LIGHTS = { rpc: '节点', key: '钱包', uniswap: 'Uniswap', okx: 'OKX', fomo: 'fomo', events: '事件流', signals: '信号', jobs: '任务' }
+const lightState = {}
+function setLight(k, cls, title) {
+  lightState[k] = { cls, title }
+  $('#lights').innerHTML = Object.entries(LIGHTS).map(([id, label]) => `<span class="${lightState[id]?.cls || ''}" title="${esc(lightState[id]?.title || '未知')}">${label}</span>`).join('')
+}
+setLight('events', '', '连接中…')
+
+// ---- 明暗模式：<head> 里已按 localStorage / 系统偏好定了首屏，这里只管按钮和之后的切换 ----
+const setTheme = (t) => { document.documentElement.dataset.theme = t; $('#btn-theme').textContent = t === 'dark' ? '☾ 暗色' : '☀ 亮色'; $('#btn-theme').title = t === 'dark' ? '切到明亮模式' : '切到黑暗模式' }
+setTheme(document.documentElement.dataset.theme)
+$('#btn-theme').onclick = () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('theme', t); setTheme(t) }
+
 // ---- 页面切换 ----
 document.querySelectorAll('a.tab').forEach((a) => a.onclick = () => showPage(a.dataset.page))
 function showPage(p) {
   document.querySelectorAll('a.tab').forEach((x) => x.classList.toggle('on', x.dataset.page === p))
   document.querySelectorAll('.page').forEach((x) => x.classList.toggle('on', x.id === 'page-' + p))
   if (p === 'positions') loadPositions(false)
+  if (p === 'signals') { sigSeen(); loadSignals() }
+  if (p === 'settings') loadSettings()
   if (p === 'calendar') loadCalendar()
   if (p === 'tasks') renderTasks()
 }
 
 // ---- 钱包 / 默认值 ----
 async function loadState(fillForm) {
-  try { STATE = await api('/api/state') } catch (e) { $('#walletChip').textContent = '服务不可用: ' + e.message; return }
+  try { STATE = await api('/api/state') } catch (e) { $('#chipWallet').textContent = '服务不可用: ' + e.message; setLight('rpc', 'bad', '服务不可用: ' + e.message); return }
   const w = STATE.wallet
   QS = STATE.quote || 'USDG'; NS = STATE.native || 'ETH'; SEL.protocol = STATE.protocol
   document.querySelectorAll('.q').forEach((el) => (el.textContent = QS))
@@ -590,7 +769,15 @@ async function loadState(fillForm) {
   $('#fee-hint').textContent = STATE.protocol === 'v3' ? `PancakeSwap v3 只有 ${(STATE.tiers || [0.01, 0.05, 0.25, 1]).join(' / ')}% 四档` : STATE.protocol === 'infinity' ? '5 = 5%，0.3 = 0.3%；标准档 0.01 / 0.05 / 0.25 / 1%，带 hook 的动态费率池只能复用不能新建' : '5 = 5%，3.9999 = 3.9999%，0.3 = 0.3%'
   const rpcNote = STATE.chains?.find((c) => c.name === STATE.chain)
   if (rpcNote && !rpcNote.rpc && fillForm) toast(`.env 里没有 ${rpcNote.rpcEnv}，${rpcNote.label} 走公共节点：没有资金流水 / 盈亏，Infinity 仓位只认 positions.json 记录的`)
-  $('#walletChip').innerHTML = w ? `<b>${w.slice(0, 6)}…${w.slice(-4)}</b> · ${STATE.usdg} ${QS} · ${STATE.eth} ${NS} · ${NS} $${STATE.ethPrice}` : '.env 里没有 PRIVATE_KEY，只能看不能操作'
+  $('#chipWallet').textContent = w ? `${w.slice(0, 6)}…${w.slice(-4)}` : '无私钥（只能看）'
+  $('#chipBal').innerHTML = w ? `${STATE.usdg} <small>${QS}</small> &nbsp;${STATE.eth} <small>${NS}</small>` : '—'
+  $('#chipEthK').textContent = `${NS} 价格`; $('#chipEth').textContent = `$${STATE.ethPrice}`
+  $('#navFoot').textContent = `${CHAIN_LABEL[STATE.chain] || chainInfo.label} Chain · ${STATE.protocolLabel}`
+  setLight('rpc', chainInfo.rpc ? 'ok' : 'warn', chainInfo.rpc ? `${chainInfo.label} 走 .env 里的 ${chainInfo.rpcEnv}（Alchemy）` : `.env 里没有 ${chainInfo.rpcEnv}，走公共节点：没有资金流水 / 盈亏`)
+  setLight('key', w ? 'ok' : 'bad', w ? `钱包 ${w}` : '.env 里没有 PRIVATE_KEY，只能看不能操作')
+  setLight('uniswap', STATE.uniswapKey ? 'ok' : '', STATE.uniswapKey ? 'UNISWAP_API_KEY 已配置' : '没有 UNISWAP_API_KEY')
+  setLight('okx', STATE.okx ? 'ok' : '', STATE.okx ? 'OKX_API_KEY 已配置' : '没有 OKX_API_KEY')
+  if (STATE.fomo) onFomoStatus(STATE.fomo)
   for (const m of STATE.jobs) { const j = job(m.id); const was = j.meta; j.meta = m; if (was?.running !== m.running) onStatus(m, was) }
   if (fillForm) {
     const p = STATE.params
@@ -828,7 +1015,7 @@ const money = (v) => `${v >= 0 ? '+' : '−'}${fmtUsd(v)}`
 const fmtAmt = (s) => { const v = Number(s), a = Math.abs(v); return !a ? '0' : a >= 1000 ? v.toLocaleString('en-US', { maximumFractionDigits: 0 }) : a >= 1 ? v.toLocaleString('en-US', { maximumFractionDigits: 2 }) : v.toLocaleString('en-US', { maximumSignificantDigits: 3 }) }
 const fmtPrice = (s) => Number(s).toLocaleString('en-US', { maximumSignificantDigits: 4 })
 const signed = (v, d = 1) => { const s = Math.abs(v).toFixed(d); return `${Number(s) === 0 ? '' : v > 0 ? '+' : '−'}${s}%` }
-const pnlCol = (v) => (v > 0.004 ? '#1a7f37' : v < -0.004 ? '#c62828' : 'var(--muted)')
+const pnlCol = (v) => (v > 0.004 ? 'var(--up)' : v < -0.004 ? 'var(--down)' : 'var(--muted)')
 const tile = (k, v, d, col = '') => `<div class="card"><h4>${k}</h4><div class="stat" style="color:${col}">${v}</div><div class="small">${d}</div></div>`
 const NO_LEDGER = '资金流水需要 Alchemy 节点（.env 里这条链的 RPC），或该仓位是别处转进来的'
 let POS = [], posTimer = null
@@ -862,6 +1049,7 @@ async function loadPositions(full) {
   if (full) sum.textContent = '扫描链上仓位中（首次几秒）…'
   try { POS = (await api('/api/positions' + (full ? '?full=1' : ''))).positions } catch (e) { sum.textContent = '加载失败: ' + e.message; return }
   renderStats()
+  $('#posCount').textContent = POS.length; $('#posCount').style.display = POS.length ? '' : 'none'
   const noLedger = POS.filter((p) => p.pnlUsd === null).length
   sum.textContent = `${POS.length} 个仓位，按当前池价折算 · ${new Date().toLocaleTimeString()}${noLedger ? `（${noLedger} 个没有资金流水，未计入投入 / 已领手续费 / 盈亏）` : ''}`
   const tb = $('#pos-table tbody'); tb.innerHTML = ''
@@ -941,7 +1129,7 @@ async function loadHistory(p) {
 }
 const ACTION = { add: ['加流动性', 'ok'], collect: ['领手续费', 'amber'], remove: ['撤流动性', 'warn'] }
 function renderHistory(el, d, p) {
-  const pnl = Number(d.pnl), col = pnl >= 0 ? '#1a7f37' : '#c62828'
+  const pnl = Number(d.pnl), col = pnl >= 0 ? 'var(--up)' : 'var(--down)'
   const sym = esc(d.symbol)
   const rows = d.events.map((e) => {
     const [label, cls] = ACTION[e.action]
@@ -957,7 +1145,7 @@ function renderHistory(el, d, p) {
       存入 <b>${fmtUsd(Number(d.deposits))}</b> · 已领手续费 <b>${fmtUsd(Number(d.fees))}</b> · 已撤本金 <b>${fmtUsd(Number(d.withdrawn))}</b> · 未领手续费 <b>${fmtUsd(Number(d.unclaimed))}</b> · 现值 <b>${fmtUsd(Number(d.value))}</b>
       &nbsp;→&nbsp; 盈亏 <b style="color:${col}">${money(pnl)}</b>
       <span class="small">（现值 + 未领 + 已领 + 已撤 − 存入，都按各自当时的池价折算；不含进场换币的手续费/滑点）</span></div>
-    <table style="background:rgba(255,255,255,.6);border-radius:8px"><thead><tr><th>时间</th><th>操作</th><th>数量（当时价值）</th><th>合计</th><th>当时池价</th><th>交易</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="small">没有找到这个仓位的交易</td></tr>'}</tbody></table>`
+    <table style="background:var(--tint-strong);border-radius:8px"><thead><tr><th>时间</th><th>操作</th><th>数量（当时价值）</th><th>合计</th><th>当时池价</th><th>交易</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="small">没有找到这个仓位的交易</td></tr>'}</tbody></table>`
 }
 async function loadDepth(p) {
   const el = $('#depth-' + p.id); if (!el) return
@@ -973,23 +1161,23 @@ function renderDepth(el, d, p) {
   const x = (price) => ((Math.log(price) - lnMin) / (lnMax - lnMin)) * W
   const maxUsd = Math.max(...d.bars.map((b) => b.usd)) || 1
   const h = (v) => (v / maxUsd) * (base - top)
-  const t = (str, px, py, extra = '') => `<text x="${px}" y="${py}" font-size="11" fill="#6b7280" ${extra}>${esc(str)}</text>`
+  const t = (str, px, py, extra = '') => `<text x="${px}" y="${py}" font-size="11" fill="var(--chart-text)" ${extra}>${esc(str)}</text>`
   let s = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="system-ui,sans-serif">`
-  s += `<rect x="${x(d.posLo)}" y="${top}" width="${x(d.posHi) - x(d.posLo)}" height="${base - top}" fill="#e2f5e9"/>`
+  s += `<rect x="${x(d.posLo)}" y="${top}" width="${x(d.posHi) - x(d.posLo)}" height="${base - top}" fill="var(--chart-band)"/>`
   for (const b of d.bars) {
     const x0 = x(b.pLo), w = Math.max(1, x(b.pHi) - x0 - 1), hu = h(b.usdgUsd), ht = h(b.tokenUsd), op = b.inPos ? 1 : 0.35
     s += `<g opacity="${op}"><title>${esc(`${fmtP(b.pLo)} ~ ${fmtP(b.pHi)} ${QS}/${d.symbol}\n${fmtN(b.token)} ${d.symbol} + ${fmtN(b.usdg)} ${QS}\n≈ $${fmtN(b.usd)}`)}</title>`
-    if (hu > 0) s += `<rect x="${x0}" y="${base - hu}" width="${w}" height="${hu}" fill="#2f6fed"/>`
-    if (ht > 0) s += `<rect x="${x0}" y="${base - hu - ht}" width="${w}" height="${ht}" fill="#1f9d55"/>`
+    if (hu > 0) s += `<rect x="${x0}" y="${base - hu}" width="${w}" height="${hu}" fill="var(--chart-quote)"/>`
+    if (ht > 0) s += `<rect x="${x0}" y="${base - hu - ht}" width="${w}" height="${ht}" fill="var(--chart-token)"/>`
     s += `</g>`
   }
   const xc = x(d.price)
-  s += `<line x1="${xc}" y1="${top - 6}" x2="${xc}" y2="${base}" stroke="#1d2129" stroke-dasharray="3,3"/>`
-  s += t(`现价 ${fmtP(d.price)} ${QS}`, Math.min(xc + 4, W - 130), top - 8, 'fill="#1d2129"')
+  s += `<line x1="${xc}" y1="${top - 6}" x2="${xc}" y2="${base}" stroke="var(--chart-axis)" stroke-dasharray="3,3"/>`
+  s += t(`现价 ${fmtP(d.price)} ${QS}`, Math.min(xc + 4, W - 130), top - 8, 'fill="var(--chart-axis)"')
   for (let k = 0; k <= 4; k++) { const price = Math.exp(lnMin + ((lnMax - lnMin) * k) / 4); s += t(fmtP(price), x(price), base + 14, `text-anchor="${k === 0 ? 'start' : k === 4 ? 'end' : 'middle'}"`) }
-  s += t(`MIN ${fmtP(d.posLo)}`, x(d.posLo), base + 32, 'fill="#1f9d55" font-weight="600"') + t(`MAX ${fmtP(d.posHi)}`, x(d.posHi), base + 32, 'fill="#1f9d55" font-weight="600" text-anchor="end"')
+  s += t(`MIN ${fmtP(d.posLo)}`, x(d.posLo), base + 32, 'fill="var(--chart-token)" font-weight="600"') + t(`MAX ${fmtP(d.posHi)}`, x(d.posHi), base + 32, 'fill="var(--chart-token)" font-weight="600" text-anchor="end"')
   s += `</svg>`
-  el.innerHTML = s + `<div class="legend"><span><i style="background:#1f9d55"></i>${esc(d.symbol)}（现价上方）</span><span><i style="background:#2f6fed"></i>${QS}（现价下方）</span><span><i style="background:#c8d3e6"></i>你的区间外</span><span>池内活跃流动性 ${d.initializedTicks} 个已初始化 tick · 鼠标悬停看每段数量</span></div>`
+  el.innerHTML = s + `<div class="legend"><span><i style="background:var(--chart-token)"></i>${esc(d.symbol)}（现价上方）</span><span><i style="background:var(--chart-quote)"></i>${QS}（现价下方）</span><span><i style="background:var(--chart-out)"></i>你的区间外</span><span>池内活跃流动性 ${d.initializedTicks} 个已初始化 tick · 鼠标悬停看每段数量</span></div>`
 }
 $('#pos-table').onclick = async (e) => {
   if (e.target.closest('a')) return
@@ -1098,6 +1286,181 @@ $('#cal-next').onclick = () => { calMonth = new Date(calMonth.getFullYear(), cal
 $('#cal-refresh').onclick = loadCalendar
 $('#cal-grid').onclick = (e) => { const d = e.target.closest('.day.has'); if (!d) return; const n = Number(d.dataset.day); calSel = calSel === n ? null : n; renderCalendar() }
 
+// ---- 信号：盯着的 FOMO 交易者 + 链上抓到的买卖（服务端 signals.ts 抓，SSE 推过来）----
+let SIG = { traders: [], signals: [], status: null, telegram: false, fomoscan: false }
+const KIND = { buy: ['买入', 'ok'], sell: ['卖出', 'warn'], fund: ['资金', 'wait'], dust: ['空投', 'wait'], out: ['转出', 'wait'] }
+const SAFE = { ok: ['通过', 'ok'], warn: ['注意', 'amber'], bad: ['风险', 'warn'], pending: ['检查中…', 'wait'], error: ['检查失败', 'wait'] }
+const sigFilter = { kinds: new Set(JSON.parse(localStorage.getItem('sigKinds') || '["buy","sell","fund"]')), safety: null, q: '' }
+const sigUnseen = new Set()
+const agoText = (t) => { const ms = Date.now() - t; return ms < 60000 ? '刚刚' : ms < 3600000 ? `${Math.floor(ms / 60000)}m 前` : ms < 86400000 ? `${Math.floor(ms / 3600000)}h 前` : new Date(t).toLocaleDateString() }
+const sigUsd = (v) => v === null || v === undefined ? '?' : `$${v >= 100 ? Math.round(v).toLocaleString('en-US') : v.toFixed(2)}`
+const sigAmt = (a) => { const v = Number(a); return v >= 1e9 ? `${(v / 1e9).toFixed(2)}B` : v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}K` : v >= 1 ? v.toFixed(2) : v.toPrecision(3) }
+async function loadSignals() {
+  try { SIG = await api('/api/signals') } catch (e) { toast('信号: ' + e.message); return }
+  renderTraders(); renderSignals(); renderSigStatus()
+}
+function sigSeen() { sigUnseen.clear(); $('#sigCount').style.display = 'none' }
+function onSignalEvent(ev) {
+  if (ev.type === 'watcher') { if (ev.status.chain === SEL.chain) { SIG.status = ev.status; renderSigStatus() }; return }
+  const s = ev.signal
+  if (s.chain !== SEL.chain) return
+  const i = SIG.signals.findIndex((x) => x.id === s.id)
+  const fresh = i < 0
+  if (fresh) SIG.signals.push(s); else SIG.signals[i] = s
+  const onPage = $('#page-signals').classList.contains('on')
+  if (fresh && (s.kind === 'buy' || s.kind === 'sell') && !SIG.status?.backfilling) {
+    const t = SIG.traders.find((x) => x.wallet.toLowerCase() === s.wallet.toLowerCase())
+    if (!t?.muted) {
+      toast(s.text)
+      if (Notification.permission === 'granted' && document.hidden) new Notification(s.text, { body: `${CHAIN_LABEL[s.chain] || s.chain} · ${s.token}`, tag: 'sig-' + s.id })
+    }
+    if (!onPage) { sigUnseen.add(s.id); $('#sigCount').style.display = ''; $('#sigCount').textContent = sigUnseen.size }
+  }
+  if (!fresh && s.safety && s.safety.status !== 'pending' && s.safety.status !== 'ok' && s.safety.status !== 'error' && !SIG.status?.backfilling) toast(`${SAFE[s.safety.status][0]} ${s.symbol}: ${s.safety.reasons[0] || ''}`)
+  if (onPage) renderSignals()
+}
+function renderSigStatus() {
+  const st = SIG.status, el = $('#sig-state'), meta = $('#sig-meta')
+  const n = SIG.traders.filter((t) => t.on).length
+  let cls = 'wait', txt = '未配置', light = '', ltitle = '没有盯任何钱包'
+  if (!st?.supported) { txt = '这条链不支持' ; ltitle = `${CHAIN_LABEL[SEL.chain] || SEL.chain} 上还没核对 fomo 的合约地址` }
+  else if (st.error) { cls = 'warn'; txt = '出错'; light = 'bad'; ltitle = st.error }
+  else if (st.backfilling) { cls = 'amber'; txt = '回填中'; light = 'warn'; ltitle = `正在补扫最近 1 小时，还差 ${st.lag.toLocaleString('en-US')} 块` }
+  else if (st.running) { cls = 'ok'; txt = '链上实时'; light = 'ok'; ltitle = `盯着 ${n} 个钱包，区块 ${st.head.toLocaleString('en-US')}` }
+  else if (n) { txt = '启动中…' }
+  el.className = 'badge ' + cls; el.textContent = txt
+  setLight('signals', light, ltitle)
+  const parts = []
+  if (st?.head) parts.push(`区块 ${st.head.toLocaleString('en-US')}${st.lag ? `（落后 ${st.lag.toLocaleString('en-US')}）` : ''}`)
+  parts.push(`盯 ${n} 个钱包`, `${SIG.signals.length} 条信号`)
+  const last = SIG.signals.length ? Math.max(...SIG.signals.map((s) => s.time)) : 0
+  if (last) parts.push(`最近 ${agoText(last)}`)
+  parts.push(SIG.telegram ? 'Telegram 推送已配置' : '未配 Telegram（.env TG_BOT_TOKEN / TG_CHAT_ID）')
+  if (st?.error) parts.push(st.error)
+  meta.textContent = ' · ' + parts.join(' · ')
+  $('#sig-notify').textContent = Notification.permission === 'granted' ? '桌面通知已开' : Notification.permission === 'denied' ? '桌面通知被浏览器禁止' : '开启桌面通知'
+}
+function renderTraders() {
+  const box = $('#sig-traders')
+  const explorer = STATE.explorer || ''
+  box.innerHTML = SIG.traders.map((t) => `<div class="trader${t.on ? '' : ' off'}" data-w="${t.wallet}">
+    <div class="who"><span class="av">${esc(t.handle.slice(0, 1))}${t.avatar ? `<img src="${esc(t.avatar)}" alt="" style="left:0;top:0;width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : `<img src="https://image-renderer.fomo.cloud/og/profile/${encodeURIComponent(t.handle)}/card.png" alt="" onerror="this.remove()">`}</span><span class="hd"><a href="https://fomo.family/profile/${encodeURIComponent(t.handle)}" target="_blank" title="fomo 主页">@${esc(t.handle)}</a></span>
+      <span class="badge ${t.on ? 'ok' : 'wait'} sw" data-act="toggle" title="${t.on ? '点击暂停盯这个钱包' : '点击恢复'}">${t.on ? 'ON' : 'OFF'}</span></div>
+    <div class="addr"><a href="${explorer}/address/${t.wallet}" target="_blank">${t.wallet.slice(0, 6)}…${t.wallet.slice(-4)}</a><span class="cp" data-act="copy" title="复制地址">⧉</span></div>
+    <div class="note">${t.muted ? '已静音：只记录，不弹提醒 / 不推 Telegram' : '买入 / 卖出弹提醒' + (SIG.telegram ? '，推 Telegram' : '')}</div>
+    <div class="ops"><button class="btn" data-act="mute">${t.muted ? '取消静音' : '静音'}</button><button class="btn" data-act="remove">移除</button></div>
+  </div>`).join('') + `<div class="trader add">
+    <div class="who"><span class="hd">添加交易者</span></div>
+    <input type="text" id="sig-handle" placeholder="FOMO handle，如 unipcs" spellcheck="false">
+    <input type="text" id="sig-wallet" placeholder="钱包 0x…${FOMO.connected || SIG.fomoscan ? '（可留空，按 handle 自动查）' : '（必填）'}" spellcheck="false">
+    <div class="note">${FOMO.connected ? `已登录 fomo（@${esc(FOMO.handle)}）：留空钱包按 handle 查，头像也从 fomo 拿` : SIG.fomoscan ? '留空钱包时通过 FomoScan 按 handle 查（扣 credits）' : '钱包地址要手填；在设置页配 fomo 账号后可以只填 handle'}</div>
+    <div class="ops"><button class="btn primary" id="sig-add">添加</button></div>
+  </div>`
+}
+$('#sig-traders').onclick = async (e) => {
+  const b = e.target.closest('[data-act]'); if (!b) return
+  const card = b.closest('.trader'), w = card?.dataset.w
+  const t = SIG.traders.find((x) => x.wallet === w)
+  try {
+    if (b.dataset.act === 'copy') { await navigator.clipboard.writeText(w); toast('已复制 ' + w); return }
+    if (b.dataset.act === 'toggle') await api('/api/traders/update', { wallet: w, on: !t.on })
+    else if (b.dataset.act === 'mute') await api('/api/traders/update', { wallet: w, muted: !t.muted })
+    else if (b.dataset.act === 'remove') { if (!confirm(`移除 @${t.handle}（${w.slice(0, 8)}…）？它的历史信号保留`)) return; await api('/api/traders/remove', { wallet: w }) }
+    await loadSignals()
+  } catch (err) { toast(err.message) }
+}
+document.addEventListener('click', async (e) => {
+  if (e.target.id !== 'sig-add') return
+  const handle = $('#sig-handle').value.trim(), wallet = $('#sig-wallet').value.trim()
+  if (!handle) return toast('填 FOMO handle')
+  e.target.disabled = true
+  try { const r = await api('/api/traders/add', { handle, wallet }); toast(`已添加 @${r.trader.handle} ${r.trader.wallet.slice(0, 8)}…，开始补扫最近 1 小时`); await loadSignals() } catch (err) { toast(err.message); e.target.disabled = false }
+})
+function sigRows() {
+  const q = sigFilter.q.toLowerCase()
+  return SIG.signals.filter((s) => sigFilter.kinds.has(s.kind) && (!sigFilter.safety || s.safety?.status === sigFilter.safety) && (!q || s.handle.toLowerCase().includes(q) || s.symbol.toLowerCase().includes(q) || s.token.toLowerCase().includes(q))).sort((a, b) => b.time - a.time || b.id - a.id)
+}
+function renderSignals() {
+  const cnt = (k) => SIG.signals.filter((s) => s.kind === k).length, cntS = (k) => SIG.signals.filter((s) => s.safety?.status === k).length
+  const chips = $('#sig-chips')
+  chips.innerHTML = Object.entries(KIND).map(([k, [label]]) => `<span class="chip2${sigFilter.kinds.has(k) ? ' on' : ''}" data-kind="${k}">${label} <b>${cnt(k)}</b></span>`).join('')
+    + `<span class="sep"></span>` + ['ok', 'warn', 'bad'].map((k) => `<span class="chip2${sigFilter.safety === k ? ' on' : ''}" data-safety="${k}">${SAFE[k][0]} <b>${cntS(k)}</b></span>`).join('')
+    + `<input type="text" id="sig-q" placeholder="搜交易者 / 代币" value="${esc(sigFilter.q)}">`
+  const tb = $('#sig-table tbody')
+  const rows = sigRows().slice(0, 300)
+  const explorer = STATE.explorer || ''
+  tb.innerHTML = rows.map((s) => {
+    const [kl, kc] = KIND[s.kind] || [s.kind, 'wait']
+    const sf = s.safety, sl = sf ? SAFE[sf.status] || [sf.status, 'wait'] : null
+    const facts = sf ? Object.entries(sf.facts).map(([k, v]) => `${k}: ${v}`).join('\n') : ''
+    const safety = !sl ? '' : `<span class="badge ${sl[1]}" title="${esc((sf.reasons.join('\n') + '\n\n' + facts).trim())}">${sl[0]}</span>${sf.reasons.length ? `<span class="why">${esc(sf.reasons.slice(0, 2).join('；'))}${sf.reasons.length > 2 ? ` 等 ${sf.reasons.length} 条` : ''}</span>` : sf.status === 'ok' ? `<span class="why">${esc(sigFacts(sf))}</span>` : ''}`
+    return `<tr class="${sigUnseen.has(s.id) ? 'unseen' : ''}" data-id="${s.id}">
+      <td title="${new Date(s.time).toLocaleString()}" style="white-space:nowrap">${agoText(s.time)}</td>
+      <td><a href="https://fomo.family/profile/${encodeURIComponent(s.handle)}" target="_blank" style="color:var(--blue);text-decoration:none">@${esc(s.handle)}</a></td>
+      <td><span class="badge ${kc}">${kl}</span></td>
+      <td class="tok">${esc(s.symbol)}<span class="sub">${s.token.slice(0, 6)}…${s.token.slice(-4)}<span class="cp" data-act="copy" data-v="${s.token}" title="复制地址">⧉</span></span></td>
+      <td class="num">${s.kind === 'buy' || s.kind === 'sell' ? `<b>${sigUsd(s.sizeUsd)}</b>` : ''}<span class="small" style="display:block">${sigAmt(s.amount)} 枚${s.price ? ` · $${Number(s.price).toPrecision(3)}` : ''}</span></td>
+      <td style="max-width:380px">${esc(s.text)}</td>
+      <td>${safety}</td>
+      <td class="mono"><a class="tx" href="${explorer}/tx/${s.tx}" target="_blank">${s.tx.slice(0, 8)}…${s.tx.slice(-4)}</a></td>
+      <td style="white-space:nowrap">${s.kind === 'buy' ? `<button class="btn sm" data-act="launch" data-v="${s.token}" title="到进场页，代币地址填好">进场</button> <button class="btn sm" data-act="recheck" data-v="${s.token}" title="重新做一遍安全检查">重查</button>` : ''}</td>
+    </tr>`
+  }).join('') || `<tr><td colspan="9" class="placeholder">${SIG.signals.length ? '筛选条件下没有信号' : SIG.traders.length ? '还没抓到信号（新加的钱包先补扫最近 1 小时，之后实时）' : '先添加一个 FOMO 交易者'}</td></tr>`
+}
+const sigFacts = (sf) => { const f = sf.facts; const p = []; if (f.liquidityUsd !== undefined) p.push(`流动性 $${Number(f.liquidityUsd).toLocaleString('en-US')}`); if (f.ageMin !== undefined) p.push(`池龄 ${f.ageMin >= 1440 ? Math.floor(f.ageMin / 1440) + ' 天' : f.ageMin >= 60 ? Math.floor(f.ageMin / 60) + ' 小时' : f.ageMin + ' 分钟'}`); if (f.roundTripLoss) p.push(`往返损耗 ${f.roundTripLoss}`); return p.join(' · ') }
+$('#sig-chips').onclick = (e) => {
+  const c = e.target.closest('.chip2'); if (!c) return
+  if (c.dataset.kind) { const k = c.dataset.kind; if (sigFilter.kinds.has(k)) sigFilter.kinds.delete(k); else sigFilter.kinds.add(k); localStorage.setItem('sigKinds', JSON.stringify([...sigFilter.kinds])) }
+  else sigFilter.safety = sigFilter.safety === c.dataset.safety ? null : c.dataset.safety
+  renderSignals()
+}
+$('#sig-chips').oninput = (e) => { if (e.target.id === 'sig-q') { sigFilter.q = e.target.value; const v = e.target.value; renderSignals(); const q = $('#sig-q'); q.focus(); q.setSelectionRange(v.length, v.length) } }
+$('#sig-table').onclick = async (e) => {
+  const b = e.target.closest('[data-act]'); if (!b) return
+  const v = b.dataset.v
+  if (b.dataset.act === 'copy') { await navigator.clipboard.writeText(v); toast('已复制 ' + v); return }
+  if (b.dataset.act === 'launch') { $('#f-token').value = v; $('#f-token').dispatchEvent(new Event('input')); showPage('launch'); $('#f-token').focus(); return }
+  if (b.dataset.act === 'recheck') { b.disabled = true; try { await api('/api/safety', { token: v }); await loadSignals() } catch (err) { toast(err.message) }; b.disabled = false }
+}
+$('#sig-refresh').onclick = loadSignals
+$('#sig-clear').onclick = async () => { if (!confirm('清空这条链上记录的全部信号？')) return; try { await api('/api/signals/clear', {}); sigSeen(); await loadSignals() } catch (e) { toast(e.message) } }
+$('#sig-notify').onclick = async () => { if (!('Notification' in window)) return toast('这个浏览器不支持桌面通知'); await Notification.requestPermission(); renderSigStatus() }
+setInterval(() => { if ($('#page-signals').classList.contains('on')) { renderSignals(); renderSigStatus() } }, 30000)
+
+// ---- 设置页 + fomo 登录状态（顶栏灯）----
+let FOMO = { configured: false, connected: false, handle: '', error: '' }
+function onFomoStatus(st) {
+  FOMO = st
+  setLight('fomo', !st.configured ? '' : st.connected ? 'ok' : 'bad', !st.configured ? '没配 fomo 账号（设置页贴 Privy token）' : st.connected ? `fomo 已登录 @${st.handle}` : `fomo token 失效: ${st.error}`)
+  if ($('#page-settings').classList.contains('on')) renderFomoStatus()
+  if ($('#page-signals').classList.contains('on')) renderTraders()
+}
+function renderFomoStatus() {
+  const el = $('#st-fomo-status'), st = FOMO
+  el.innerHTML = !st.configured ? '<span class="badge wait">未配置</span>' : st.connected ? `<span class="badge ok">已登录</span> @${esc(st.handle)}${st.expiresAt ? ` · access token ${new Date(st.expiresAt).toLocaleTimeString()} 过期，到时自动续` : ''}` : `<span class="badge warn">失效</span> ${esc(st.error)}`
+}
+async function loadSettings() {
+  let r
+  try { r = await api('/api/settings') } catch (e) { toast(e.message); return }
+  FOMO = r.fomo.status; renderFomoStatus()
+  $('#st-fomo-token').placeholder = r.fomo.token || 'eyJ…'; $('#st-fomo-refresh').placeholder = r.fomo.refreshToken || '…'
+  $('#st-tg-token').placeholder = r.telegram.botToken || (r.telegram.env ? '.env 里已配' : '123456:ABC…'); $('#st-tg-chat').value = r.telegram.chatId || ''
+  $('#st-tg-status').textContent = r.telegram.botToken || r.telegram.env ? `已配置${r.telegram.env && !r.telegram.botToken ? '（来自 .env）' : ''}` : '未配置'
+  $('#st-fs-key').placeholder = r.fomoscan.key || (r.fomoscan.env ? '.env 里已配' : '')
+  $('#st-fs-status').textContent = r.fomoscan.key || r.fomoscan.env ? `已配置${r.fomoscan.env && !r.fomoscan.key ? '（来自 .env）' : ''}` : '未配置'
+}
+const stBusy = async (btn, fn) => { btn.disabled = true; try { await fn() } catch (e) { toast(e.message) } finally { btn.disabled = false } }
+$('#st-fomo-save').onclick = (e) => stBusy(e.target, async () => {
+  const r = await api('/api/settings', { section: 'fomo', token: $('#st-fomo-token').value, refreshToken: $('#st-fomo-refresh').value })
+  $('#st-fomo-token').value = ''; $('#st-fomo-refresh').value = ''
+  onFomoStatus(r.status); toast(r.status.connected ? `fomo 已登录 @${r.status.handle}` : r.status.error); loadSettings()
+})
+$('#st-fomo-test').onclick = (e) => stBusy(e.target, async () => { const r = await api('/api/settings/test', { section: 'fomo' }); onFomoStatus(r.status); toast(r.status.connected ? `fomo 已登录 @${r.status.handle}` : r.status.error || '未配置') })
+$('#st-fomo-clear').onclick = (e) => stBusy(e.target, async () => { if (!confirm('清除 fomo 的 token？')) return; const r = await api('/api/settings', { section: 'fomo', clear: true }); onFomoStatus(r.status); loadSettings() })
+$('#st-tg-save').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings', { section: 'telegram', botToken: $('#st-tg-token').value, chatId: $('#st-tg-chat').value }); $('#st-tg-token').value = ''; toast('已保存'); loadSettings(); loadState(false) })
+$('#st-tg-test').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings/test', { section: 'telegram' }); toast('测试消息已发出，看 Telegram') })
+$('#st-fs-save').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings', { section: 'fomoscan', key: $('#st-fs-key').value }); $('#st-fs-key').value = ''; toast('已保存'); loadSettings() })
+
 // ---- 任务列表 ----
 const fmtDur = (ms) => ms < 60000 ? `${Math.round(ms / 1000)}s` : ms < 3600000 ? `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s` : `${(ms / 3600000).toFixed(1)}h`
 function renderTasks() {
@@ -1130,6 +1493,7 @@ async function switchTo(c, p) {
   await loadState(true)
   drawShape(); loadPools()
   if ($('#page-positions').classList.contains('on')) loadPositions(true)
+  if ($('#page-signals').classList.contains('on')) loadSignals()
   if ($('#page-calendar').classList.contains('on')) loadCalendar()
 }
 // 换链：协议用该链上次选过的（记在 localStorage），没有就用默认（服务端按链给第一个）

@@ -57,7 +57,8 @@ export async function discoverQuotePools(c: Clients, token: Address): Promise<Fo
 }
 
 // 网页界面用：该代币的全部池子，每个标出能不能被本工具复用及原因。fee24h = 24h 成交 × 费率，是这个池一天分给全体 LP 的手续费（动态费率池按 Gecko 名字里的估计值算，费率不明的为 null）
-export type TokenPool = { id: Hex; name: string; dex: string; liquidityUsd: number; volume24h: number; fee24h: number | null; fee: number; feeText: string; spacing: number; hooks: Address | null; usable: boolean; empty: boolean; status: string }
+export type TokenPool = { id: Hex; name: string; dex: string; liquidityUsd: number; volume24h: number; fee24h: number | null; fee: number; feeText: string; spacing: number; hooks: Address | null; usable: boolean; empty: boolean; status: string
+  createdAt: number | null; fdvUsd: number | null; change24h: number | null; buyers24h: number; sellers24h: number } // 后一行是 Gecko 给的，信号页的安全检查用（池龄 / FDV / 24h 涨跌 / 买卖人数）
 export async function listTokenPools(c: Clients, token: Address): Promise<TokenPool[]> {
   const { lp, cfg } = c
   const out: TokenPool[] = []
@@ -68,7 +69,9 @@ export async function listTokenPools(c: Clients, token: Address): Promise<TokenP
     const name = String(a.name ?? ''), id = String(a.address).toLowerCase() as Hex
     const feeN = feeFromName(name) ?? 0
     const volume24h = Number(a.volume_usd?.h24 ?? 0)
-    const base: TokenPool = { id, name, dex, liquidityUsd: Number(a.reserve_in_usd ?? 0), volume24h, fee24h: feeN ? (volume24h * feeN) / 1_000_000 : null, fee: feeN, feeText: feeN ? `${feeN / 10000}%` : '—', spacing: 0, hooks: null, usable: false, empty: false, status: '' }
+    const numOr = (v: unknown) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
+    const base: TokenPool = { id, name, dex, liquidityUsd: Number(a.reserve_in_usd ?? 0), volume24h, fee24h: feeN ? (volume24h * feeN) / 1_000_000 : null, fee: feeN, feeText: feeN ? `${feeN / 10000}%` : '—', spacing: 0, hooks: null, usable: false, empty: false, status: '',
+      createdAt: a.pool_created_at ? Date.parse(a.pool_created_at) || null : null, fdvUsd: numOr(a.fdv_usd), change24h: numOr(a.price_change_percentage?.h24), buyers24h: Number(a.transactions?.h24?.buyers ?? 0), sellers24h: Number(a.transactions?.h24?.sellers ?? 0) }
     if (String(p.relationships?.dex?.data?.id ?? '') !== GECKO_DEX[cfg.name]?.[c.protocol]) out.push({ ...base, status: `不是 ${lp.label}（${dex}）` })
     else if (!new RegExp(cfg.quote.symbol).test(name)) out.push({ ...base, status: `计价不是 ${cfg.quote.symbol}（${name.split('/')[1]?.trim().split(' ')[0] ?? '?'}）` })
     else {
