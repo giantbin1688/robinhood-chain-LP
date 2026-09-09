@@ -47,7 +47,7 @@ export function seller(c: Clients, token: Address, symbol: string, fmtT: (x: big
   return {
     plan: async (amount: bigint, soft = false) => { // soft = 报不出价只警告并返回空（批量领取时别的币照常）
       const got = await offers(amount)
-      if (got.length === 0) { if (!soft) die('拿不到卖币报价，放弃'); log(`${symbol} 拿不到卖币报价，领到的 ${symbol} 留在钱包`); return got }
+      if (got.length === 0) { if (!soft) die('拿不到卖币报价，放弃'); log(`${symbol} 现在拿不到卖币报价，领完再重试卖出`); return got }
       log(`计划: 卖出 ≈${fmtT(amount)} ${symbol}：${got.map((x) => x.text).join('；')}${got.length > 1 ? `，走 ${got[0].via}` : ''}${!deps.okx && via !== 'uniswap' ? '（未配置 OKX_API_KEY，只有 Uniswap）' : ''}`)
       return got
     },
@@ -127,9 +127,8 @@ export async function collectFees(o: CollectOptions) {
     if (g.positions.length === 0) continue
     if (o.sell && g.tokens > 0n) {
       g.sell = seller(o.clients, token, symbol, fmtT, o.via, o.slippage)
-      // 批量时某个币报不出价（比如数量太小）只跳过它的卖出，别的照常；单个币则直接停下
+      // 批量时某个币现在报不出价（比如数量太小）不拦着别的币，先领；领完卖币那步会重试报价直到卖出。单个币则直接停下
       g.offers = await g.sell.plan(g.tokens, multi)
-      if (g.offers.length === 0) g.sell = null
     }
     totalUsdg += g.usdg
     groups.push(g)
@@ -169,7 +168,14 @@ export async function collectFees(o: CollectOptions) {
     for (const { g, amount } of selling) { const p = await g.sell!.prepare(amount, kit); if (p) prepared.push(p) }
     const results = await kit.sendBatch(prepared)
     const failed = results.filter((r) => !r.ok)
-    if (failed.length) log(`${failed.length} 笔卖币失败，对应代币留在钱包: ${failed.map((r) => r.label).join('、')}`)
+    if (failed.length) log(`${failed.length} 笔卖币上链回滚: ${failed.map((r) => r.label).join('、')}`)
+    // 同时广播只是争取一次搞定：报不出价、模拟不过（报价过期）、上链回滚的币不能就这么留在钱包，逐个转入"卖出为止"的重试循环
+    for (const { g, amount } of selling) {
+      const i = groups.indexOf(g)
+      if ((await balanceOf(g.token)) < balances[i]) continue // 余额少了 = 这一笔已经卖掉
+      log(`${g.symbol} 没卖出去，改为逐笔重试直到卖出`)
+      await g.sell!.sell(amount, kit)
+    }
   }
   log(`完成: 共收回 ${fmtU((await balanceOf(Q.address)) - usdgStart)} ${Q.symbol}${groups.some((g) => g.tokens > 0n && !g.sell) ? '，未卖的代币留在钱包' : ''}`)
   log(`gas 合计: ${kit.stats.txCount} 笔，${trim(kit.stats.gasTotal, 18)} ${o.clients.cfg.native.symbol} ($${usd(kit.stats.gasTotal)})`)
@@ -244,15 +250,15 @@ export async function withdraw(o: WithdrawOptions) {
     let ps = await refresh(ps0)
     const label = `撤仓位 ${ps.map((p) => p.id).join(',')}`
     for (let attempt = 1; ; attempt++) {
-      try { await kit.sendEstimated(label, burnTx(ps)); break } catch (e) {
+      try { await kit.sendEstimated(label, burnTx(ps)); break } catch (e: any) {
         const r = lp.slippageRevert(e)
-        if (!r || attempt >= 5) throw e
-        if (r.limit !== undefined && r.actual !== undefined) {
+        if (!(r || e?.onchain) || attempt >= 5) throw e
+        if (r?.limit !== undefined && r.actual !== undefined) {
           const hit = ps.find((p) => floor(p.amount0) === r.limit || floor(p.amount1) === r.limit)
           const cur = hit && floor(hit.amount1) === r.limit ? hit.pool.currency1 : ps[0].pool.currency0
           const f = (x: bigint) => trim(x, same(cur, Q.address) ? Q.decimals : decimals)
           log(`${label} 回滚: 池价变动，能拿回 ${f(r.actual)} ${symOf(cur)} 低于最少 ${f(r.limit)}，等 3 秒按新池价重算（第 ${attempt} 次）`)
-        } else log(`${label} 回滚: 池价变动超出滑点，等 3 秒按新池价重算（第 ${attempt} 次）`)
+        } else log(`${label} ${e?.onchain ? '上链后回滚（模拟时还能过，多半是同一区块里池价被推过了滑点）' : '回滚: 池价变动超出滑点'}，等 3 秒按新池价重算（第 ${attempt} 次）`)
         await sleep(3000)
         ps = await refresh(ps)
       }
