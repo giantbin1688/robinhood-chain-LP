@@ -47,6 +47,7 @@ export interface Lp {
   mintTx(kit: Kit, pool: Pool, specs: MintSpec[], owner: Address, init?: bigint): Promise<Tx> // 一笔交易 mint 多个仓位（init 给了先建池）；内部先做好授权
   mintIds(logs: Log[]): bigint[]
   burnTx(pool: Pool, positions: { id: bigint; liquidity: bigint; amount0Min: bigint; amount1Min: bigint }[], recipient: Address): Tx
+  decreaseTx(pool: Pool, positions: { id: bigint; liquidity: bigint; amount0Min: bigint; amount1Min: bigint }[], recipient: Address): Tx // 撤一部分流动性 + 全部手续费，NFT 保留
   collectTx(groups: { pool: Pool; ids: bigint[] }[], recipient: Address): Tx
   poolSwapTx(kit: Kit, pool: Pool, zeroForOne: boolean, amount: { exactIn: bigint; minOut: bigint } | { exactOut: bigint; maxIn: bigint }, deadline: bigint): Promise<Tx>
   slippageRevert(e: unknown): SlipRevert | null

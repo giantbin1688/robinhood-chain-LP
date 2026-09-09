@@ -361,9 +361,15 @@ function exitArgs(b: any) {
   args.push(`--via=${via(b.via)}`)
   if (b.keepTokens) args.push('--keep-tokens')
   else if (b.sellAll) args.push('--sell-all')
+  if (b.percent !== undefined && b.percent !== null && b.percent !== '') {
+    const p = Number(b.percent)
+    if (!(Number.isFinite(p) && p >= 1 && p <= 100)) throw new Error('撤出比例必须是 1~100 的数字')
+    if (p < 100) args.push(`--percent=${p}`)
+  }
   args.push(b.dryRun ? '--dry-run' : '--yes')
   return args
 }
+const pctLabel = (b: any) => { const p = Number(b.percent); return b.percent !== undefined && b.percent !== '' && Number.isFinite(p) && p < 100 ? `${p}% ` : '' }
 function watchArgs(b: any) {
   if (!isAddress(str(b.token))) throw new Error('代币地址不合法')
   const args = [`--token=${str(b.token)}`]
@@ -429,7 +435,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/exit') {
       needKey(); const b = await readBody(req); const sel = selOf(b)
-      const job = startJob(sel, 'exit', `${b.dryRun ? '撤退演练' : '撤退'} ${ids(b.positions).length ? '#' + ids(b.positions).join(',#') : str(b.symbol) || str(b.token).slice(0, 10) + '…'}`, 'src/exit.ts', exitArgs(b), { dryRun: !!b.dryRun, token: isAddress(str(b.token)) ? str(b.token) : undefined, positions: ids(b.positions) })
+      const job = startJob(sel, 'exit', `${b.dryRun ? '撤退演练' : '撤退'} ${pctLabel(b)}${ids(b.positions).length ? '#' + ids(b.positions).join(',#') : str(b.symbol) || str(b.token).slice(0, 10) + '…'}`, 'src/exit.ts', exitArgs(b), { dryRun: !!b.dryRun, token: isAddress(str(b.token)) ? str(b.token) : undefined, positions: ids(b.positions) })
       return json(res, 200, { job: summary(job) })
     }
     if (req.method === 'POST' && url.pathname === '/api/collect') { // 只领手续费：exit.ts --collect（sell = 领到的币顺便卖成计价币）

@@ -1,4 +1,4 @@
-// 撤退：撤掉某个代币的全部 LP 仓位（本金 + 手续费），再把代币全部换回计价币（OKX DEX / Uniswap 取报价更好的一个）
+// 撤退：撤掉某个代币的全部 LP 仓位（本金 + 手续费），再把代币全部换回计价币（OKX DEX / Uniswap 取报价更好的一个）；--percent 只撤一部分，NFT 保留
 // 既是命令行入口（npm run exit），也导出 withdraw() 给监控（monitor.ts）调用
 import { createInterface } from 'node:readline/promises'
 import { pathToFileURL } from 'node:url'
@@ -33,7 +33,7 @@ export async function findPositions(c: Clients, token?: Address, explicit?: bigi
     if (!slots.has(p.pool.id)) slots.set(p.pool.id, lp.slot0(p.pool))
     const { sqrtP, tick } = await slots.get(p.pool.id)!
     const [amount0, amount1] = v4.amountsForLiquidity(sqrtP, v4.getSqrtRatioAtTick(p.tickLower), v4.getSqrtRatioAtTick(p.tickUpper), p.liquidity)
-    return { ...p, tick, amount0, amount1, candidates: candidates.size }
+    return { ...p, tick, sqrtP, amount0, amount1, candidates: candidates.size }
   }))
 }
 export type Position = Awaited<ReturnType<typeof findPositions>>[number]
@@ -182,8 +182,9 @@ export async function collectFees(o: CollectOptions) {
 }
 
 // positions 给了就只撤这些仓位、只卖撤出来的币（同一代币可能还有别的进程在管的仓位；sellAll 则连钱包里原有的一起卖光）；否则撤该代币全部仓位、卖光钱包里的币
+// percent < 100 = 部分撤出：每个仓位只撤这个比例的流动性（本金按比例，手续费不分比例、一并全领走），NFT 保留、剩下的继续做 LP
 export type WithdrawOptions = {
-  token?: Address; positions?: bigint[]; via: string; slippage: number; lpSlippage: number; keepTokens: boolean; sellAll?: boolean; yes: boolean; dryRun: boolean; clients: Clients
+  token?: Address; positions?: bigint[]; via: string; slippage: number; lpSlippage: number; keepTokens: boolean; sellAll?: boolean; percent?: number; yes: boolean; dryRun: boolean; clients: Clients
   json?: boolean // 计划确定后额外打印一行 "@@plan {json}" 给网页界面用
 }
 export async function withdraw(o: WithdrawOptions) {
@@ -194,12 +195,19 @@ export async function withdraw(o: WithdrawOptions) {
     if (!p) die(`仓位 ${o.positions![0]} 不存在、已被撤销或不在钱包名下`)
     return same(p.pool.currency0, Q.address) ? p.pool.currency1 : p.pool.currency0
   })()
-  const [{ symbol, decimals }, ethPrice, usdgStart, tokenStart, positions] = await Promise.all([tokenMeta(pub, token), nativePriceUsd(o.clients), balanceOf(Q.address), balanceOf(token), findPositions(o.clients, token, o.positions)])
+  const [{ symbol, decimals }, ethPrice, usdgStart, tokenStart, found] = await Promise.all([tokenMeta(pub, token), nativePriceUsd(o.clients), balanceOf(Q.address), balanceOf(token), findPositions(o.clients, token, o.positions)])
   const usd = (wei: bigint) => (Number(formatEther(wei)) * ethPrice).toFixed(2)
   const fmtU = (x: bigint) => trim(x, Q.decimals), fmtT = (x: bigint) => trim(x, decimals)
   const symOf = (t: Address) => (same(t, Q.address) ? Q.symbol : symbol)
   log(`${cfg.label} / ${lp.label} | 钱包 ${wallet} | ${fmtU(usdgStart)} ${Q.symbol}, ${fmtT(tokenStart)} ${symbol} | ${cfg.native.symbol} $${ethPrice.toFixed(2)}`)
-  if (positions.length === 0) die(o.positions ? `仓位 ${o.positions.join(',')} 不在钱包名下或已没有流动性` : `钱包名下没有 ${symbol}/${Q.symbol} 的有效仓位`)
+  if (found.length === 0) die(o.positions ? `仓位 ${o.positions.join(',')} 不在钱包名下或已没有流动性` : `钱包名下没有 ${symbol}/${Q.symbol} 的有效仓位`)
+  const pct = o.percent ?? 100, partial = pct < 100
+  if (!(pct > 0 && pct <= 100)) die(`撤出比例必须在 (0, 100] 之间，当前 ${pct}`)
+  // 部分撤出：把每个仓位的流动性按比例截下来、本金按截后的流动性精确重算（不能拿全量本金按比例缩：流动性取整后能差好几 wei，滑点 0 时必回滚），后面的计划 / 发送都只看这一份
+  const bp = BigInt(Math.round(pct * 100))
+  const cut = (p: Position) => { const liquidity = (p.liquidity * bp) / 10_000n; const [amount0, amount1] = v4.amountsForLiquidity(p.sqrtP, v4.getSqrtRatioAtTick(p.tickLower), v4.getSqrtRatioAtTick(p.tickUpper), liquidity); return { ...p, liquidity, amount0, amount1 } }
+  const positions = partial ? found.map(cut).filter((p) => p.liquidity > 0n) : found
+  if (positions.length === 0) die(`按 ${pct}% 截下来的流动性为 0，仓位太小，直接全撤吧`)
   const sellHeld = o.positions && !o.sellAll ? 0n : tokenStart // 钱包里原有的币要不要一起卖
 
   // ---- 计划 ----
@@ -209,16 +217,16 @@ export async function withdraw(o: WithdrawOptions) {
     const [u, t] = same(p.pool.currency1, token) ? [p.amount0, p.amount1] : [p.amount1, p.amount0]
     expectUsdg += u; expectToken += t
     groups.set(p.pool.id, [...(groups.get(p.pool.id) ?? []), p])
-    log(`仓位 ${p.id}: ${symbol}/${Q.symbol} ${feeText(p.pool)} ticks [${p.tickLower}, ${p.tickUpper}]，≈${fmtU(u)} ${Q.symbol} + ${fmtT(t)} ${symbol}`)
+    log(`仓位 ${p.id}: ${symbol}/${Q.symbol} ${feeText(p.pool)} ticks [${p.tickLower}, ${p.tickUpper}]，${partial ? `撤 ${pct}% ` : ''}≈${fmtU(u)} ${Q.symbol} + ${fmtT(t)} ${symbol}`)
   }
   const sellAmount = sellHeld + expectToken
-  log(`计划: 撤 ${positions.length} 个仓位（${groups.size} 笔交易），拿回 ≈${fmtU(expectUsdg)} ${Q.symbol} + ${fmtT(expectToken)} ${symbol}`)
+  log(`计划: 撤 ${positions.length} 个仓位${partial ? `的 ${pct}% 流动性（手续费全领，NFT 保留）` : ''}（${groups.size} 笔交易），拿回 ≈${fmtU(expectUsdg)} ${Q.symbol} + ${fmtT(expectToken)} ${symbol}`)
 
-  // 卖币报价：Uniswap 和 OKX 同时报价，能换回更多计价币的排前面
-  const s = seller(o.clients, token, symbol, fmtT, o.via, o.slippage)
-  const sellOffers: SwapOffer[] = !o.keepTokens && sellAmount > 0n ? await s.plan(sellAmount) : []
+  // 卖币报价：Uniswap 和 OKX 同时报价，能换回更多计价币的排前面（不卖币就不碰聚合器，没配 key 也能撤）
+  const s = o.keepTokens ? null : seller(o.clients, token, symbol, fmtT, o.via, o.slippage)
+  const sellOffers: SwapOffer[] = s && sellAmount > 0n ? await s.plan(sellAmount) : []
   if (o.json) console.log('@@plan ' + JSON.stringify({
-    kind: 'exit', chain: cfg.name, protocol: lp.protocol, quote: Q.symbol, wallet, token: { address: token, symbol, decimals }, usdg: fmtU(usdgStart), held: fmtT(tokenStart), ethPrice: ethPrice.toFixed(2),
+    kind: 'exit', chain: cfg.name, protocol: lp.protocol, quote: Q.symbol, wallet, token: { address: token, symbol, decimals }, usdg: fmtU(usdgStart), held: fmtT(tokenStart), ethPrice: ethPrice.toFixed(2), percent: pct,
     positions: positions.map((p) => { const [u, t] = same(p.pool.currency1, token) ? [p.amount0, p.amount1] : [p.amount1, p.amount0]; return { id: p.id.toString(), fee: p.pool.fee / 10000, feeText: feeText(p.pool), tickLower: p.tickLower, tickUpper: p.tickUpper, usdg: fmtU(u), token: fmtT(t), kind: p.kind } }),
     txCount: groups.size, expectUsdg: fmtU(expectUsdg), expectToken: fmtT(expectToken), sellAmount: fmtT(sellAmount), keepTokens: o.keepTokens,
     offers: sellOffers.map((x) => ({ via: x.via, out: fmtU(x.out), text: x.text })), lpSlippage: o.lpSlippage,
@@ -226,15 +234,15 @@ export async function withdraw(o: WithdrawOptions) {
   // 撤仓交易：最少拿回量 = 预估 × (1 - LP_SLIPPAGE)。预估（amountsForLiquidity）向上取整、链上返还向下取整，最多差 1 wei，
   // 所以滑点为 0 时最少量得比预估再少 1 wei，否则必然回滚 MinimumAmountInsufficient
   const floor = (x: bigint) => { const y = (x * BigInt(Math.round((100 - o.lpSlippage) * 100))) / 10_000n; return y === x && x > 0n ? x - 1n : y }
-  const burnTx = (ps: Position[]) => lp.burnTx(ps[0].pool, ps.map((p) => ({ id: p.id, liquidity: p.liquidity, amount0Min: floor(p.amount0), amount1Min: floor(p.amount1) })), wallet)
+  const burnTx = (ps: Position[]) => (partial ? lp.decreaseTx : lp.burnTx)(ps[0].pool, ps.map((p) => ({ id: p.id, liquidity: p.liquidity, amount0Min: floor(p.amount0), amount1Min: floor(p.amount1) })), wallet)
   if (o.dryRun) {
-    for (const [, ps] of groups) log(`模拟撤仓 ${ps.map((p) => p.id).join(',')}: OK，gas ${await pub.estimateGas({ account: wallet, ...burnTx(ps) })}`)
+    for (const [, ps] of groups) log(`模拟撤仓 ${ps.map((p) => p.id).join(',')}${partial ? ` ${pct}%` : ''}: OK，gas ${await pub.estimateGas({ account: wallet, ...burnTx(ps) })}`)
     log('演练模式，到此为止')
     return { usdgGained: 0n, tokenLeft: tokenStart }
   }
   if (!o.yes) {
     const rl = createInterface({ input: process.stdin, output: process.stdout })
-    const ans = await rl.question('确认撤退? (y/N) ')
+    const ans = await rl.question(partial ? `确认撤出 ${pct}%? (y/N) ` : '确认撤退? (y/N) ')
     rl.close()
     if (ans.trim().toLowerCase() !== 'y') die('已取消')
   }
@@ -248,7 +256,7 @@ export async function withdraw(o: WithdrawOptions) {
   const kit = txKit(o.clients, usd, symOf)
   for (const [, ps0] of groups) {
     let ps = await refresh(ps0)
-    const label = `撤仓位 ${ps.map((p) => p.id).join(',')}`
+    const label = `撤仓位 ${ps.map((p) => p.id).join(',')}${partial ? ` ${pct}%` : ''}`
     for (let attempt = 1; ; attempt++) {
       try { await kit.sendEstimated(label, burnTx(ps)); break } catch (e: any) {
         const r = lp.slippageRevert(e)
@@ -265,11 +273,11 @@ export async function withdraw(o: WithdrawOptions) {
     }
   }
   const [usdgAfterBurn, tokenBal] = await Promise.all([balanceOf(Q.address), balanceOf(token)])
-  log(`撤仓完成: 拿回 ${fmtU(usdgAfterBurn - usdgStart)} ${Q.symbol} + ${fmtT(tokenBal - tokenStart)} ${symbol}（含手续费）`)
+  log(`撤仓完成: 拿回 ${fmtU(usdgAfterBurn - usdgStart)} ${Q.symbol} + ${fmtT(tokenBal - tokenStart)} ${symbol}（含手续费${partial ? `；剩下 ${100 - pct}% 还在仓位里` : ''}）`)
 
   // ---- 2) 卖币：按实际余额重新报价，走更好的一家 ----
   const toSell = sellHeld + (tokenBal - tokenStart)
-  if (!o.keepTokens && toSell > 0n) await s.sell(toSell, kit)
+  if (s && toSell > 0n) await s.sell(toSell, kit)
   const [usdgEnd, tokenEnd] = await Promise.all([balanceOf(Q.address), balanceOf(token)])
   log(`完成: 共收回 ${fmtU(usdgEnd - usdgStart)} ${Q.symbol}${tokenEnd > 0n ? `，钱包还剩 ${fmtT(tokenEnd)} ${symbol}` : ''}`)
   log(`gas 合计: ${kit.stats.txCount} 笔，${trim(kit.stats.gasTotal, 18)} ${cfg.native.symbol} ($${usd(kit.stats.gasTotal)})`)
@@ -289,6 +297,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },  // 撤仓最少拿回量的余量 %
       'keep-tokens': { type: 'boolean', default: false },                   // 只撤仓位，不卖币
       'sell-all': { type: 'boolean', default: false },                      // --position 模式下也把钱包里原有的币一起卖光
+      percent: { type: 'string' },                                          // 只撤这个百分比的流动性（手续费全领，NFT 保留）；不给 = 全撤并销毁 NFT
       collect: { type: 'boolean', default: false },                         // 只领手续费，本金不动（需要 --position）
       sell: { type: 'boolean', default: false },                            // --collect 时把领到的代币卖成计价币
       yes: { type: 'boolean', default: false },
@@ -297,8 +306,9 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       json: { type: 'boolean', default: false },                            // 给网页界面用：计划确定后打印一行 "@@plan {json}"
     },
   })
-  if (!opt.token && !opt.position) die('用法: npm run exit -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <代币地址> [--position <仓位id,仓位id>] [--via okx|uniswap|best] [--keep-tokens] [--sell-all] [--collect [--sell]] [--yes] [--dry-run]')
+  if (!opt.token && !opt.position) die('用法: npm run exit -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <代币地址> [--position <仓位id,仓位id>] [--percent <1-100>] [--via okx|uniswap|best] [--keep-tokens] [--sell-all] [--collect [--sell]] [--yes] [--dry-run]')
   if (!['okx', 'uniswap', 'best'].includes(opt.via)) die('--via 只能是 okx / uniswap / best')
+  if (opt.collect && opt.percent !== undefined) die('--collect 只领手续费，不能和 --percent 一起用')
   const positions = opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined
   const clients = await makeClients({ from: opt.from, needKey: !opt['dry-run'] })
   if (opt.collect) {
@@ -309,6 +319,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   await withdraw({
     token: opt.token ? getAddress(opt.token) : undefined, positions, via: opt.via,
     slippage: num('--slippage', opt.slippage, 0, 50), lpSlippage: num('--lp-slippage', opt['lp-slippage'], 0, 50), keepTokens: opt['keep-tokens'], sellAll: opt['sell-all'], yes: opt.yes, dryRun: opt['dry-run'], json: opt.json,
+    percent: opt.percent === undefined ? undefined : num('--percent', opt.percent, 1, 100),
     clients,
   })
   await sleep(100); process.exit(0)

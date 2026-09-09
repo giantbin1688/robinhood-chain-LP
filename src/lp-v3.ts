@@ -176,6 +176,11 @@ export async function v3Lp(d: LpDeps): Promise<Lp> {
       encodeFunctionData({ abi: npmAbi, functionName: 'collect', args: [{ tokenId: x.id, recipient, amount0Max: maxUint128, amount1Max: maxUint128 }] }),
       encodeFunctionData({ abi: npmAbi, functionName: 'burn', args: [x.id] }),
     ])] }) }),
+    // 撤一部分：decreaseLiquidity 指定数量 -> collect 领走撤出的本金 + 全部手续费，不 burn
+    decreaseTx: (_p, ps, recipient) => ({ to: NPM, data: encodeFunctionData({ abi: npmAbi, functionName: 'multicall', args: [ps.flatMap((x) => [
+      encodeFunctionData({ abi: npmAbi, functionName: 'decreaseLiquidity', args: [{ tokenId: x.id, liquidity: x.liquidity, amount0Min: x.amount0Min, amount1Min: x.amount1Min, deadline: deadline() }] }),
+      encodeFunctionData({ abi: npmAbi, functionName: 'collect', args: [{ tokenId: x.id, recipient, amount0Max: maxUint128, amount1Max: maxUint128 }] }),
+    ])] }) }),
     collectTx: (groups, recipient) => ({ to: NPM, data: encodeFunctionData({ abi: npmAbi, functionName: 'multicall', args: [groups.flatMap((g) => g.ids.map((id) =>
       encodeFunctionData({ abi: npmAbi, functionName: 'collect', args: [{ tokenId: id, recipient, amount0Max: maxUint128, amount1Max: maxUint128 }] })))] }) }),
     poolSwapTx: async (kit, p, zeroForOne, amount, dl) => {

@@ -245,6 +245,7 @@ export async function singletonLp(protocol: ProtocolName, d: LpDeps): Promise<Lp
     },
     mintIds: (logs) => parseEventLogs({ abi: posmAbi, eventName: 'Transfer', logs }).filter((l) => same(l.address, POSM) && same(l.args.from!, ZERO)).map((l) => l.args.id!),
     burnTx: (pool, ps, recipient) => ({ to: POSM, data: encodeFunctionData({ abi: posmAbi, functionName: 'modifyLiquidities', args: [v4.encodeBurnUnlockData(pool, ps, recipient), BigInt(Math.floor(Date.now() / 1000) + 600)] }) }),
+    decreaseTx: (pool, ps, recipient) => ({ to: POSM, data: encodeFunctionData({ abi: posmAbi, functionName: 'modifyLiquidities', args: [v4.encodeDecreaseUnlockData(pool, ps, recipient), BigInt(Math.floor(Date.now() / 1000) + 600)] }) }),
     // 所有池的领取合成 1 笔：multicall([modifyLiquidities(池1), modifyLiquidities(池2), …])；只有一个池就直接调
     collectTx: (groups, recipient) => {
       const deadline = BigInt(Math.floor(Date.now() / 1000) + 600)

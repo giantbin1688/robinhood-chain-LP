@@ -406,9 +406,12 @@
   <div class="card" id="cal-day" style="margin-top:12px;display:none"></div>
 </section>
 
-<!-- 发交易确认框：原生 dialog，正文 + 一个可选勾选项（撤退：顺便卖光钱包里全部该币 = --sell-all；领取：把领到的币卖成 USDG = --sell） -->
+<!-- 发交易确认框：原生 dialog，正文 + 一个可选勾选项（撤退：顺便卖光钱包里全部该币 = --sell-all；领取：把领到的币卖成 USDG = --sell）+ 部分撤出时的比例输入（= --percent） -->
 <dialog id="dlg-tx"><form method="dialog">
   <div id="dlg-tx-msg" style="font-size:13px;line-height:1.6"></div>
+  <div id="dlg-tx-pct" style="display:none;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0 0;font-size:13px">撤出比例 <input type="number" id="dlg-tx-pct-in" min="1" max="99" step="1" value="50" style="width:72px"> %
+    <span style="display:flex;gap:5px"><button type="button" class="btn sm" data-pct="25">25%</button><button type="button" class="btn sm" data-pct="50">50%</button><button type="button" class="btn sm" data-pct="75">75%</button></span>
+    <span class="hint" style="width:100%;margin:0">1~99；要全撤请用"撤退"按钮（会销毁 NFT）</span></div>
   <label id="dlg-tx-opt" style="display:flex;gap:7px;align-items:flex-start;margin:12px 0 0;font-size:12px;color:var(--muted)"><input type="checkbox" id="dlg-tx-check" style="margin-top:3px"><span id="dlg-tx-opt-text"></span></label>
   <div class="actions" style="justify-content:flex-end"><button class="btn" value="cancel">取消</button><button class="btn danger" value="ok">确认发送交易</button></div>
 </form></dialog>
@@ -534,13 +537,24 @@ function onStatus(m, was) {
   if ((was && was.running && !m.running) || (m.phase === 'watch' && (!was || was.phase !== 'watch'))) { loadState(false); if ($('#page-positions').classList.contains('on')) loadPositions(m.kind !== 'watch' && !m.dryRun); if ($('#page-calendar').classList.contains('on') && !m.dryRun) loadCalendar() }
 }
 // 发交易前的确认：msg 是正文（HTML），opt 是勾选项文字（null = 不显示）；返回 { checked } 或 null（取消）
-function askTx(msg, opt) {
+// pct 给了（初始值）就显示比例输入，返回值里带 percent（1~99 之外不让确认）
+function askTx(msg, opt, pct) {
   const dlg = $('#dlg-tx')
   $('#dlg-tx-msg').innerHTML = msg + '<br>在主网发送交易，不可撤销。'
   $('#dlg-tx-opt-text').innerHTML = opt ?? ''; $('#dlg-tx-opt').style.display = opt ? '' : 'none'; $('#dlg-tx-check').checked = false
+  $('#dlg-tx-pct').style.display = pct ? 'flex' : 'none'; $('#dlg-tx-pct-in').value = pct || 50
   dlg.returnValue = ''
-  return new Promise((resolve) => { dlg.onclose = () => resolve(dlg.returnValue === 'ok' ? { checked: $('#dlg-tx-check').checked } : null); dlg.showModal() })
+  return new Promise((resolve) => {
+    dlg.onclose = () => {
+      if (dlg.returnValue !== 'ok') return resolve(null)
+      const percent = pct ? Number($('#dlg-tx-pct-in').value) : undefined
+      if (pct && !(Number.isInteger(percent) && percent >= 1 && percent <= 99)) { toast('撤出比例要是 1~99 的整数'); return resolve(null) }
+      resolve({ checked: $('#dlg-tx-check').checked, percent })
+    }
+    dlg.showModal()
+  })
 }
+$('#dlg-tx-pct').onclick = (e) => { const b = e.target.closest('[data-pct]'); if (b) $('#dlg-tx-pct-in').value = b.dataset.pct }
 async function stopJob(id) {
   const m = job(id).meta
   if (!m || !confirm(`停止任务 #${id}「${m.label}」？已发出的交易不受影响${m.kind === 'watch' || m.phase === 'watch' ? '；停止后该仓位不再自动撤退' : ''}。`)) return
@@ -796,7 +810,7 @@ function renderExitPlan(p) {
   const sym = esc(p.token.symbol)
   $('#card-exit').innerHTML = kv([
     ['仓位', p.positions.map((x) => `#${x.id} ${sym}/${QS} ${x.feeText || x.fee + '%'} ≈${x.usdg} ${QS} + ${x.token} ${sym}${x.kind === 'bridge' ? '（过渡）' : ''}`).join('<br>')],
-    ['撤仓', `${p.positions.length} 个仓位，${p.txCount} 笔交易，拿回 ≈${p.expectUsdg} ${QS} + ${p.expectToken} ${sym}`],
+    ['撤仓', `${p.positions.length} 个仓位${p.percent && p.percent < 100 ? `的 <b>${p.percent}%</b> 流动性（手续费全领，NFT 保留）` : ''}，${p.txCount} 笔交易，拿回 ≈${p.expectUsdg} ${QS} + ${p.expectToken} ${sym}`],
     ['卖币', p.keepTokens ? '不卖，代币留在钱包' : p.offers.length ? `≈${p.sellAmount} ${sym}：${p.offers.map((o) => esc(o.text)).join('；')}，走 ${p.offers[0].via}` : '无'],
   ])
 }
@@ -876,7 +890,7 @@ async function loadPositions(full) {
         : `<span class="exp big" data-act="hist" data-id="${p.id}" style="color:${pnlCol(pnl)}" title="现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入（不含进场换币成本）。点击看明细">${histOpen.has(p.id) ? '▾' : '▸'} ${money(pnl)}</span><span class="sub" style="color:${pnlCol(pnl)}">${invested > 0 ? signed((pnl / invested) * 100) : ''}</span>`}</td>
       <td class="num">${dpr === null ? '<span class="small">—</span>' : `<span class="big" style="color:${pnlCol(dpr)}" title="每天 ${signed(dpr, 2)} = uPNL ÷ 投入 ÷ 持仓天数">${signed(dpr, 2)}</span>`}</td>
       <td><span class="btns">
-        <button class="btn sm" data-act="collect" data-id="${p.id}" data-sym="${sym}" data-fees="${fmtUsd(unclaimed)}" data-feetoken="${fmtAmt(p.feesToken)}" ${unclaimed < 0.01 ? 'disabled' : ''} title="领取未领手续费 ≈${fmtUsd(unclaimed)}，本金不动；确认框里可勾选顺便把领到的币卖成 ${QS}">领取</button><button class="btn sm danger" data-act="exit" data-id="${p.id}" data-sym="${sym}" title="撤掉这一个仓位，卖掉撤出来的币">撤退</button>
+        <button class="btn sm" data-act="collect" data-id="${p.id}" data-sym="${sym}" data-fees="${fmtUsd(unclaimed)}" data-feetoken="${fmtAmt(p.feesToken)}" ${unclaimed < 0.01 ? 'disabled' : ''} title="领取未领手续费 ≈${fmtUsd(unclaimed)}，本金不动；确认框里可勾选顺便把领到的币卖成 ${QS}">领取</button><button class="btn sm" data-act="exit-part" data-id="${p.id}" data-sym="${sym}" title="只撤一部分流动性（比例在确认框里填），手续费一并领走，NFT 保留、剩下的继续做 LP；撤出来的币卖成 ${QS}">撤 %</button><button class="btn sm danger" data-act="exit" data-id="${p.id}" data-sym="${sym}" title="撤掉这一个仓位，卖掉撤出来的币">撤退</button>
         ${p.watchJob !== null ? `<button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button><button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}" title="停止监控 #${p.watchJob}">停止</button>` : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${sym}" title="盯着池价，跳出区间自动撤退">监控</button>`}</span></td>`
     tb.appendChild(tr)
     if (open) {
@@ -1002,6 +1016,10 @@ $('#pos-table').onclick = async (e) => {
       if (!a) return; $('#card-exit').innerHTML = ''; r = await api('/api/collect', { positions: d.id, sell: a.checked, via, dryRun: false })
     }
     else if (d.act === 'dry') { $('#card-exit').innerHTML = ''; r = await api('/api/exit', { positions: d.id, via, keepTokens, dryRun: true }) }
+    else if (d.act === 'exit-part') {
+      const a = await askTx(`部分撤出仓位 <b>#${d.id}</b>（${esc(d.sym)}/${QS}）：只撤下面这个比例的流动性，未领手续费一并全部领走，NFT 保留、剩下的继续做 LP${keepTokens ? '，不卖币' : `，再把撤出来的 ${esc(d.sym)} 卖成 ${QS}`}。`, keepTokens ? null : `顺便把钱包里全部 <b>${esc(d.sym)}</b> 卖光（含不在仓位里的余额）`, 50)
+      if (!a) return; $('#card-exit').innerHTML = ''; r = await api('/api/exit', { positions: d.id, via, keepTokens, sellAll: a.checked, percent: a.percent, dryRun: false })
+    }
     else if (d.act === 'exit') {
       const a = await askTx(`撤退仓位 <b>#${d.id}</b>（${esc(d.sym)}/${QS}）：撤仓 + 领手续费${keepTokens ? '，不卖币' : ` + 把撤出来的 ${esc(d.sym)} 卖成 ${QS}`}。`, keepTokens ? null : `顺便把钱包里全部 <b>${esc(d.sym)}</b> 卖光（含不在仓位里的余额，比如以前撤退留下的）`)
       if (!a) return; $('#card-exit').innerHTML = ''; r = await api('/api/exit', { positions: d.id, via, keepTokens, sellAll: a.checked, dryRun: false })

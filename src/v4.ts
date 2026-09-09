@@ -167,15 +167,18 @@ export function encodeBurnUnlockData(key: { currency0: Address; currency1: Addre
   return encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [actions, [...burns, take]])
 }
 
-// unlockData for collecting fees only: DECREASE_LIQUIDITY (0x01) with liquidity 0 per position (fees accrue as the delta) + TAKE_PAIR (0x11)
-export function encodeCollectUnlockData(key: { currency0: Address; currency1: Address }, ids: bigint[], recipient: Address): Hex {
-  const decreases = ids.map((id) => encodeAbiParameters(
-    [{ type: 'uint256' }, { type: 'uint256' }, { type: 'uint128' }, { type: 'uint128' }, { type: 'bytes' }], [id, 0n, 0n, 0n, '0x'],
+// unlockData for removing part of each position's liquidity (NFT kept): DECREASE_LIQUIDITY (0x01) per position + TAKE_PAIR (0x11).
+// The delta paid out also carries all fees accrued so far, so liquidity 0 is a pure fee collect
+export function encodeDecreaseUnlockData(key: { currency0: Address; currency1: Address }, positions: { id: bigint; liquidity: bigint; amount0Min: bigint; amount1Min: bigint }[], recipient: Address): Hex {
+  const decreases = positions.map((p) => encodeAbiParameters(
+    [{ type: 'uint256' }, { type: 'uint256' }, { type: 'uint128' }, { type: 'uint128' }, { type: 'bytes' }], [p.id, p.liquidity, p.amount0Min, p.amount1Min, '0x'],
   ))
   const take = encodeAbiParameters([{ type: 'address' }, { type: 'address' }, { type: 'address' }], [key.currency0, key.currency1, recipient])
-  const actions = ('0x' + '01'.repeat(ids.length) + '11') as Hex
+  const actions = ('0x' + '01'.repeat(positions.length) + '11') as Hex
   return encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], [actions, [...decreases, take]])
 }
+export const encodeCollectUnlockData = (key: { currency0: Address; currency1: Address }, ids: bigint[], recipient: Address): Hex =>
+  encodeDecreaseUnlockData(key, ids.map((id) => ({ id, liquidity: 0n, amount0Min: 0n, amount1Min: 0n })), recipient)
 
 // PositionInfo packing (v4-periphery PositionInfoLibrary, same on PancakeSwap Infinity): poolId (200 bits) | tickUpper (24) | tickLower (24) | hasSubscriber (8)
 export function decodePositionInfo(info: bigint) {
