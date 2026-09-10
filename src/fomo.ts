@@ -62,6 +62,10 @@ async function request<T = any>(path: string, retry = true): Promise<T> {
   if (!s.token || (status.expiresAt && status.expiresAt - Date.now() < 60_000)) await refresh()
   const r = await fetch(API + path, { headers: { authorization: `Bearer ${settings().fomo.token}`, 'x-supported-chains': CHAINS_HEADER, 'app-language': 'en', origin: 'https://fomo.family', referer: 'https://fomo.family/' }, signal: AbortSignal.timeout(20_000) })
   const j: any = await r.json().catch(() => ({}))
+  // 实测（2026-09-10）：token 有效时 prod-api 也会回 430 {"error":"unauthorized"}——响应只有 Cloudflare 的头、带 __cf_bm cookie，没有应用层的头，
+  // 同一个 token 有的连接过有的不过、无头浏览器一律不过：是 fomo 在 Cloudflare 上开的机器人拦截，不是 token 的问题，续期也没用。
+  // 431 = 没带 token。真正的 token 失效（Privy 那边）走 401
+  if (r.status === 430) throw new Error('fomo 的 Cloudflare 机器人拦截（HTTP 430）：token 有效，但脚本发的请求被边缘节点拒绝，这条路不可靠；链上监控不受影响')
   if (r.status === 401 || r.status === 431 || j.error === 'unauthorized') {
     if (retry) { await refresh(); return request(path, false) }
     throw new Error('fomo 接口回 unauthorized：token 已失效，请到设置页重新贴')
@@ -70,7 +74,7 @@ async function request<T = any>(path: string, retry = true): Promise<T> {
   return (j.responseObject ?? j) as T
 }
 
-// 用户对象里钱包字段名没从前端包里确认到（个人页不显示地址），递归找第一个 EVM 地址
+// 用户对象实测字段：id / userHandle / displayName / profilePictureLink / evmAddress / address（Solana）/ createdAt；没有 evmAddress 再递归找一个 EVM 地址兜底
 const findEvm = (o: unknown, depth = 0): string => {
   if (depth > 4 || !o || typeof o !== 'object') return ''
   for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
@@ -79,7 +83,7 @@ const findEvm = (o: unknown, depth = 0): string => {
   }
   return ''
 }
-const toUser = (u: any): FomoUser => ({ id: String(u.id ?? ''), handle: String(u.userHandle ?? u.user_handle ?? ''), name: String(u.displayName ?? u.display_name ?? ''), avatar: String(u.profilePictureLink ?? u.profile_picture_link ?? ''), wallet: findEvm(u), raw: u })
+const toUser = (u: any): FomoUser => ({ id: String(u.id ?? ''), handle: String(u.userHandle ?? u.user_handle ?? ''), name: String(u.displayName ?? u.display_name ?? ''), avatar: String(u.profilePictureLink ?? u.profile_picture_link ?? ''), wallet: String(u.evmAddress ?? '') || findEvm(u), raw: u })
 
 export const userByHandle = async (handle: string) => toUser(await request(`/v2/users/userHandle/${encodeURIComponent(handle)}`))
 export const me = async () => toUser(await request('/v2/users/current'))

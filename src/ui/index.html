@@ -545,7 +545,7 @@
 <div class="settings">
   <div class="card">
     <h4>fomo 账号</h4>
-    <p class="lead">fomo.family 没有公开接口，用你自己的登录态调它的后端：按 handle 查钱包 / 头像，拉交易者的历史交易。两个都要贴：access token 1 小时过期，服务拿它 + refresh token 自动续期，续下来的新值自己存。</p>
+    <p class="lead"><b>实测不可靠</b>：fomo 后端前面有 Cloudflare 机器人拦截，脚本发的请求即使 token 有效也大多被拒（HTTP 430）；留着这里是为了偶尔试试，别指望它。fomo.family 没有公开接口，用你自己的登录态调它的后端：按 handle 查钱包 / 头像。两个都要贴：access token 1 小时过期，服务拿它 + refresh token 自动续期，续下来的新值自己存。</p>
     <div class="row"><label>privy-token（access token）</label><textarea id="st-fomo-token" placeholder="eyJ…" spellcheck="false"></textarea></div>
     <div class="row"><label>privy-refresh-token</label><textarea id="st-fomo-refresh" placeholder="…" spellcheck="false"></textarea></div>
     <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-fomo-save">保存并验证</button><button class="btn" id="st-fomo-test">重新验证</button><button class="btn" id="st-fomo-clear">清除</button></div>
