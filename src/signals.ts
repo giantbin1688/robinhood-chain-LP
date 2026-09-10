@@ -4,21 +4,27 @@
 //   买入 = 代币从 fomo router 转进钱包（USDG / ETH 由 fomo 资金池垫付，同一笔里能看到），卖出 = 代币从钱包转给 router（USDG 回 fomo vault，不回钱包）；
 //   来源不是 router 的转入基本都是别人空投的碎币（同一地址反复打同样数量），记成 dust 不提醒。
 // 金额：同一笔交易里 USDG 的最大一段转账（同一笔钱经过好几手，取最大值就是本金），没有 USDG 就看 WETH（含从 0 地址 mint 的那段）按 ETH 价折算。
-// 交易者的钱包地址手填（fomo 个人页头像旁），或配 FomoScan key（第三方 fomoscan.sh，付费）按 handle 查。fomo 自己的后端在 Cloudflare 机器人拦截后面，脚本调不了，试过、放弃了。
+// 第二个来源 rhtrenches.com（rht.ts）：第三方公开的 fomo 交易者成交流，能分出「别人买了塞进钱包」（planted / transferred / spoofed / airdropped）和本人买入——
+//   这两种在链上一模一样（都是中继代付、代币经 router 进钱包），只有付款方不同，靠我们自己分不出来。同一笔交易两边都抓到就合并，rht 的真假标记优先；
+//   链上先抓到的买入在 rht 在线时等它 8 秒再提醒，免得给一笔塞币弹提醒。
+// 交易者的钱包地址：只填 handle 时先查 rhtrenches 的名单（免费），再查 FomoScan（付费），都没有就手填（fomo 个人页头像旁）。fomo 自己的后端在 Cloudflare 机器人拦截后面，脚本调不了，试过、放弃了。
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { formatUnits, getAddress, isAddress, parseAbi, parseAbiItem, parseEventLogs, parseUnits, type Address, type Hex } from 'viem'
 import { CHAINS, type ChainName } from './chains.ts'
-import { erc20Abi, log, makeClients, nativePriceUsd, tokenMeta, type Clients } from './common.ts'
-import { listTokenPools, type TokenPool } from './pools.ts'
+import { erc20Abi, log, makeClients, nativePriceUsd, sleep, tokenMeta, type Clients } from './common.ts'
+import { listTokenPools } from './pools.ts'
 import { fomoscanKey, tgConfig } from './settings.ts'
+import * as rht from './rht.ts'
 
 export type Trader = { handle: string; wallet: Address; chain: ChainName; on: boolean; muted: boolean; addedAt: number }
 export type SignalKind = 'buy' | 'sell' | 'fund' | 'dust' | 'out'
+export type SignalSource = 'chain' | 'rht' | 'both'
 export type Safety = { status: 'ok' | 'warn' | 'bad' | 'pending' | 'error'; reasons: string[]; facts: Record<string, string | number | null>; at: number }
 export type Signal = {
   id: number; time: number; block: number; chain: ChainName; handle: string; wallet: Address; kind: SignalKind
   token: Address; symbol: string; decimals: number; amount: string; sizeUsd: number | null; price: number | null // price = 每枚多少美元（按这笔成交算）
   tx: Hex; text: string; safety: Safety | null
+  source?: SignalSource; flags?: string[] // rhtrenches 的标记（planted = 别人塞的，few sellers、pool 3m old…）
 }
 type Store = { traders: Trader[]; signals: Signal[]; seq: number; cursor: Partial<Record<ChainName, number>> }
 type TLog = { address: Address; transactionHash: Hex; logIndex: number; blockNumber: bigint | null; args: { from: Address; to: Address; value: bigint } }
@@ -69,8 +75,10 @@ export function clearSignals(chain: ChainName) { store.signals = store.signals.f
 
 // FomoScan（https://api.fomoscan.sh，独立的第三方，handle ↔ 钱包映射，每次查询扣 credits）
 async function lookupWallet(handle: string): Promise<string> {
+  const hit = await rht.lookupHandle(handle)
+  if (hit) return hit.address
   const key = fomoscanKey()
-  if (!key) throw new Error('没填钱包地址，也没配 FomoScan key，查不到 handle 的钱包。fomo 个人页（fomo.family/profile/<handle>）头像旁的地址可以直接复制')
+  if (!key) throw new Error(`@${handle} 不在 rhtrenches 的名单里，也没配 FomoScan key，查不到钱包。fomo 个人页（fomo.family/profile/${handle}）头像旁的地址可以直接复制`)
   const r = await fetch(`https://api.fomoscan.sh/v2/user/handle/${encodeURIComponent(handle)}`, { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) })
   const j: any = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error(`FomoScan ${r.status}: ${j.message ?? j.error ?? '查询失败'}`)
@@ -79,7 +87,8 @@ async function lookupWallet(handle: string): Promise<string> {
 }
 
 // ---- 链上监控：每条链一个循环 ----
-type Emit = (ev: { type: 'signal'; signal: Signal } | { type: 'watcher'; status: WatcherStatus }) => void
+// signal 事件带 alert=true 表示该弹提醒（新的、确认过的买卖）；更新 / 补标记 / 回填的不弹
+type Emit = (ev: { type: 'signal'; signal: Signal; alert?: boolean } | { type: 'watcher'; status: WatcherStatus } | { type: 'rht'; status: rht.RhtStatus }) => void
 let emit: Emit = () => {}
 export const onEvent = (fn: Emit) => { emit = fn }
 
@@ -175,9 +184,10 @@ class Watcher {
         }
         receipt = { usdgMax, wethMax }
       }
-      if (receipt.usdgMax > 0n) return Number(formatUnits(receipt.usdgMax, c.cfg.quote.decimals))
-      if (receipt.wethMax > 0n) return Number(formatUnits(receipt.wethMax, 18)) * (await this.nativeUsd(c))
-      return null
+      // 用 ETH 买时 USDG 只是路由中间跳的一段，比本金小；两条腿都算、取大的
+      const usdg = Number(formatUnits(receipt.usdgMax, c.cfg.quote.decimals))
+      const weth = receipt.wethMax > 0n ? Number(formatUnits(receipt.wethMax, 18)) * (await this.nativeUsd(c)) : 0
+      return usdg > 0 || weth > 0 ? Math.max(usdg, weth) : null
     }
     for (const t of ts) {
       // 该交易者在这笔里的进出，按代币汇总
@@ -214,21 +224,82 @@ class Watcher {
         save()
         if (!this.status.backfilling) log(`信号: ${text}`)
         emit({ type: 'signal', signal: sig })
-        if (kind === 'buy') void this.safety(c, sig)
-        if ((kind === 'buy' || kind === 'sell') && !t.muted && !this.status.backfilling) telegram(`${kind === 'buy' ? '🟢' : '🔴'} ${text}\n${c.cfg.explorer}/tx/${tx}`).catch(() => {})
+        if (kind === 'buy') void runSafety(sig, !this.status.backfilling)
+        if ((kind === 'buy' || kind === 'sell') && !this.status.backfilling) {
+          // rht 在线：等它 8 秒——它会把「别人塞的」标出来，标了就不提醒；不在线只能按链上的判断提醒
+          if (rht.rhtLive()) setTimeout(() => { if ((sig.kind === 'buy' || sig.kind === 'sell') && !sig.flags?.some(isPlantedFlag)) alertSignal(sig) }, 8_000).unref()
+          else alertSignal(sig)
+        }
       }
     }
   }
-  private async safety(c: Clients, sig: Signal) {
-    const r = await checkToken(c, sig.token).catch((e): Safety => ({ status: 'error', reasons: [`检查失败: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`], facts: {}, at: Date.now() }))
-    sig.safety = r; save()
-    emit({ type: 'signal', signal: sig })
-    if (!this.status.backfilling && r.status !== 'ok' && r.status !== 'error') {
-      const t = store.traders.find((x) => x.chain === this.chain && same(x.wallet, sig.wallet))
-      if (t && !t.muted) telegram(`${r.status === 'bad' ? '⛔ 风险' : '⚠️ 注意'} ${sig.symbol}: ${r.reasons.join('；')}`).catch(() => {})
-    }
+}
+// 提醒 = 推给页面（弹 toast / 桌面通知）+ Telegram；静音的交易者只记录
+function alertSignal(sig: Signal) {
+  const t = store.traders.find((x) => x.chain === sig.chain && same(x.wallet, sig.wallet))
+  emit({ type: 'signal', signal: sig, alert: !t?.muted })
+  if (!t?.muted) telegram(`${sig.kind === 'buy' ? '🟢' : '🔴'} ${sig.text}` + String.fromCharCode(10) + `${CHAINS[sig.chain].explorer}/tx/${sig.tx}`).catch(() => {})
+}
+// 安全检查排队做、间隔 2.5 秒：每次要打一下 GeckoTerminal（免费档约 30 次/分），启动补回一批买入时并发去查会 429、全被误判成「没有池」
+const safetyQueue: (() => Promise<void>)[] = []
+let safetyBusy = false
+function runSafety(sig: Signal, notify: boolean) {
+  safetyQueue.push(() => runSafetyNow(sig, notify))
+  if (safetyBusy) return
+  safetyBusy = true
+  void (async () => { while (safetyQueue.length) { await safetyQueue.shift()!().catch(() => {}); if (safetyQueue.length) await sleep(2_500) }; safetyBusy = false })()
+}
+async function runSafetyNow(sig: Signal, notify: boolean) {
+  const c = await watcherOf(sig.chain).client()
+  const r = await checkToken(c, sig.token).catch((e): Safety => ({ status: 'error', reasons: [`检查失败: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`], facts: {}, at: Date.now() }))
+  if (sig.kind !== 'buy') return // 检查期间被 rht 改判成塞币了
+  sig.safety = r; save()
+  emit({ type: 'signal', signal: sig })
+  if (notify && r.status !== 'ok' && r.status !== 'error') {
+    const t = store.traders.find((x) => x.chain === sig.chain && same(x.wallet, sig.wallet))
+    if (t && !t.muted) telegram(`${r.status === 'bad' ? '⛔ 风险' : '⚠️ 注意'} ${sig.symbol}: ${r.reasons.join('；')}`).catch(() => {})
   }
 }
+
+// ---- rhtrenches 的成交 -> 信号（只收我们盯着的钱包）。同一笔交易链上已经记过就合并，它的真假标记优先 ----
+const isPlantedFlag = (f: string) => /planted|transferred|spoofed|airdropped/i.test(f)
+const usdText = (v: number | null) => (v === null || v === undefined ? '' : ` $${v >= 100 ? Math.round(v).toLocaleString('en-US') : v.toFixed(2)}`)
+function ingestFill(f: rht.Fill, live: boolean) {
+  const chain: ChainName = 'robinhood'
+  const t = store.traders.find((x) => x.chain === chain && same(x.wallet, f.wallet))
+  if (!t || !isAddress(f.token) || !isAddress(f.wallet)) return
+  const planted = f.flags.filter(isPlantedFlag)
+  const kind: SignalKind = planted.length ? 'dust' : f.side
+  const amt = fmtAmt(f.amount)
+  const note = f.flags.length ? `［rhtrenches: ${f.flags.join('；')}］` : ''
+  const text = planted.length
+    ? `${t.handle} 钱包${f.side === 'buy' ? '收到' : '转出'} ${f.symbol}${usdText(f.usd)}（${amt} 枚）——不是本人${f.side === 'buy' ? '买入' : '卖出'}：${planted.join('；')}（别人买了塞进来 / 转进来的）`
+    : `${t.handle} ${f.side === 'buy' ? '买入' : '卖出'} ${f.symbol}${usdText(f.usd)}（${amt} 枚）${note}`
+  const existing = store.signals.find((s) => same(s.tx, f.tx) && same(s.token, f.token) && same(s.wallet, f.wallet))
+  if (existing) {
+    existing.source = 'both'; existing.flags = f.flags
+    if (existing.kind !== kind) {
+      existing.kind = kind; existing.text = text
+      if (kind === 'dust') existing.safety = null
+      // 链上判成空投（代币不是从 router 来的）但 rht 说是真买入：fomo 还有别的执行路径，以 rht 为准，补做安全检查
+      else if (kind === 'buy' && !existing.safety) { existing.safety = { status: 'pending', reasons: [], facts: {}, at: Date.now() }; void runSafety(existing, live) }
+      if (live && (kind === 'buy' || kind === 'sell')) alertSignal(existing)
+    }
+    else if (f.flags.length && !existing.text.includes('rhtrenches')) existing.text = text
+    if (f.usd) { existing.sizeUsd = f.usd; existing.price = f.price } // rht 按现金腿定价，比我们「取最大一段」准
+    save(); emit({ type: 'signal', signal: existing })
+    return
+  }
+  const sig: Signal = { id: ++store.seq, time: f.ts * 1000, block: f.block, chain, handle: t.handle, wallet: t.wallet, kind, token: getAddress(f.token), symbol: f.symbol, decimals: 0, amount: String(f.amount), sizeUsd: f.usd, price: f.price, tx: f.tx, text, safety: kind === 'buy' ? { status: 'pending', reasons: [], facts: {}, at: Date.now() } : null, source: 'rht', flags: f.flags }
+  store.signals.push(sig)
+  if (store.signals.length > MAX_SIGNALS) store.signals.splice(0, store.signals.length - MAX_SIGNALS)
+  save()
+  if (live) log(`信号(rht): ${text}`)
+  emit({ type: 'signal', signal: sig })
+  if (kind === 'buy') void runSafety(sig, live)
+  if (live && (kind === 'buy' || kind === 'sell')) alertSignal(sig)
+}
+export const rhtStatus = rht.rhtStatus
 const fmtAmt = (v: number) => (v >= 1e9 ? `${(v / 1e9).toFixed(2)}B` : v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}K` : v >= 1 ? v.toFixed(2) : v.toPrecision(3))
 
 const watchers = new Map<ChainName, Watcher>()
@@ -242,7 +313,12 @@ export async function recheckToken(chain: ChainName, token: Address) {
   save()
   return r
 }
-export function startWatchers() { for (const ch of Object.keys(CHAINS) as ChainName[]) if (CHAINS[ch].fomo) watcherOf(ch).kick() }
+export function startWatchers() {
+  for (const ch of Object.keys(CHAINS) as ChainName[]) if (CHAINS[ch].fomo) watcherOf(ch).kick()
+  void rht.start({ onFill: ingestFill, onStatus: (status) => emit({ type: 'rht', status }) })
+  // 上次没查完 / 查失败（Gecko 限流之类）的买入，排队再查一遍
+  for (const sig of store.signals) if (sig.kind === 'buy' && (!sig.safety || sig.safety.status === 'pending' || sig.safety.status === 'error')) runSafety(sig, false)
+}
 
 // ---- 代币安全检查：池子（流动性 / 池龄 / 成交）、合约（代理 / owner / mint / 黑名单）、能否转账（貔貅）、报价往返损耗（hook 税 / 深度）----
 // 只做链上能查的，不接第三方风控（GoPlus 等不支持 Robinhood Chain）。结论：ok = 没发现问题，warn = 有可疑点，bad = 别碰
@@ -266,7 +342,7 @@ async function checkTokenNow(c: Clients, token: Address): Promise<Safety> {
   let bad = false, warn = false
   const flag = (level: 'bad' | 'warn', why: string) => { reasons.push(why); if (level === 'bad') bad = true; else warn = true }
   const usd$ = (x: number) => `$${Math.round(x).toLocaleString('en-US')}`
-  const [m, code, pools] = await Promise.all([tokenMeta(pub, token), pub.getCode({ address: token }), listTokenPools(c, token).catch(() => [] as TokenPool[])])
+  const [m, code, pools] = await Promise.all([tokenMeta(pub, token), pub.getCode({ address: token }), listTokenPools(c, token, true)]) // Gecko 失败直接抛：限流不能当成「没有池」
   facts.symbol = m.symbol; facts.name = m.name
   // 池子：所有 DEX、所有计价币里流动性最大的那个
   const live = pools.filter((p) => !p.empty)

@@ -431,6 +431,7 @@ const server = createServer(async (req, res) => {
       req.on('close', () => streams.delete(res))
       for (const j of jobs.values()) res.write(`data: ${JSON.stringify({ type: 'status', job: summary(j) })}\n\n`)
       for (const ch of Object.values(CHAINS)) if (ch.fomo) res.write(`data: ${JSON.stringify({ type: 'watcher', status: sig.watcherStatus(ch.name) })}\n\n`)
+      res.write(`data: ${JSON.stringify({ type: 'rht', status: sig.rhtStatus() })}\n\n`)
       return
     }
     // ---- 设置页：Telegram / FomoScan。GET 只回"配没配 + 末 4 位"，原值不出服务 ----
@@ -455,7 +456,7 @@ const server = createServer(async (req, res) => {
     // ---- 信号：FOMO 交易者名单 + 链上抓到的买卖 + 安全检查（signals.ts）----
     if (req.method === 'GET' && url.pathname === '/api/signals') {
       const { chain } = selOf(url.searchParams)
-      return json(res, 200, { traders: sig.traders().filter((t) => t.chain === chain), signals: sig.signals(chain).slice(-400), status: sig.watcherStatus(chain), telegram: sig.telegramConfigured(), fomoscan: sig.fomoscanConfigured() })
+      return json(res, 200, { traders: sig.traders().filter((t) => t.chain === chain), signals: sig.signals(chain).slice(-400), status: sig.watcherStatus(chain), rht: sig.rhtStatus(), telegram: sig.telegramConfigured(), fomoscan: sig.fomoscanConfigured() })
     }
     if (req.method === 'POST' && url.pathname === '/api/traders/add') { const b = await readBody(req); return json(res, 200, { trader: await sig.addTrader({ handle: str(b.handle), wallet: str(b.wallet), chain: selOf(b).chain }) }) }
     if (req.method === 'POST' && url.pathname === '/api/traders/update') {

@@ -9,13 +9,13 @@ export type FoundPool = { pool: Pool; liquidityUsd: number; volume24h: number; n
 // GeckoTerminal 的 dex id（/networks/{net}/dexes 里的原值，按链带不同后缀）：Robinhood 上 Uniswap v4 是 uniswap-v4-robinhood，BSC 上是 uniswap-v4-bsc
 const GECKO_DEX: Record<string, Record<string, string>> = { robinhood: { v4: 'uniswap-v4-robinhood' }, bsc: { v4: 'uniswap-v4-bsc', infinity: 'pancakeswap-infinity-clmm', v3: 'pancakeswap-v3-bsc' } }
 
-// GeckoTerminal 上这个代币的全部池子（任何 DEX、任何计价币），失败返回 []
-async function fetchGeckoPools(network: string, token: Address): Promise<any[]> {
+// GeckoTerminal 上这个代币的全部池子（任何 DEX、任何计价币），失败返回 []；strict = 失败抛错（安全检查要区分「没有池」和「Gecko 限流」）
+async function fetchGeckoPools(network: string, token: Address, strict = false): Promise<any[]> {
   try {
     const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/${network}/tokens/${token}/pools?page=1`, { signal: AbortSignal.timeout(15_000) })
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
     return (await r.json()).data ?? []
-  } catch (e: any) { log(`查询已有池失败（GeckoTerminal ${String(e?.message).slice(0, 80)}），按配置的费率处理`); return [] }
+  } catch (e: any) { if (strict) throw new Error(`GeckoTerminal ${String(e?.message).slice(0, 80)}`); log(`查询已有池失败（GeckoTerminal ${String(e?.message).slice(0, 80)}），按配置的费率处理`); return [] }
 }
 const feeFromName = (name: string) => { const m = name.match(/([\d.]+)%/); return m ? Math.round(Number(m[1]) * 10_000) : null }
 // GeckoTerminal 的流动性 / 成交量会滞后：流动性全撤走的池它还照旧显示旧数字。以链上现价处的活跃流动性为准，为 0 就当空池、旧数字作废。
@@ -59,11 +59,11 @@ export async function discoverQuotePools(c: Clients, token: Address): Promise<Fo
 // 网页界面用：该代币的全部池子，每个标出能不能被本工具复用及原因。fee24h = 24h 成交 × 费率，是这个池一天分给全体 LP 的手续费（动态费率池按 Gecko 名字里的估计值算，费率不明的为 null）
 export type TokenPool = { id: Hex; name: string; dex: string; liquidityUsd: number; volume24h: number; fee24h: number | null; fee: number; feeText: string; spacing: number; hooks: Address | null; usable: boolean; empty: boolean; status: string
   createdAt: number | null; fdvUsd: number | null; change24h: number | null; buyers24h: number; sellers24h: number } // 后一行是 Gecko 给的，信号页的安全检查用（池龄 / FDV / 24h 涨跌 / 买卖人数）
-export async function listTokenPools(c: Clients, token: Address): Promise<TokenPool[]> {
+export async function listTokenPools(c: Clients, token: Address, strict = false): Promise<TokenPool[]> {
   const { lp, cfg } = c
   const out: TokenPool[] = []
   const usd$ = (x: number) => `$${Math.round(x).toLocaleString('en-US')}`
-  for (const p of await fetchGeckoPools(cfg.gecko, token)) {
+  for (const p of await fetchGeckoPools(cfg.gecko, token, strict)) {
     const a = p.attributes ?? {}
     const dex = String(p.relationships?.dex?.data?.id ?? '').replace(new RegExp(`-${cfg.gecko}$`), '')
     const name = String(a.name ?? ''), id = String(a.address).toLowerCase() as Hex

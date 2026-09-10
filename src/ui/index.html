@@ -505,7 +505,7 @@
     <button class="btn sm" id="sig-refresh">刷新</button>
     <button class="btn sm" id="sig-clear" title="清掉这条链上已记录的信号（交易者名单不动）">清空</button>
   </div>
-  <div class="sig-h">盯着的交易者 <span class="small" style="font-weight:400;margin-left:6px">fomo.family 没有公开接口，直接盯钱包：买入 = 代币从 fomo 路由进钱包，卖出 = 代币从钱包回路由；别人空投的碎币记成"空投"不提醒</span></div>
+  <div class="sig-h">盯着的交易者 <span class="small" style="font-weight:400;margin-left:6px">两个来源：本工具直接盯钱包的链上日志（买入 = 代币从 fomo 路由进钱包，卖出 = 反向），加上 rhtrenches.com 的成交流——它能分出"别人买了塞进钱包"和本人买入（链上看不出来），塞的和空投都记成"塞币/空投"，不提醒</span></div>
   <div class="traders" id="sig-traders"></div>
   <div class="sig-h">信号流</div>
   <div class="card">
@@ -1272,8 +1272,10 @@ $('#cal-refresh').onclick = loadCalendar
 $('#cal-grid').onclick = (e) => { const d = e.target.closest('.day.has'); if (!d) return; const n = Number(d.dataset.day); calSel = calSel === n ? null : n; renderCalendar() }
 
 // ---- 信号：盯着的 FOMO 交易者 + 链上抓到的买卖（服务端 signals.ts 抓，SSE 推过来）----
-let SIG = { traders: [], signals: [], status: null, telegram: false, fomoscan: false }
-const KIND = { buy: ['买入', 'ok'], sell: ['卖出', 'warn'], fund: ['资金', 'wait'], dust: ['空投', 'wait'], out: ['转出', 'wait'] }
+let SIG = { traders: [], signals: [], status: null, rht: null, telegram: false, fomoscan: false }
+const RHT_STATE = { off: '未连接', connecting: '连接中', live: '实时', polling: '轮询', down: '断开' }
+const KIND = { buy: ['买入', 'ok'], sell: ['卖出', 'warn'], fund: ['资金', 'wait'], dust: ['塞币/空投', 'wait'], out: ['转出', 'wait'] }
+const SRC = { chain: '链上', rht: 'rht', both: '链上+rht' }
 const SAFE = { ok: ['通过', 'ok'], warn: ['注意', 'amber'], bad: ['风险', 'warn'], pending: ['检查中…', 'wait'], error: ['检查失败', 'wait'] }
 const sigFilter = { kinds: new Set(JSON.parse(localStorage.getItem('sigKinds') || '["buy","sell","fund"]')), safety: null, q: '' }
 const sigUnseen = new Set()
@@ -1287,18 +1289,17 @@ async function loadSignals() {
 function sigSeen() { sigUnseen.clear(); $('#sigCount').style.display = 'none' }
 function onSignalEvent(ev) {
   if (ev.type === 'watcher') { if (ev.status.chain === SEL.chain) { SIG.status = ev.status; renderSigStatus() }; return }
+  if (ev.type === 'rht') { SIG.rht = ev.status; if ($('#page-signals').classList.contains('on')) renderSigStatus(); return }
   const s = ev.signal
   if (s.chain !== SEL.chain) return
   const i = SIG.signals.findIndex((x) => x.id === s.id)
   const fresh = i < 0
   if (fresh) SIG.signals.push(s); else SIG.signals[i] = s
   const onPage = $('#page-signals').classList.contains('on')
-  if (fresh && (s.kind === 'buy' || s.kind === 'sell') && !SIG.status?.backfilling) {
-    const t = SIG.traders.find((x) => x.wallet.toLowerCase() === s.wallet.toLowerCase())
-    if (!t?.muted) {
-      toast(s.text)
-      if (Notification.permission === 'granted' && document.hidden) new Notification(s.text, { body: `${CHAIN_LABEL[s.chain] || s.chain} · ${s.token}`, tag: 'sig-' + s.id })
-    }
+  // 提醒由服务端决定（alert=true）：链上抓到的买入会先等 rhtrenches 确认不是别人塞的，静音的交易者不带 alert
+  if (ev.alert) {
+    toast(s.text)
+    if (Notification.permission === 'granted' && document.hidden) new Notification(s.text, { body: `${CHAIN_LABEL[s.chain] || s.chain} · ${s.token}`, tag: 'sig-' + s.id })
     if (!onPage) { sigUnseen.add(s.id); $('#sigCount').style.display = ''; $('#sigCount').textContent = sigUnseen.size }
   }
   if (!fresh && s.safety && s.safety.status !== 'pending' && s.safety.status !== 'ok' && s.safety.status !== 'error' && !SIG.status?.backfilling) toast(`${SAFE[s.safety.status][0]} ${s.symbol}: ${s.safety.reasons[0] || ''}`)
@@ -1318,6 +1319,8 @@ function renderSigStatus() {
   const parts = []
   if (st?.head) parts.push(`区块 ${st.head.toLocaleString('en-US')}${st.lag ? `（落后 ${st.lag.toLocaleString('en-US')}）` : ''}`)
   parts.push(`盯 ${n} 个钱包`, `${SIG.signals.length} 条信号`)
+  const r = SIG.rht
+  if (r) parts.push(`rhtrenches ${RHT_STATE[r.state] || r.state}${r.wallets ? `（${r.wallets} 个交易者）` : ''}${r.error && r.state !== 'live' ? `：${r.error}` : ''}`)
   const last = SIG.signals.length ? Math.max(...SIG.signals.map((s) => s.time)) : 0
   if (last) parts.push(`最近 ${agoText(last)}`)
   parts.push(SIG.telegram ? 'Telegram 推送已配置' : '未配 Telegram（.env TG_BOT_TOKEN / TG_CHAT_ID）')
@@ -1337,8 +1340,8 @@ function renderTraders() {
   </div>`).join('') + `<div class="trader add">
     <div class="who"><span class="hd">添加交易者</span></div>
     <input type="text" id="sig-handle" placeholder="FOMO handle，如 unipcs" spellcheck="false">
-    <input type="text" id="sig-wallet" placeholder="钱包 0x…${SIG.fomoscan ? '（可留空，按 handle 查 FomoScan）' : '（必填）'}" spellcheck="false">
-    <div class="note">${SIG.fomoscan ? '留空钱包时通过 FomoScan 按 handle 查（扣 credits）' : '钱包地址在 fomo.family/profile/<handle> 头像旁边复制；配了 FomoScan key 才能按 handle 自动查'}</div>
+    <input type="text" id="sig-wallet" placeholder="钱包 0x…（可留空）" spellcheck="false">
+    <div class="note">只填 handle：先查 rhtrenches 的名单（${SIG.rht?.wallets || 147} 个头部交易者，免费）${SIG.fomoscan ? '，再查 FomoScan' : ''}；查不到就把 fomo 个人页头像旁的钱包地址贴到第二格</div>
     <div class="ops"><button class="btn primary" id="sig-add">添加</button></div>
   </div>`
 }
@@ -1382,7 +1385,7 @@ function renderSignals() {
     return `<tr class="${sigUnseen.has(s.id) ? 'unseen' : ''}" data-id="${s.id}">
       <td title="${new Date(s.time).toLocaleString()}" style="white-space:nowrap">${agoText(s.time)}</td>
       <td><a href="https://fomo.family/profile/${encodeURIComponent(s.handle)}" target="_blank" style="color:var(--blue);text-decoration:none">@${esc(s.handle)}</a></td>
-      <td><span class="badge ${kc}">${kl}</span></td>
+      <td><span class="badge ${kc}">${kl}</span><span class="small" style="display:block;margin-top:2px" title="信号来源：链上 = 本工具直接从区块日志抓到；rht = rhtrenches.com 的成交流（能识别别人塞进钱包的假买入）">${SRC[s.source] || '链上'}</span></td>
       <td class="tok">${esc(s.symbol)}<span class="sub">${s.token.slice(0, 6)}…${s.token.slice(-4)}<span class="cp" data-act="copy" data-v="${s.token}" title="复制地址">⧉</span></span></td>
       <td class="num">${s.kind === 'buy' || s.kind === 'sell' ? `<b>${sigUsd(s.sizeUsd)}</b>` : ''}<span class="small" style="display:block">${sigAmt(s.amount)} 枚${s.price ? ` · $${Number(s.price).toPrecision(3)}` : ''}</span></td>
       <td style="max-width:380px">${esc(s.text)}</td>
