@@ -3,13 +3,14 @@
 // 费率是动态的（基础费 + 波动费），费率档来自链上的 presetParameter2 账户。仓位是独立账户（不是 NFT），id = 仓位账户地址，关闭时退还租金
 import { Keypair, PublicKey, Transaction, type Connection, type ParsedTransactionWithMeta } from '@solana/web3.js'
 import { BorshCoder } from '@coral-xyz/anchor'
-import * as dlmmSdk from '@meteora-ag/dlmm'
+import type * as DlmmSdk from '@meteora-ag/dlmm'
+import { dlmmSdk } from './dlmm-sdk.ts'
 import type { LbPosition, PositionInfo } from '@meteora-ag/dlmm'
 import BN from 'bn.js'
 import { anchorEvents } from './common.ts'
 import type { DepthBar, LedgerEvent, MintPlan, MintReq, PoolState, SolLp, SolLpDeps, SolPool, SolPosition, Tier } from './lp.ts'
 
-// 包没有声明 "type": "module"，TypeScript 按 CJS 互操作把默认导出当成整个模块；运行时（ESM 入口）default 就是 DLMM 类。
+// CommonJS 入口直接导出 DLMM 类；类型声明仍按 SDK 的模块声明读取。
 // 实例类型从导出函数的参数里取，静态方法只声明用到的几个
 const { IDL, LBCLMM_PROGRAM_IDS, StrategyType, autoFillYByStrategy, getBaseFee } = dlmmSdk
 type DLMM = Parameters<typeof dlmmSdk.chunkDepositWithRebalanceEndpoint>[0]
@@ -20,9 +21,9 @@ type DLMMStatic = {
   getAllLbPairPositionsByUser(conn: Connection, user: PublicKey): Promise<Map<string, PositionInfo>>
   createLbPair2(conn: Connection, funder: PublicKey, tokenX: PublicKey, tokenY: PublicKey, presetParameter: PublicKey, activeId: BN): Promise<Transaction>
 }
-const DLMM = (dlmmSdk as any).default as DLMMStatic
+const DLMM = dlmmSdk as unknown as DLMMStatic
 const PROGRAM = new PublicKey(LBCLMM_PROGRAM_IDS['mainnet-beta'])
-const STRATEGY: Record<string, dlmmSdk.StrategyType> = { spot: StrategyType.Spot, curve: StrategyType.Curve, bidask: StrategyType.BidAsk }
+const STRATEGY: Record<string, DlmmSdk.StrategyType> = { spot: StrategyType.Spot, curve: StrategyType.Curve, bidask: StrategyType.BidAsk }
 const bn = (x: bigint) => new BN(x.toString())
 const big = (x: BN | string | number) => BigInt(String(x).split('.')[0] || '0')
 const feePips = (binStep: number, params: { baseFactor: number; baseFeePowerFactor: number }) => Number(getBaseFee(binStep, params as any).toString()) / 1000 // SDK 给的是 1e9 精度

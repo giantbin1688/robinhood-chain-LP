@@ -59,7 +59,9 @@ for (const tick of [-443636, -22885, -1, 0, 1, 81831, 443636]) {
   const diff = mine > sdk ? mine - sdk : sdk - mine
   assert.ok(diff * 10n ** 10n <= sdk, `Raydium sqrtPriceX64 at tick ${tick}: sdk ${sdk} vs v4>>32 ${mine}`)
 }
-const dlmmSdk: any = await import('@meteora-ag/dlmm')
+const { dlmmSdk } = await import('./sol/dlmm-sdk.ts')
+assert.equal(typeof (dlmmSdk as any).create, 'function', 'DLMM CommonJS entry exports the class directly')
+assert.equal(typeof (await import('./sol/dlmm.ts')).dlmmLp, 'function', 'DLMM adapter loads in Node.js')
 const binPrice = (binId: number, binStep: number) => (1 + binStep / 10_000) ** binId
 for (const [binId, binStep] of [[-5721, 4], [-823, 100], [0, 1], [1200, 25]] as const) {
   const sdk = Number(dlmmSdk.getPriceOfBinByBinId(binId, binStep).toString())
