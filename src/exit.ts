@@ -39,25 +39,26 @@ export async function findPositions(c: Clients, token?: Address, explicit?: bigi
 export type Position = Awaited<ReturnType<typeof findPositions>>[number]
 export const positionFees = (c: Clients, p: RawPosition) => c.lp.fees(p)
 
-// 把代币卖成计价币：Uniswap 和 OKX 同时报价，能换回更多的排前面。plan 在计划阶段报价并打印（拿不到报价就放弃，还没发任何交易），sell 按实际数量重新报价再执行
-export function seller(c: Clients, token: Address, symbol: string, fmtT: (x: bigint) => string, via: string, slippage: number) {
+// 把代币卖成计价币：Uniswap、OKX 和仓位所在的池（pools）同时报价，能换回更多的排前面。plan 在计划阶段报价并打印（拿不到报价就放弃，还没发任何交易），sell 按实际数量重新报价再执行
+export function seller(c: Clients, token: Address, symbol: string, fmtT: (x: bigint) => string, via: string, slippage: number, pools: Pool[] = []) {
   const { Q } = c
-  const deps = swapDepsFor(c, slippage, via, (x: bigint) => trim(x, Q.decimals), Q.symbol)
+  const deps = swapDepsFor(c, slippage, via, (x: bigint) => trim(x, Q.decimals), Q.symbol, pools)
   const offers = (amount: bigint) => swapOffers(deps, token, Q.address, 'EXACT_INPUT', amount)
   return {
     plan: async (amount: bigint, soft = false) => { // soft = 报不出价只警告并返回空（批量领取时别的币照常）
       const got = await offers(amount)
       if (got.length === 0) { if (!soft) die('拿不到卖币报价，放弃'); log(`${symbol} 现在拿不到卖币报价，领完再重试卖出`); return got }
-      log(`计划: 卖出 ≈${fmtT(amount)} ${symbol}：${got.map((x) => x.text).join('；')}${got.length > 1 ? `，走 ${got[0].via}` : ''}${!deps.okx && via !== 'uniswap' ? '（未配置 OKX_API_KEY，只有 Uniswap）' : ''}`)
+      log(`计划: 卖出 ≈${fmtT(amount)} ${symbol}：${got.map((x) => x.text).join('；')}${got.length > 1 ? `，走 ${got[0].via}` : ''}${!deps.okx && via !== 'uniswap' ? '（未配置 OKX_API_KEY）' : ''}`)
       return got
     },
     // 卖不掉就一直重试，直到卖出为止：报价失败、发送前模拟不过（典型是"Min return not reached"= 报价已过期）都不花钱，等几秒按最新行情重新报价再来。
-    // 行情急跌时 OKX 的索引常常滞后几分钟，报出来的"更高价"其实是旧价，按它设的最低回报必然达不到——OKX 的报价因此失败过一次后，它再比 Uniswap 高出超过滑点一半就不信它，改走 Uniswap
-    // （只在这种失败后才切，因为 OKX 常常真的能找到更好的路，别的原因失败不该放弃它）。
+    // 行情急跌时 OKX 的索引常常滞后几分钟，报出来的"更高价"其实是旧价，按它设的最低回报必然达不到；它的多跳路线也虚报过（进场买 BNC4 少给 4–7%）——
+    // 哪家的报价因此失败过一次，它再比别家高出超过滑点一半就不信它，改走别家（只在这种失败后才切，因为 OKX 常常真的能找到更好的路，别的原因失败不该放弃它）。
     // 每次都按钱包实际余额卖（上一次可能已经成交只是没等到回执）；真正上链后回滚的是花了 gas 的，连续 3 次就停，那多半是貔貅币或路由问题，不是价格问题
     sell: async (amount: bigint, kit: ReturnType<typeof txKit>) => {
       const balance = () => c.pub.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [c.wallet] })
-      let reverts = 0, distrustOkx = false
+      let reverts = 0
+      const distrust = new Set<SwapOffer['via']>()
       for (let attempt = 1; ; attempt++) {
         const wait = Math.min(3 * attempt, 30)
         const bal = await balance()
@@ -65,16 +66,16 @@ export function seller(c: Clients, token: Address, symbol: string, fmtT: (x: big
         if (bal < amount) amount = bal
         const got = await offers(amount)
         let best: SwapOffer | undefined = got[0]
-        if (distrustOkx && best?.via === 'okx') {
-          const uni = got.find((x) => x.via === 'uniswap')
-          if (uni && best.out > uni.out + (uni.out * BigInt(Math.round(slippage * 50))) / 10000n) { log(`OKX 报价比 Uniswap 高 ${((Number(best.out) / Number(uni.out) - 1) * 100).toFixed(1)}%，超过滑点的一半，多半是过期行情，改走 Uniswap`); best = uni }
+        if (best && distrust.has(best.via)) {
+          const alt = got.find((x) => !distrust.has(x.via))
+          if (alt && best.out > alt.out + (alt.out * BigInt(Math.round(slippage * 50))) / 10000n) { log(`${best.via} 报价比 ${alt.via} 高 ${((Number(best.out) / Number(alt.out) - 1) * 100).toFixed(1)}%，超过滑点的一半，多半是过期行情或虚报，改走 ${alt.via}`); best = alt }
         }
         if (!best) { log(`卖币报价失败，${wait} 秒后重试（第 ${attempt} 次；停止任务 / Ctrl+C 可放弃，${symbol} 还在钱包里）`); await sleep(wait * 1000); continue }
         log(`卖出 ${fmtT(amount)} ${symbol} -> ${best.text}`)
         try { await executeSwap(best, deps, kit, c, token, Q.address, '卖币'); return } catch (e: any) {
           if (e?.onchain && ++reverts >= 3) die(`卖币连续 ${reverts} 次上链回滚，停止重试（${symbol} 还在钱包里）: ${e.shortMessage}`)
           const msg = String(e?.shortMessage ?? e?.message).split('\n')[0].slice(0, 160)
-          if (best.via === 'okx' && /min return|return amount|too little|slippage|insufficient output/i.test(msg)) distrustOkx = true
+          if (/min return|return amount|too little|slippage|insufficient output/i.test(msg)) distrust.add(best.via)
           log(`卖币失败: ${msg}，${wait} 秒后重新报价（第 ${attempt} 次）`)
           await sleep(wait * 1000)
         }
@@ -126,7 +127,7 @@ export async function collectFees(o: CollectOptions) {
     }
     if (g.positions.length === 0) continue
     if (o.sell && g.tokens > 0n) {
-      g.sell = seller(o.clients, token, symbol, fmtT, o.via, o.slippage)
+      g.sell = seller(o.clients, token, symbol, fmtT, o.via, o.slippage, [...g.pools.values()].map((x) => x.pool))
       // 批量时某个币现在报不出价（比如数量太小）不拦着别的币，先领；领完卖币那步会重试报价直到卖出。单个币则直接停下
       g.offers = await g.sell.plan(g.tokens, multi)
     }
@@ -222,8 +223,8 @@ export async function withdraw(o: WithdrawOptions) {
   const sellAmount = sellHeld + expectToken
   log(`计划: 撤 ${positions.length} 个仓位${partial ? `的 ${pct}% 流动性（手续费全领，NFT 保留）` : ''}（${groups.size} 笔交易），拿回 ≈${fmtU(expectUsdg)} ${Q.symbol} + ${fmtT(expectToken)} ${symbol}`)
 
-  // 卖币报价：Uniswap 和 OKX 同时报价，能换回更多计价币的排前面（不卖币就不碰聚合器，没配 key 也能撤）
-  const s = o.keepTokens ? null : seller(o.clients, token, symbol, fmtT, o.via, o.slippage)
+  // 卖币报价：Uniswap、OKX 和仓位所在的池同时报价，能换回更多计价币的排前面（不卖币就不碰聚合器，没配 key 也能撤）
+  const s = o.keepTokens ? null : seller(o.clients, token, symbol, fmtT, o.via, o.slippage, [...new Map(positions.map((p) => [p.pool.id, p.pool])).values()])
   const sellOffers: SwapOffer[] = s && sellAmount > 0n ? await s.plan(sellAmount) : []
   if (o.json) console.log('@@plan ' + JSON.stringify({
     kind: 'exit', chain: cfg.name, protocol: lp.protocol, quote: Q.symbol, wallet, token: { address: token, symbol, decimals }, usdg: fmtU(usdgStart), held: fmtT(tokenStart), ethPrice: ethPrice.toFixed(2), percent: pct,
@@ -292,7 +293,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       chain: { type: 'string' }, protocol: { type: 'string' },               // 链 / 协议（common.ts 里解析）
       token: { type: 'string' },                                            // 代币地址：撤掉它的全部仓位
       position: { type: 'string' },                                         // 只撤这些仓位 id（逗号分隔，可代替 --token），只卖撤出来的币
-      via: { type: 'string', default: env('EXIT_SWAP_VIA', 'best') },       // 卖币走哪家: okx | uniswap | best（两边报价取高者）
+      via: { type: 'string', default: env('EXIT_SWAP_VIA', 'best') },       // 卖币走哪家: okx | uniswap | pool（仓位所在的池直换）| best（都报价取高者）
       slippage: { type: 'string', default: env('SWAP_SLIPPAGE', '5') },     // 卖币滑点 %
       'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },  // 撤仓最少拿回量的余量 %
       'keep-tokens': { type: 'boolean', default: false },                   // 只撤仓位，不卖币
@@ -306,8 +307,8 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       json: { type: 'boolean', default: false },                            // 给网页界面用：计划确定后打印一行 "@@plan {json}"
     },
   })
-  if (!opt.token && !opt.position) die('用法: npm run exit -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <代币地址> [--position <仓位id,仓位id>] [--percent <1-100>] [--via okx|uniswap|best] [--keep-tokens] [--sell-all] [--collect [--sell]] [--yes] [--dry-run]')
-  if (!['okx', 'uniswap', 'best'].includes(opt.via)) die('--via 只能是 okx / uniswap / best')
+  if (!opt.token && !opt.position) die('用法: npm run exit -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <代币地址> [--position <仓位id,仓位id>] [--percent <1-100>] [--via okx|uniswap|pool|best] [--keep-tokens] [--sell-all] [--collect [--sell]] [--yes] [--dry-run]')
+  if (!['okx', 'uniswap', 'pool', 'best'].includes(opt.via)) die('--via 只能是 okx / uniswap / pool / best')
   if (opt.collect && opt.percent !== undefined) die('--collect 只领手续费，不能和 --percent 一起用')
   const positions = opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined
   const clients = await makeClients({ from: opt.from, needKey: !opt['dry-run'] })

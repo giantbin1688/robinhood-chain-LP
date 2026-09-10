@@ -341,7 +341,7 @@ async function state(sel: Sel) {
 // ---- 表单 -> 命令行参数。数值原样透传，合法性由命令本身检查（出错会打印"错误: …"并退出）；一律 --key=value，负数才不会被当成另一个选项 ----
 const str = (x: unknown) => String(x ?? '').trim()
 const ids = (x: unknown) => str(x).split(',').map((s) => s.trim()).filter((s) => /^\d+$/.test(s))
-const via = (x: unknown) => (['okx', 'uniswap', 'best'].includes(str(x)) ? str(x) : 'best')
+const via = (x: unknown) => (['okx', 'uniswap', 'pool', 'best'].includes(str(x)) ? str(x) : 'best')
 function launchArgs(b: any) {
   const token = str(b.token)
   if (!isAddress(token)) throw new Error('代币地址不合法')

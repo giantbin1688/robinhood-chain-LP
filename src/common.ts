@@ -152,9 +152,10 @@ export function okxDex(c: Pick<Clients, 'wallet' | 'cfg'>, slippage: number) {
     if (j.code !== '0') throw new Error(`OKX ${path} -> ${j.code ?? r.status}: ${j.msg ?? ''}`)
     return j.data
   }
+  let approverCache: Promise<Address> | null = null
   return {
     // 授权给 OKX 的合约地址
-    approver: async () => getAddress((await get('/api/v6/dex/aggregator/supported/chain', { chainIndex: String(cfg.okxChainIndex) }))[0].dexTokenApproveAddress),
+    approver: () => { if (!approverCache) { approverCache = get('/api/v6/dex/aggregator/supported/chain', { chainIndex: String(cfg.okxChainIndex) }).then((r) => getAddress(r[0].dexTokenApproveAddress)); approverCache.catch(() => { approverCache = null }) } return approverCache },
     // 报价 + 交易数据一次拿齐
     swap: async (from: Address, to: Address, amount: bigint) => {
       // 貔貅标记：卖出时目标在 fromToken，进场买币时在 toToken，两头都看
@@ -230,37 +231,76 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
   return { send, sendEstimated, sendBatch, ensureErc20Approval, permitFor, stats }
 }
 
-// ---- 换币：Uniswap 和 OKX 同时报价，按结果排序（精确输入看产出多少，精确输出看投入多少）----
+// ---- 换币：Uniswap、OKX 和「要做 LP 的那个池」同时报价，按结果排序（精确输入看产出多少，精确输出看投入多少）----
+// 池内直换（via=pool）：报价来自协议自己的 Quoter，交易走协议的换币路由（v3 SwapRouter / v4、Infinity 的 UR），最低回报 = 报价 × (1 − 滑点)。
+// 聚合器的路线不一定比这个池好：OKX 在 BSC 上给 BNC4 报过一条经 RFQ 做市商和 Uniswap v4 hook 池的多跳路线，报价比池价高 0.5%，
+// 链上实际却少给 4–7%、被它自己的最低回报打回，而 Pancake 池本身（190 万美元流动性）直接换只差 0.3%。三家报价放一起比，谁给的多走谁
 export type SwapOffer = {
-  via: 'uniswap' | 'okx'; amountIn: bigint; amountInMax: bigint; out: bigint; text: string; at: number
+  via: 'uniswap' | 'okx' | 'pool'; amountIn: bigint; amountInMax: bigint; out: bigint; text: string; at: number
   uni?: Awaited<ReturnType<NonNullable<ReturnType<typeof uniswapApi>>['quote']>>; okx?: Awaited<ReturnType<NonNullable<ReturnType<typeof okxDex>>['swap']>>
+  pool?: { pool: Pool; zeroForOne: boolean; minOut: bigint }
 }
-export type SwapDeps = { uni: ReturnType<typeof uniswapApi>; okx: ReturnType<typeof okxDex>; via: string; fmtOut: (x: bigint) => string; outSym: string }
-// 两家都没配就没法换币，早点说清楚
-export function swapDepsFor(c: Clients, slippage: number, via: string, fmtOut: (x: bigint) => string, outSym: string): SwapDeps {
-  const d: SwapDeps = { uni: uniswapApi(c, slippage), okx: okxDex(c, slippage), via, fmtOut, outSym }
+// pools：可以直接在里面换的池（进场 = 要做 LP 的池，撤退 = 仓位所在的池），报价时逐个问；池子还不存在 / 没流动性的报价会失败，自动略过
+export type SwapDeps = { uni: ReturnType<typeof uniswapApi>; okx: ReturnType<typeof okxDex>; via: string; fmtOut: (x: bigint) => string; outSym: string; lp: Lp; slippage: number; pools: Pool[]; pub: PublicClient; wallet: Address }
+// 聚合器一家都没配也能走池内直换，但探测市场价就只能拿池价当市场价（池价偏离校正等于没有）
+export function swapDepsFor(c: Clients, slippage: number, via: string, fmtOut: (x: bigint) => string, outSym: string, pools: Pool[] = []): SwapDeps {
+  const d: SwapDeps = { uni: uniswapApi(c, slippage), okx: okxDex(c, slippage), via, fmtOut, outSym, lp: c.lp, slippage, pools, pub: c.pub, wallet: c.wallet }
   if (via === 'okx' && !d.okx) die('--via okx 需要在 .env 里配置 OKX_API_KEY / OKX_SECRET_KEY / OKX_API_PASSPHRASE')
   if (via === 'uniswap' && !d.uni) die('--via uniswap 需要在 .env 里配置 UNISWAP_API_KEY')
-  if (!d.uni && !d.okx) die('换币需要至少配置一家聚合器：.env 里的 UNISWAP_API_KEY 或 OKX_API_KEY / OKX_SECRET_KEY / OKX_API_PASSPHRASE')
-  if (c.cfg.name !== 'robinhood' && !d.okx && via !== 'uniswap') log('提示: BSC 上 Uniswap API 只看 Uniswap 自家的池，PancakeSwap 的深度要配 OKX_API_KEY 才能用到')
+  if (!d.uni && !d.okx) log('提示: 没配置聚合器（UNISWAP_API_KEY / OKX_API_KEY），换币只能在 LP 的池里直换，市场价也按池价算')
+  else if (c.cfg.name !== 'robinhood' && !d.okx && via !== 'uniswap') log('提示: BSC 上 Uniswap API 只看 Uniswap 自家的池，PancakeSwap 的深度要配 OKX_API_KEY 才能用到')
   return d
 }
-export async function swapOffers(d: SwapDeps, tokenIn: Address, tokenOut: Address, type: 'EXACT_INPUT' | 'EXACT_OUTPUT', amount: bigint): Promise<SwapOffer[]> {
-  const quiet = (e: any) => (log(`报价失败: ${String(e?.message).slice(0, 100)}`), null)
+// external = 只问聚合器（探测市场价用：拿要做 LP 的池自己当市场价，就查不出它偏离市场）；聚合器都报不出才退回池价
+export async function swapOffers(d: SwapDeps, tokenIn: Address, tokenOut: Address, type: 'EXACT_INPUT' | 'EXACT_OUTPUT', amount: bigint, o: { external?: boolean } = {}): Promise<SwapOffer[]> {
+  const quiet = (e: any) => (log(`报价失败: ${String(e?.shortMessage ?? e?.message).slice(0, 100)}`), null)
+  const aggregators = o.external || d.via !== 'pool'
+  const inPool = (p: Pool) => { const has = (t: Address) => p.currency0.toLowerCase() === t.toLowerCase() || p.currency1.toLowerCase() === t.toLowerCase(); return has(tokenIn) && has(tokenOut) }
+  const poolOffer = (p: Pool) => { // 池内报价失败（池不存在、没流动性、hook 拒绝）只是这个池不能用，不打日志
+    const zeroForOne = p.currency0.toLowerCase() === tokenIn.toLowerCase()
+    return d.lp.quoteExactIn(p, zeroForOne, amount).then((out): SwapOffer => ({ via: 'pool', amountIn: amount, amountInMax: amount, out, text: `池内 ≈${d.fmtOut(out)} ${d.outSym} (${feeText(p)} 池直换)`, pool: { pool: p, zeroForOne, minOut: (out * BigInt(Math.round((100 - d.slippage) * 100))) / 10_000n }, at: Date.now() })).catch(() => null)
+  }
+  const poolOffers = () => (type === 'EXACT_INPUT' ? Promise.all(d.pools.filter(inPool).map(poolOffer)) : Promise.resolve([])) // 池内只做精确输入
+  // OKX 报的 toTokenAmount 是它自己估的，多跳路线（RFQ 做市商、hook 池）链上常常给不到：钱包里币和授权都够的话把它的 calldata 用 eth_call 跑一遍，按实得排序；模拟就回滚的路线直接弃用。
+  // （撤退的计划阶段币还在 LP 里、余额不够，模拟必然失败，这时只能先信它，撤完真卖时再验）它的换币函数都返回 uint256 returnAmount；返回值不是这个形状、或 RPC 出错，就还按它报的算
+  const verifyOkx = async (o: SwapOffer): Promise<SwapOffer | null> => {
+    const s = o.okx!
+    try {
+      const [allowance, balance] = await Promise.all([
+        d.pub.readContract({ address: tokenIn, abi: erc20Abi, functionName: 'allowance', args: [d.wallet, await d.okx!.approver()] }),
+        d.pub.readContract({ address: tokenIn, abi: erc20Abi, functionName: 'balanceOf', args: [d.wallet] }),
+      ])
+      if (allowance < o.amountIn || balance < o.amountIn) return o
+      const { data } = await d.pub.call({ account: d.wallet, to: s.tx.to, data: s.tx.data, value: s.tx.value })
+      if (!data || data.length !== 66 || BigInt(data) === 0n) return o
+      const got = BigInt(data)
+      return got < o.out - o.out / 200n ? { ...o, out: got, text: `${o.text}，模拟实得只有 ≈${d.fmtOut(got)}` } : o
+    } catch (e: any) {
+      const msg = String(e?.shortMessage ?? e?.message)
+      if (/revert/i.test(msg)) { log(`OKX 路线模拟回滚（${msg.replace(/\s+/g, ' ').slice(0, 100)}），弃用`); return null }
+      return o
+    }
+  }
   const all = await Promise.all([
-    d.via !== 'okx' && d.uni ? d.uni.quote(tokenIn, tokenOut, type, amount).then((q): SwapOffer => ({ via: 'uniswap', amountIn: q.amountIn, amountInMax: q.amountInMax, out: q.out, text: `Uniswap ≈${d.fmtOut(q.out)} ${d.outSym}`, uni: q, at: q.at })).catch(quiet) : null,
-    d.via !== 'uniswap' && d.okx && type === 'EXACT_INPUT' // OKX 只支持精确输入
-      ? d.okx.swap(tokenIn, tokenOut, amount).then((s): SwapOffer => ({ via: 'okx', amountIn: amount, amountInMax: amount, out: s.out, text: `OKX ≈${d.fmtOut(s.out)} ${d.outSym} (${s.route})${s.honeypot ? ' 警告: OKX 标记为貔貅币' : ''}`, okx: s, at: Date.now() })).catch(quiet)
+    aggregators && d.via !== 'okx' && d.uni ? d.uni.quote(tokenIn, tokenOut, type, amount).then((q): SwapOffer => ({ via: 'uniswap', amountIn: q.amountIn, amountInMax: q.amountInMax, out: q.out, text: `Uniswap ≈${d.fmtOut(q.out)} ${d.outSym}`, uni: q, at: q.at })).catch(quiet) : null,
+    aggregators && d.via !== 'uniswap' && d.okx && type === 'EXACT_INPUT' // OKX 只支持精确输入
+      ? d.okx.swap(tokenIn, tokenOut, amount).then((s): SwapOffer => ({ via: 'okx', amountIn: amount, amountInMax: amount, out: s.out, text: `OKX ≈${d.fmtOut(s.out)} ${d.outSym} (${s.route})${s.honeypot ? ' 警告: OKX 标记为貔貅币' : ''}`, okx: s, at: Date.now() })).then(verifyOkx).catch(quiet)
       : null,
+    !o.external && (d.via === 'best' || d.via === 'pool') ? poolOffers() : [],
   ])
-  const ok = all.filter((x): x is SwapOffer => !!x)
+  let ok = all.flat().filter((x): x is SwapOffer => !!x)
+  if (ok.length === 0 && o.external) ok = (await poolOffers()).filter((x): x is SwapOffer => !!x)
   return type === 'EXACT_INPUT' ? ok.sort((a, b) => (a.out > b.out ? -1 : 1)) : ok.sort((a, b) => (a.amountIn < b.amountIn ? -1 : 1))
 }
-// 把一个报价变成可发送的交易：先做 ERC20 授权（Uniswap 给 Permit2，OKX 给它的授权合约；额度够就不发），Uniswap 再签 Permit2 消息拿到路由的 calldata
+// 把一个报价变成可发送的交易：先做 ERC20 授权（Uniswap 给 Permit2，OKX 给它的授权合约，池内直换给协议路由；额度够就不发），Uniswap 再签 Permit2 消息拿到路由的 calldata
 export async function prepareSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typeof txKit>, c: Clients, tokenIn: Address) {
   if (o.via === 'okx') {
     await kit.ensureErc20Approval(tokenIn, o.amountIn, await d.okx!.approver(), 'OKX DEX')
     return { via: 'OKX', tx: o.okx!.tx, refGas: o.okx!.tx.gasLimit }
+  }
+  if (o.via === 'pool') {
+    const tx = await d.lp.poolSwapTx(kit, o.pool!.pool, o.pool!.zeroForOne, { exactIn: o.amountIn, minOut: o.pool!.minOut }, BigInt(now() + 600))
+    return { via: '池内', tx, refGas: 0n }
   }
   await kit.ensureErc20Approval(tokenIn, o.amountInMax, '0x000000000022D473030F116dDEE9F6B43aC78BA3', 'Permit2') // Uniswap 路由用 Uniswap 的 Permit2（BSC 上 Pancake 的是另一个）
   const tx = await d.uni!.swapTx(o.uni!, c.wc!)

@@ -89,12 +89,16 @@ let [{ symbol, name, decimals }, usdgStart, ethBal, tokenStart, ethPrice, poolSl
 const usd = (wei: bigint) => (Number(formatEther(wei)) * ethPrice).toFixed(2)
 const fmtU = (x: bigint) => trim(x, Q.decimals), fmtT = (x: bigint) => trim(x, decimals)
 const symOf = (t: Address) => (t === Q.address ? Q.symbol : symbol)
-// 买币报价：Uniswap 和 OKX 同时问，取产出多的；Uniswap 常常只认一个薄池报不出大单，OKX 能找到更深的路
+// 买币报价：Uniswap、OKX 和要做 LP 的池（选定后填进 swapDeps.pools）同时问，取产出多的；Uniswap 常常只认一个薄池报不出大单，OKX 能找到更深的路，但它的多跳路线也虚报过
 const swapDeps = swapDepsFor(clients, swapSlippage, env('SWAP_VIA', 'best'), (x: bigint) => trim(x, decimals), symbol)
-const buyOffers = (type: 'EXACT_INPUT' | 'EXACT_OUTPUT', amount: bigint) => swapOffers(swapDeps, Q.address, token, type, amount)
-async function bestBuy(amount: bigint, what: string) {
-  const [o] = await buyOffers('EXACT_INPUT', amount)
-  if (!o) die(`${what}：Uniswap 和 OKX 都找不到能吃下 ${fmtU(amount)} ${Q.symbol} 的路由（代币流动性太薄），把 USDG_AMOUNT 调小再试`)
+if (!['best', 'okx', 'uniswap', 'pool'].includes(swapDeps.via)) die('SWAP_VIA 只能是 best / okx / uniswap / pool')
+const buyOffers = (type: 'EXACT_INPUT' | 'EXACT_OUTPUT', amount: bigint, external = false) => swapOffers(swapDeps, Q.address, token, type, amount, { external })
+// external = 探测市场价：只问聚合器，别拿池子自己当市场
+async function bestBuy(amount: bigint, what: string, external = false) {
+  const offers = await buyOffers('EXACT_INPUT', amount, external)
+  const [o] = offers
+  if (!o) die(`${what}：Uniswap、OKX${external ? '' : ' 和池内'}都找不到能吃下 ${fmtU(amount)} ${Q.symbol} 的路由（代币流动性太薄），把 USDG_AMOUNT 调小再试`)
+  if (!external && offers.length > 1) log(`${what}报价: ${offers.map((x) => x.text).join('；')}`)
   return o
 }
 log(`${cfg.label} / ${lp.label} | 钱包 ${wallet} | ${fmtU(usdgStart)} ${Q.symbol}, ${trim(ethBal, 18)} ${cfg.native.symbol} | ${cfg.native.symbol} $${ethPrice.toFixed(2)}`)
@@ -125,6 +129,7 @@ if (!initialized && opt['pool-select'] === 'auto' && !poolId) {
 }
 if (!pool) die(`${symbol} 在 ${lp.label} 上没有可复用的 ${Q.symbol} 池，且配置的费率 ${opt.fee}% 建不了池（${lp.tiers.map((t) => t.fee / 10000 + '%').join(' / ')} 可选）`)
 if (!(Number.isInteger(spacing) && spacing >= 1)) die('tick 间距无效')
+if (initialized) swapDeps.pools = [pool] // 池已存在才有价可报；新建的池换币只能靠聚合器
 
 const tokenIs1 = pool.currency1 === token
 const [dec0, dec1] = tokenIs1 ? [Q.decimals, decimals] : [decimals, Q.decimals]
@@ -295,7 +300,7 @@ const correctionText = (c: Correction) => {
 }
 
 // ---- 计划 ----
-const probe = await bestBuy(QU, '探测市场价') // 1 个计价币探测市场价
+const probe = await bestBuy(QU, '探测市场价', true) // 1 个计价币探测市场价
 let marketTick = tickFromProbe(probe.out)
 let marketPrice = usdgPerTokenAtTick(marketTick)
 const rate = Number(probe.out) / Number(QU)
@@ -410,7 +415,7 @@ const floorSlip = (x: bigint) => (x * BigInt(Math.round((100 - lpSlippage) * 100
 // 1) 池价校正（最多 3 轮，每轮重新探测市场价）
 if (correction) {
   for (let round = 1; ; round++) {
-    if (round > 1) { marketTick = tickFromProbe((await bestBuy(QU, '探测市场价')).out); marketPrice = usdgPerTokenAtTick(marketTick) }
+    if (round > 1) { marketTick = tickFromProbe((await bestBuy(QU, '探测市场价', true)).out); marketPrice = usdgPerTokenAtTick(marketTick) }
     const c = round === 1 ? correction : await planCorrection(marketTick, marketPrice)
     if (!c) { log(`池价偏离 ${pct(deviation(tick, marketTick))}，已在阈值内`); break }
     if (round > 3) die(`3 轮校正后池价仍偏离 ${pct(c.dev)}，放弃`)
@@ -445,8 +450,18 @@ if (budgetLeft > 0n) {
     let o = planOffer && planOffer.amountIn === swapAmount && Date.now() - planOffer.at < 20_000 ? planOffer : await bestBuy(swapAmount, '换币')
     const resized = swapShare(budgetLeft, held, ref, Number(o.out) / Number(o.amountIn))
     if (abs(resized - swapAmount) > swapAmount / 200n) { swapAmount = resized; o = await bestBuy(swapAmount, '换币') } // 差 0.5% 以上就按大单实际汇率重算
-    const got = await buy(o, '换币')
-    log(`换币完成: ${fmtU(swapAmount)} ${Q.symbol} -> ${fmtT(got)} ${symbol}`)
+    // 发送前模拟不过 / 上链回滚：多半是这家的报价虚高（OKX 的多跳路线实际给不到它报的数，自己的最低回报就把交易打回），换下一家再试，最多换 2 次；都不行才停
+    const failed = new Set<SwapOffer['via']>()
+    for (;;) {
+      try { const got = await buy(o, '换币'); log(`换币完成: ${fmtU(swapAmount)} ${Q.symbol} -> ${fmtT(got)} ${symbol}`); break } catch (e: any) {
+        if ((await holdings()).held > held) { log(`换币 (${o.via}) 报错但代币已到账，继续`); break } // 比如等回执超时，别再买一遍
+        failed.add(o.via)
+        const next = failed.size < 3 ? (await buyOffers('EXACT_INPUT', swapAmount)).find((x) => !failed.has(x.via)) : undefined
+        if (!next) throw e
+        log(`换币 (${o.via}) 失败: ${String(e?.shortMessage ?? e?.message).split('\n')[0].slice(0, 160)}，改走 ${next.text}`)
+        o = next
+      }
+    }
     ;({ spent, held } = await holdings())
     budgetLeft = usdgSpend - spent
   }
@@ -463,7 +478,7 @@ async function readPrice() {
   if (initialized) {
     log(`LP 价格: 池 tick ${tick} = ${price(tick)}`)
   } else {
-    tick = tickFromProbe((await bestBuy(QU, '探测市场价')).out)
+    tick = tickFromProbe((await bestBuy(QU, '探测市场价', true)).out)
     sqrtP = v4.getSqrtRatioAtTick(tick)
     log(`LP 价格: 新池初始价 tick ${tick} = ${price(tick)}（市场探测价）`)
   }

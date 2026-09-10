@@ -97,10 +97,10 @@ npm run ui          # 打开 http://127.0.0.1:3000（端口可用 UI_PORT 改）
 | `LP_SHAPE` | `spot` | 流动性形状：`spot` 一个仓位、区间内均匀；`curve` 同心嵌套、越靠现价越厚；`bidask` 两侧分段、越远越厚。见"形状" |
 | `LP_LAYERS` | `3` | `curve` 的层数 / `bidask` 每侧的段数（2~8），每层一个仓位，全部在同一笔交易里创建 |
 | `SWAP_SLIPPAGE` | `5` | 换币滑点 % |
-| `SWAP_VIA` | `best` | 进场换币走哪家：`best`（Uniswap、OKX 都报价取多者）/ `okx` / `uniswap`。Uniswap 路由常常只认一个薄池报不出大单，OKX 通常能找到更深的路 |
+| `SWAP_VIA` | `best` | 进场换币走哪家：`best`（Uniswap、OKX 和要做 LP 的池三方报价取多者）/ `okx` / `uniswap` / `pool`（只在 LP 的池里直换）。Uniswap 路由常常只认一个薄池报不出大单，OKX 通常能找到更深的路，但它的多跳路线也虚报过（BSC 上买 BNC4 报价比池价高 0.5%、实际少给 4–7% 被自己的最低回报打回），所以池子本身也参与比价；换币回滚会自动换下一家再试 |
 | `LP_SLIPPAGE` | `5` | 组 LP / 撤 LP 时数量的余量 %，防止交易前价格小幅波动导致失败 |
 | `MAX_DEVIATION` | `10` | 池价与市场价的最大偏离 %，超过就先校正池价（见"池价校正"） |
-| `EXIT_SWAP_VIA` | `best` | 撤退时卖币走哪家：`best`（Uniswap、OKX 都报价取高者）/ `okx` / `uniswap` |
+| `EXIT_SWAP_VIA` | `best` | 撤退时卖币走哪家：`best`（Uniswap、OKX 和仓位所在的池三方报价取高者）/ `okx` / `uniswap` / `pool` |
 | `WATCH_INTERVAL` | `10` | 监控：每隔几秒检查一次池价 |
 | `WATCH_CONFIRM` | `2` | 监控：连续几次检查都跳出区间才触发撤退（防单次插针） |
 | `WATCH_UPPER_GRACE` | `600` | 监控：价格**涨破上沿**后再等几秒没回来才撤退。此时仓位已全是 USDG，等着没有价格风险，跌回来还能继续收手续费；`0` = 不等。跌破下沿不受此影响 |
@@ -229,7 +229,7 @@ npm run exit -- --token 0x… --keep-tokens       # 只撤仓位，不卖币
 npm run exit -- --position 2027534 --percent 40 # 只撤 40% 的流动性（本金按比例、未领手续费全领），NFT 保留、剩下的继续做 LP；卖币规则同上
 npm run exit -- --position 2027534 --collect    # 只领这个仓位的手续费，本金不动（可逗号分隔多个，可以是不同代币的仓位）
 npm run exit -- --position 2027534 --collect --sell   # 领手续费，并把领到的代币卖成 USDG（USDG 那部分本来就是 USDG）；多个池/代币时领取合成 1 笔，卖币同时广播
-npm run exit -- --token 0x… --via okx           # 指定卖币走 OKX（或 uniswap）
+npm run exit -- --token 0x… --via okx           # 指定卖币走 OKX（或 uniswap / pool = 仓位所在的池直换）
 npm run exit -- --token 0x… --yes               # 跳过确认
 ```
 
