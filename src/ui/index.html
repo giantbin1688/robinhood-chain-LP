@@ -552,7 +552,7 @@
     <div class="st" id="st-fomo-status">—</div>
     <ol>
       <li><b>开一个无痕窗口</b>登录 fomo.family（refresh token 是一次性的，和你日常用的浏览器共用同一次登录会互相踢下线）</li>
-      <li>F12 → Application → Cookies → fomo.family，复制 <code>privy-token</code> 和 <code>privy-refresh-token</code> 的值（localStorage 里的 <code>privy:token</code> / <code>privy:refresh_token</code> 也是同一对）</li>
+      <li>F12 → Application → <b>Local storage</b> → https://fomo.family，复制 <code>privy:token</code> 和 <code>privy:refresh_token</code> 的值（refresh token 只在 localStorage 里，Cookies 里只有 <code>privy-token</code>；值外面的引号不用带）</li>
       <li>贴到上面，保存；然后<b>关掉无痕窗口</b>，别再用它。日常浏览器不受影响</li>
     </ol>
   </div>
