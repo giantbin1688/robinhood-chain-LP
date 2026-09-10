@@ -77,7 +77,7 @@ export async function watchToken(o: WatchOptions) {
 }
 
 // ---- 命令行入口 ----
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.env.RH_MAIN === 'watch' || import.meta.url === pathToFileURL(process.argv[1]).href) { // 直接运行，或经 run.ts 分派
   failFast()
   const { values: opt } = parseArgs({
     options: {
@@ -95,7 +95,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       json: { type: 'boolean', default: false },                           // 给网页界面用：触发撤退时打印一行 "@@plan {json}"
     },
   })
-  if (!opt.token) die('用法: npm run watch -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <代币地址> [--position <仓位id,仓位id>] [--interval 10] [--confirm 2] [--upper-grace 600] [--via okx|uniswap|best] [--dry-run]')
+  if (!opt.token) die('用法: npm run watch -- [--chain robinhood|bsc|ethereum] [--protocol v4|infinity|v3] --token <代币地址> [--position <仓位id,仓位id>] [--interval 10] [--confirm 2] [--upper-grace 600] [--via okx|uniswap|best] [--dry-run]')
   await watchToken({
     token: getAddress(opt.token), positions: opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined,
     clients: await makeClients({ from: opt.from, needKey: !opt['dry-run'] }), interval: Math.max(3, num('--interval', opt.interval, 0, 86400)), confirm: Math.max(1, num('--confirm', opt.confirm, 0, 1000)),

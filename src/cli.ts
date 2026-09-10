@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline/promises'
 import { parseArgs } from 'node:util'
 import { formatEther, getAddress, parseUnits, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
+import * as shapeMath from './shape.ts'
 import { abs, die, env, erc20Abi, failFast, feeText, log, makeClients, min, nativePriceUsd, now, num, p6, pct, savePosition, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, type SwapOffer } from './common.ts'
 import type { MintSpec, Pool } from './lp.ts'
 import { watchToken } from './monitor.ts'
@@ -35,14 +36,14 @@ const { values: opt } = parseArgs({
     json: { type: 'boolean', default: false },        // 计划确定后额外打印一行 "@@plan {json}" 给网页界面用
   },
 })
-if (!opt.token) die('用法: npm run launch -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--pool <池id>] [--range="-50%,+100%" | --price-range="0.006,0.01"] [--shape spot|curve|bidask] [--layers 3] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
+if (!opt.token) die('用法: npm run launch -- [--chain robinhood|bsc|ethereum] [--protocol v4|infinity|v3] --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--pool <池id>] [--range="-50%,+100%" | --price-range="0.006,0.01"] [--shape spot|curve|bidask] [--layers 3] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
 const token = getAddress(opt.token)
 const poolId = opt.pool.trim()
 if (poolId && !/^0x[0-9a-fA-F]{40}$|^0x[0-9a-fA-F]{64}$/.test(poolId)) die(`--pool 必须是池 id（v4/Infinity 为 32 字节 hex，v3 为池地址），当前 "${opt.pool}"`)
 let fee = Math.round(Number(opt.fee) * 10_000) // pips
 if (!poolId && !(fee > 0 && fee <= 1_000_000)) die(`POOL_FEE / --fee 必须是 (0, 100] 之间的百分比，当前 "${opt.fee}"`)
 if (!['auto', 'exact'].includes(opt['pool-select'])) die('POOL_SELECT / --pool-select 只能是 auto 或 exact')
-const shape = opt.shape.toLowerCase().replace('-', '') as 'spot' | 'curve' | 'bidask'
+const shape = opt.shape.toLowerCase().replace('-', '') as shapeMath.Shape
 if (!['spot', 'curve', 'bidask'].includes(shape)) die(`LP_SHAPE / --shape 只能是 spot、curve 或 bidask，当前 "${opt.shape}"`)
 const layers = Number(opt.layers)
 if (!(Number.isInteger(layers) && layers >= 2 && layers <= 8)) die(`LP_LAYERS / --layers 必须是 [2, 8] 的整数，当前 "${opt.layers}"`)
@@ -169,59 +170,18 @@ const rangeText = ([lo, hi]: readonly [number, number]) => {
   const [a, b] = [usdgPerTokenAtTick(lo), usdgPerTokenAtTick(hi)].sort((x, y) => x - y)
   return `ticks [${lo}, ${hi}] = ${p6(a)} .. ${p6(b)} ${Q.symbol}/${symbol} (${rangeLabel})`
 }
-// 形状 = 把一个区间拆成几个仓位，g 是各仓位的流动性权重（同一份流动性 L 按 g 倍分配，各仓位要多少计价币 / 代币由几何决定）：
-//   spot   一个仓位
-//   curve  layers 个同心嵌套仓位，每层宽度减半、权重相同 -> 现价附近被所有层覆盖，最厚；越往外越薄
-//   bidask 现价两侧各 layers 段互不重叠，第 k 段权重 k -> 离现价越远越厚；含现价的那一格空着（跌买涨卖，不做市）
-// 单边区间（整体在现价一侧）以靠近现价的那条边为锚点。区间太窄时相邻层会取整到同一组 tick，合并
-type Leg = { lo: number; hi: number; g: number }
+// 形状 = 把一个区间拆成几个仓位（数学在 shape.ts，和 Solana 的 Raydium CLMM 共用），g 是各仓位的流动性权重
+type Leg = shapeMath.Leg
 function legsFor(t: number): Leg[] {
   const [lo, hi] = rangeFor(t)
-  if (shape === 'spot') return [{ lo, hi, g: 1 }]
-  const below = hi <= t, above = lo > t
-  const [c0, c1] = [v4.floorToSpacing(t, spacing), v4.floorToSpacing(t, spacing) + spacing] // 含现价的那一格
-  const raw: Leg[] = []
-  const add = (l: number, h: number, g: number) => { l = Math.max(lo, l); h = Math.min(hi, h); if (h > l) raw.push({ lo: l, hi: h, g }) }
-  const round = (x: number) => Math.round(x / spacing) * spacing
-  if (shape === 'curve') {
-    const a = below ? hi : above ? lo : t
-    for (let i = 0; i < layers; i++) {
-      const f = 0.5 ** i
-      let l = v4.floorToSpacing(a - (a - lo) * f, spacing), h = v4.ceilToSpacing(a + (hi - a) * f, spacing)
-      if (below) l = Math.min(l, hi - spacing); else if (above) h = Math.max(h, lo + spacing); else { l = Math.min(l, c0); h = Math.max(h, c1) } // 每层至少一格，双边时都要跨过现价
-      add(l, h, 1)
-    }
-  } else {
-    const inLo = below ? hi : c0, inHi = above ? lo : c1 // 靠近现价的内侧边界：下侧 ≤ 现价，上侧 > 现价
-    if (!above) for (let k = 1; k <= layers; k++) add(k === layers ? lo : round(inLo - ((inLo - lo) * k) / layers), k === 1 ? inLo : round(inLo - ((inLo - lo) * (k - 1)) / layers), k)
-    if (!below) for (let k = 1; k <= layers; k++) add(k === 1 ? inHi : round(inHi + ((hi - inHi) * (k - 1)) / layers), k === layers ? hi : round(inHi + ((hi - inHi) * k) / layers), k)
-  }
-  raw.sort((x, y) => x.lo - y.lo || x.hi - y.hi)
-  const legs: Leg[] = []
-  for (const l of raw) { const p = legs[legs.length - 1]; if (p && p.lo === l.lo && p.hi === l.hi) p.g += l.g; else legs.push({ ...l }) }
+  const legs = shapeMath.shapeLegs({ lo, hi, t, spacing, shape, layers, tokenIs1 })
   if (!legs.length) die(`区间 ${rangeLabel} 太窄，拆不出 ${shapeLabel} 的仓位`)
-  if (tokenIs1) legs.reverse() // 按代币价格从低到高排（代币是 currency1 时 tick 越大价格越低）
   return legs
 }
-// 仓位相对现价的位置：tick 比现价低的一侧全是 currency1，高的一侧全是 currency0
-const legSide = (l: Leg, t: number) => (l.hi <= t ? (tokenIs1 ? 'token' : 'usdg') : l.lo > t ? (tokenIs1 ? 'usdg' : 'token') : 'both')
+const legSide = (l: Leg, t: number) => shapeMath.legSide(l, t, tokenIs1)
 const legText = (l: Leg) => { const [a, b] = [usdgPerTokenAtTick(l.lo), usdgPerTokenAtTick(l.hi)].sort((x, y) => x - y); return `ticks [${l.lo}, ${l.hi}] = ${p6(a)} .. ${p6(b)}` }
-// 价格 sqrt(sp) 处、区间 [lo, hi] 每单位流动性需要多少 currency0 / currency1（基础单位，浮点，只用于配比；真实数量用 v4.amountsForLiquidity）
-function unitAmounts(sp: number, lo: number, hi: number) {
-  const sa = Math.sqrt(v4.priceAtTick(lo)), sb = Math.sqrt(v4.priceAtTick(hi))
-  const a0 = sp >= sb ? 0 : (sb - Math.max(sp, sa)) / (Math.max(sp, sa) * sb)
-  const a1 = sp <= sa ? 0 : Math.min(sp, sb) - sa
-  return [a0, a1] as const
-}
-// 整套仓位在 tick t 处每单位流动性需要多少代币 / 计价币（基础单位）
-function mixAt(t: number, legs = legsFor(t)) {
-  const sp = Math.sqrt(v4.priceAtTick(t))
-  let tok = 0, usdg = 0
-  for (const l of legs) { const [a0, a1] = unitAmounts(sp, l.lo, l.hi); tok += l.g * (tokenIs1 ? a1 : a0); usdg += l.g * (tokenIs1 ? a0 : a1) }
-  return { tok, usdg }
-}
 // 每 1 计价币基础单位的预算要配多少代币基础单位（p = 每个代币基础单位值多少计价币基础单位）：0 = 只要计价币，1/p = 只要代币
-const tokenPerUsdg = (t: number, p: number) => { const { tok, usdg } = mixAt(t); return tok === 0 ? 0 : tok / (tok * p + usdg) }
+const tokenPerUsdg = (t: number, p: number) => shapeMath.tokenPerUsdg(legsFor(t), t, p, tokenIs1)
 // 预算拆分：已持有 held 个代币、按市场汇率 rate（代币基础单位 / 计价币基础单位）换币，换多少计价币能让各仓位 mint 后两边刚好用尽
 function swapShare(budget: bigint, held: bigint, refTick: number, rate: number) {
   const p = 1 / rate
@@ -344,12 +304,7 @@ log(`计划: ${planOffer ? `换币 ≈${fmtU(estSwap)} ${Q.symbol} -> ${planOffe
 log(`计划: 区间 ${rangeText(rangeFor(refTick))}，滑点 换币 ${swapSlippage}% / LP ${lpSlippage}%`)
 // 各仓位按当前配比占预算的份额（按市场价折成计价币）
 const planLegs = legsFor(refTick)
-const legShares = (() => {
-  const sp = Math.sqrt(v4.priceAtTick(refTick)), p = 1 / rate
-  const v = planLegs.map((l) => { const [a0, a1] = unitAmounts(sp, l.lo, l.hi); return l.g * ((tokenIs1 ? a1 : a0) * p + (tokenIs1 ? a0 : a1)) })
-  const sum = v.reduce((a, b) => a + b, 0)
-  return v.map((x) => (sum > 0 ? x / sum : 0))
-})()
+const legShares = shapeMath.legShares(planLegs, refTick, 1 / rate, tokenIs1)
 if (shape !== 'spot') {
   log(`计划: 形状 ${shapeLabel}，共 ${planLegs.length} 个仓位（同一笔交易创建）:`)
   planLegs.forEach((l, i) => log(`  #${i + 1} ${legText(l)} ${Q.symbol}/${symbol}，≈${(legShares[i] * 100).toFixed(0)}% 资金${{ usdg: `（全 ${Q.symbol}）`, token: '（全代币）', both: '' }[legSide(l, refTick)]}`))
@@ -485,38 +440,8 @@ async function readPrice() {
 }
 await readPrice()
 let legs = legsFor(tick)
-// 4) 由持有量算各仓位的流动性：单仓按余额精确算；多仓共用一份流动性 L（先按配比算出整套最多能组多大，第 i 个仓位 L×g_i），
-//    全部放进同一笔交易。每个仓位的 amountMax = 实际扣款 + 余量，合计不超过持有量（超了就把剩余空间按扣款比例分）
-function planMints(avail0: bigint, avail1: bigint) {
-  const sqrts = legs.map((l) => [v4.getSqrtRatioAtTick(l.lo), v4.getSqrtRatioAtTick(l.hi)] as const)
-  const amountsOf = (liq: bigint[]) => liq.map((x, j) => v4.amountsForLiquidity(sqrtP, sqrts[j][0], sqrts[j][1], x))
-  const sumOf = (xs: [bigint, bigint][]) => xs.reduce(([a, b], [x0, x1]) => [a + x0, b + x1] as [bigint, bigint], [0n, 0n])
-  let liq: bigint[] = []
-  if (legs.length === 1) liq = [v4.liquidityForAmounts(sqrtP, sqrts[0][0], sqrts[0][1], avail0, avail1)]
-  else {
-    const sp = Math.sqrt(v4.priceFromSqrtX96(sqrtP))
-    let tot0 = 0, tot1 = 0
-    for (const l of legs) { const [a0, a1] = unitAmounts(sp, l.lo, l.hi); tot0 += l.g * a0; tot1 += l.g * a1 }
-    let L = Math.min(tot0 > 0 ? Number(avail0) / tot0 : Infinity, tot1 > 0 ? Number(avail1) / tot1 : Infinity)
-    if (!Number.isFinite(L)) return null
-    for (let i = 0; ; i++) { // 浮点配比与链上向上取整有微小误差：合计超出持有量就整体缩 0.01% 再算
-      liq = legs.map((l) => BigInt(Math.floor(L * l.g)))
-      const [s0, s1] = sumOf(amountsOf(liq))
-      if (s0 <= avail0 && s1 <= avail1) break
-      if (i >= 20) return null
-      L *= 0.9999
-    }
-  }
-  if (liq.some((x) => x === 0n)) return null
-  const amounts = amountsOf(liq), [sum0, sum1] = sumOf(amounts)
-  const maxes = (xs: bigint[], sum: bigint, avail: bigint) => {
-    const want = xs.map((x) => (x * BigInt(Math.round((100 + lpSlippage) * 100))) / 10_000n)
-    return want.reduce((a, b) => a + b, 0n) <= avail || sum === 0n ? want : xs.map((x) => x + ((avail - sum) * x) / sum)
-  }
-  const m0 = maxes(amounts.map((a) => a[0]), sum0, avail0), m1 = maxes(amounts.map((a) => a[1]), sum1, avail1)
-  const specs: MintSpec[] = legs.map((l, j) => ({ tickLower: l.lo, tickUpper: l.hi, liquidity: liq[j], amount0: amounts[j][0], amount1: amounts[j][1], amount0Max: m0[j], amount1Max: m1[j], amount0Min: floorSlip(amounts[j][0]), amount1Min: floorSlip(amounts[j][1]) }))
-  return { specs, amounts, sum0, sum1 }
-}
+// 4) 由持有量算各仓位的流动性（shape.ts）：单仓按余额精确算；多仓共用一份流动性 L，全部放进同一笔交易
+const planMints = (avail0: bigint, avail1: bigint) => shapeMath.planMints(legs, sqrtP, avail0, avail1, lpSlippage)
 let result: Awaited<ReturnType<typeof mint>> | undefined
 for (let attempt = 1; !result; attempt++) {
   if (attempt > 1) await readPrice()

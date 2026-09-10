@@ -3,14 +3,14 @@
 // 并在链上核对过（CLPositionManager.clPoolManager()/vault()/permit2()、NPM/SwapRouter/QuoterV2 的 factory() 都互相指向）
 import { getAddress, type Address } from 'viem'
 
-export type ChainName = 'robinhood' | 'bsc'
+export type ChainName = 'robinhood' | 'bsc' | 'ethereum'
 export type ProtocolName = 'v4' | 'infinity' | 'v3'
 
 export type Token = { address: Address; symbol: string; decimals: number }
 export type ChainConfig = {
   name: ChainName; id: number; label: string
   native: { symbol: string; decimals: number }; wnative: Address
-  quote: Token                       // LP 的计价币（Robinhood: USDG；BSC: USDT）
+  quote: Token                       // LP 的计价币（Ethereum: USDC；Robinhood: USDG；BSC: USDT）
   publicRpc: string; rpcEnv: string  // 自己的节点从这个环境变量读
   explorer: string; gecko: string    // GeckoTerminal 的 network id
   okxChainIndex: number
@@ -28,6 +28,34 @@ const UNI_PERMIT2 = '0x000000000022D473030F116dDEE9F6B43aC78BA3' as Address // U
 const PCS_PERMIT2 = '0x31c2F6fcFf4F8759b3Bd5Bf0e1084A055615c768' as Address // PancakeSwap 自己部署的 Permit2
 
 export const CHAINS: Record<ChainName, ChainConfig> = {
+  ethereum: {
+    name: 'ethereum', id: 1, label: 'Ethereum Mainnet',
+    native: { symbol: 'ETH', decimals: 18 }, wnative: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+    quote: { address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', symbol: 'USDC', decimals: 6 },
+    publicRpc: 'https://ethereum-rpc.publicnode.com', rpcEnv: 'ETH_RPC_URL',
+    explorer: 'https://etherscan.io', gecko: 'eth', okxChainIndex: 1,
+    protocols: ['v4', 'v3'], multicall3: MULTICALL3,
+    nativePrice: { protocol: 'v3', fee: 500, spacing: 10 },
+    // Uniswap sdk-core 主网部署；UniversalRouter 2.1.1（对应 minHopPriceX36 编码）。
+    contracts: {
+      v4: {
+        permit2: UNI_PERMIT2, urMinHop: true,
+        poolManager: '0x000000000004444c5dc75cB358380D2e3dE08A90',
+        positionManager: getAddress('0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e'),
+        stateView: getAddress('0x7ffe42c4a5deea5b0fec41c94c136cf115597227'),
+        quoter: getAddress('0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203'),
+        universalRouter: '0x4C82D1fBFe28C977cBB58D8C7FF8FCF9F70a2cCA',
+      },
+      v3: {
+        permit2: UNI_PERMIT2,
+        factory: '0x1F98431c8aD98523631AE4a59f267346ea31F984', deployer: '0x1F98431c8aD98523631AE4a59f267346ea31F984',
+        positionManager: '0xC36442b4a4522E871399CD717aBDD847Ab11FE88',
+        // 原版 SwapRouter 带 deadline；不使用参数结构不同的 SwapRouter02。
+        swapRouter: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
+        quoter: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
+      },
+    },
+  },
   robinhood: {
     name: 'robinhood', id: 4663, label: 'Robinhood Chain',
     native: { symbol: 'ETH', decimals: 18 }, wnative: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73',
@@ -80,6 +108,7 @@ export const CHAINS: Record<ChainName, ChainConfig> = {
 }
 
 export const PROTOCOL_LABEL: Record<ProtocolName, string> = { v4: 'Uniswap v4', infinity: 'PancakeSwap Infinity', v3: 'PancakeSwap v3' }
+export const protocolLabel = (chain: ChainName, protocol: ProtocolName) => chain === 'ethereum' && protocol === 'v3' ? 'Uniswap v3' : PROTOCOL_LABEL[protocol]
 
 // 命令行 --chain=x / --chain x（或环境变量 CHAIN），协议同理；不合法就报错退出
 export function selectChain(argv = process.argv, env = process.env): { cfg: ChainConfig; protocol: ProtocolName } {

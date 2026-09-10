@@ -1,5 +1,5 @@
 // 信号：盯 FOMO（fomo.family）交易者的买入 / 卖出，记一条信号并提醒，买入的币顺手做一遍代币安全检查，推到网页 / Telegram。
-// 数据源只有 rhtrenches.com（rht.ts）：第三方、公开、免登录的 fomo 头部交易者成交流（Robinhood 链 147 人），WebSocket 实时推 + 接口轮询兜底。
+// 数据源：Robinhood 用 rhtrenches.com，BSC 用 bsctrenches.com；公开 API + WebSocket，按链独立监听。
 //   它还标出「别人买了塞进钱包」（planted / transferred / spoofed / airdropped）——这种在链上和本人买入一模一样，只有付款方不同；标了的记成 dust，不提醒、不查安全。
 //   fomo.family 自己没有公开 API（后端要登录态的 Privy token，且在 Cloudflare 机器人拦截后面），试过、放弃了。
 //   自己盯链（按钱包地址扫 ERC-20 Transfer 日志）也做过：公共节点前面是 Cloudflare 动不动 429 / 人机验证，Alchemy 免费档 eth_getLogs 一次只给 10 块，
@@ -27,7 +27,7 @@ type Store = { traders: Trader[]; signals: Signal[]; seq: number }
 
 const FILE = new URL('../signals.json', import.meta.url)
 const MAX_SIGNALS = 1000
-const CHAIN: ChainName = 'robinhood' // rhtrenches 只盯 Robinhood 链
+const feeds = { robinhood: rht.createFeed('robinhood'), bsc: rht.createFeed('bsc') }
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`
 
@@ -39,23 +39,27 @@ const save = () => { if (saveTimer) return; saveTimer = setTimeout(() => { saveT
 // ---- 交易者名单 ----
 export const traders = () => store.traders
 export const signals = (chain?: ChainName) => (chain ? store.signals.filter((s) => s.chain === chain) : store.signals)
-// 只能加 rhtrenches 名单里的人：信号全靠它推，名单外的钱包永远收不到。只填 handle 就从名单里取钱包；填了钱包也要在名单里
+// 只能加对应链数据源名单里的人：信号全靠它推，名单外的钱包永远收不到。只填 handle 就从名单里取钱包；填了钱包也要在名单里
 export async function addTrader(o: { handle: string; wallet?: string; chain: ChainName }): Promise<Trader> {
   const handle = o.handle.trim().replace(/^@/, '')
   if (!/^[A-Za-z0-9_.-]{1,40}$/.test(handle)) throw new Error('handle 只能是字母 / 数字 / _ . -')
-  if (o.chain !== CHAIN) throw new Error('rhtrenches 只盯 Robinhood Chain 上的 fomo 交易者')
-  const list = await rht.traders().catch(() => null)
-  if (!list) throw new Error('rhtrenches 名单拉不下来（它挂了或网络不通），稍后再试')
+  if (o.chain !== 'robinhood' && o.chain !== 'bsc') throw new Error('这条链暂无 FOMO 信号源')
+  const chain = o.chain
+  const feed = feeds[o.chain]
+  if (!feed) throw new Error('信号支持 Robinhood Chain / BSC')
+  const source = new URL(rht.SOURCES[o.chain]).hostname
+  const list = await feed.traders().catch(() => null)
+  if (!list) throw new Error(`${source} 名单拉不下来（它挂了或网络不通），稍后再试`)
   const given = o.wallet?.trim() ?? ''
   const hit = given ? list.find((t) => same(t.address, given)) : list.find((t) => t.handle.toLowerCase() === handle.toLowerCase())
-  if (!hit) throw new Error(given ? `这个钱包不在 rhtrenches 的名单（${list.length} 人）里，收不到它的信号` : `@${handle} 不在 rhtrenches 的名单（${list.length} 人）里，收不到他的信号。名单：rhtrenches.com 的 Traders 页`)
-  if (!isAddress(hit.address)) throw new Error('rhtrenches 返回的钱包地址不合法')
+  if (!hit) throw new Error(given ? `这个钱包不在 ${source} 的名单（${list.length} 人）里，收不到它的信号` : `@${handle} 不在 ${source} 的名单（${list.length} 人）里，收不到他的信号。名单：${source} 的 Traders 页`)
+  if (!isAddress(hit.address)) throw new Error(`${source} 返回的钱包地址不合法`)
   const w = getAddress(hit.address)
   if (store.traders.some((t) => t.chain === o.chain && same(t.wallet, w))) throw new Error(`这个钱包已经在盯着了（@${store.traders.find((t) => same(t.wallet, w))!.handle}）`)
   const t: Trader = { handle: hit.handle || handle, wallet: w, chain: o.chain, on: true, muted: false, addedAt: Date.now() }
   store.traders.push(t); save()
-  // 把 rhtrenches 最近的成交里这个人的补进来（静默，不提醒），不用等他下一笔
-  rht.tape(400).then((rows) => { for (const f of rows) if (same(f.wallet, w)) ingestFill(f, false) }).catch(() => {})
+  // 把数据源 最近的成交里这个人的补进来（静默，不提醒），不用等他下一笔
+  feed.tape(400).then((rows) => { for (const f of rows) if (same(f.wallet, w)) ingestFill(chain, f, false) }).catch(() => {})
   return t
 }
 export function updateTrader(chain: ChainName, wallet: string, patch: Partial<Pick<Trader, 'on' | 'muted' | 'handle'>>) {
@@ -72,7 +76,7 @@ export function removeTrader(chain: ChainName, wallet: string) {
 export function clearSignals(chain: ChainName) { store.signals = store.signals.filter((s) => s.chain !== chain); save() }
 
 // signal 事件带 alert=true 表示该弹提醒（新的、确认过的买卖）；更新 / 补标记 / 回填的不弹
-type Emit = (ev: { type: 'signal'; signal: Signal; alert?: boolean } | { type: 'rht'; status: rht.RhtStatus }) => void
+type Emit = (ev: { type: 'signal'; signal: Signal; alert?: boolean } | { type: 'rht'; chain: ChainName; status: rht.RhtStatus }) => void
 let emit: Emit = () => {}
 export const onEvent = (fn: Emit) => { emit = fn }
 
@@ -110,21 +114,21 @@ async function runSafetyNow(sig: Signal, notify: boolean) {
   }
 }
 
-// ---- rhtrenches 的成交 -> 信号（只收我们盯着的、开着的钱包）。同一笔（tx + 代币 + 钱包）再推一次就更新标记 ----
+// ---- 对应链数据源的成交 -> 信号（只收我们盯着的、开着的钱包）。同一笔（tx + 代币 + 钱包）再推一次就更新标记 ----
 const isPlantedFlag = (f: string) => /planted|transferred|spoofed|airdropped/i.test(f)
 const usdText = (v: number | null) => (v === null || v === undefined ? '' : ` $${v >= 100 ? Math.round(v).toLocaleString('en-US') : v.toFixed(2)}`)
 const fmtAmt = (v: number) => (v >= 1e9 ? `${(v / 1e9).toFixed(2)}B` : v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}K` : v >= 1 ? v.toFixed(2) : v.toPrecision(3))
-function ingestFill(f: rht.Fill, live: boolean) {
-  const t = store.traders.find((x) => x.chain === CHAIN && same(x.wallet, f.wallet))
+function ingestFill(chain: rht.FeedChain, f: rht.Fill, live: boolean) {
+  const t = store.traders.find((x) => x.chain === chain && same(x.wallet, f.wallet))
   if (!t || !t.on || !isAddress(f.token) || !isAddress(f.wallet)) return
   const planted = f.flags.filter(isPlantedFlag)
   const kind: SignalKind = planted.length ? 'dust' : f.side
   const amt = fmtAmt(f.amount)
-  const note = f.flags.length ? `［rhtrenches: ${f.flags.join('；')}］` : ''
+  const note = f.flags.length ? `［${new URL(rht.SOURCES[chain]).hostname}: ${f.flags.join('；')}］` : ''
   const text = planted.length
     ? `${t.handle} 钱包${f.side === 'buy' ? '收到' : '转出'} ${f.symbol}${usdText(f.usd)}（${amt} 枚）——不是本人${f.side === 'buy' ? '买入' : '卖出'}：${planted.join('；')}（别人买了塞进来 / 转进来的）`
     : `${t.handle} ${f.side === 'buy' ? '买入' : '卖出'} ${f.symbol}${usdText(f.usd)}（${amt} 枚）${note}`
-  const existing = store.signals.find((s) => same(s.tx, f.tx) && same(s.token, f.token) && same(s.wallet, f.wallet))
+  const existing = store.signals.find((s) => s.chain === chain && same(s.tx, f.tx) && same(s.token, f.token) && same(s.wallet, f.wallet))
   if (existing) {
     existing.flags = f.flags
     if (existing.kind !== kind) {
@@ -133,12 +137,12 @@ function ingestFill(f: rht.Fill, live: boolean) {
       else if (kind === 'buy' && !existing.safety) { existing.safety = { status: 'pending', reasons: [], facts: {}, at: Date.now() }; void runSafety(existing, live) }
       if (live && (kind === 'buy' || kind === 'sell')) alertSignal(existing)
     }
-    else if (f.flags.length && !existing.text.includes('rhtrenches')) existing.text = text
+    else if (f.flags.length && !existing.text.includes(new URL(rht.SOURCES[chain]).hostname)) existing.text = text
     if (f.usd) { existing.sizeUsd = f.usd; existing.price = f.price }
     save(); emit({ type: 'signal', signal: existing })
     return
   }
-  const sig: Signal = { id: ++store.seq, time: f.ts * 1000, block: f.block, chain: CHAIN, handle: t.handle, wallet: t.wallet, kind, token: getAddress(f.token), symbol: f.symbol, decimals: 0, amount: String(f.amount), sizeUsd: f.usd, price: f.price, tx: f.tx, text, safety: kind === 'buy' ? { status: 'pending', reasons: [], facts: {}, at: Date.now() } : null, source: 'rht', flags: f.flags }
+  const sig: Signal = { id: ++store.seq, time: f.ts * 1000, block: f.block, chain, handle: t.handle, wallet: t.wallet, kind, token: getAddress(f.token), symbol: f.symbol, decimals: 0, amount: String(f.amount), sizeUsd: f.usd, price: f.price, tx: f.tx, text, safety: kind === 'buy' ? { status: 'pending', reasons: [], facts: {}, at: Date.now() } : null, source: 'rht', flags: f.flags }
   store.signals.push(sig)
   if (store.signals.length > MAX_SIGNALS) store.signals.splice(0, store.signals.length - MAX_SIGNALS)
   save()
@@ -147,7 +151,7 @@ function ingestFill(f: rht.Fill, live: boolean) {
   if (kind === 'buy') void runSafety(sig, live)
   if (live && (kind === 'buy' || kind === 'sell')) alertSignal(sig)
 }
-export const rhtStatus = rht.rhtStatus
+export const rhtStatus = (chain: ChainName = 'robinhood') => chain === 'ethereum' ? null : feeds[chain].rhtStatus()
 
 // 网页上手动点「重新检查」：绕过缓存
 export async function recheckToken(chain: ChainName, token: Address) {
@@ -158,7 +162,7 @@ export async function recheckToken(chain: ChainName, token: Address) {
   return r
 }
 export function start() {
-  void rht.start({ onFill: ingestFill, onStatus: (status) => emit({ type: 'rht', status }) })
+  for (const chain of Object.keys(feeds) as rht.FeedChain[]) void feeds[chain].start({ onFill: (f, live) => ingestFill(chain, f, live), onStatus: (status) => emit({ type: 'rht', chain, status }) })
   // 上次没查完 / 查失败（Gecko 限流之类）的买入，排队再查一遍
   for (const sig of store.signals) if (sig.kind === 'buy' && (!sig.safety || sig.safety.status === 'pending' || sig.safety.status === 'error')) runSafety(sig, false)
 }

@@ -36,13 +36,36 @@ const two = encodeMintUnlockData(key, [{ tickLower: 334000, tickUpper: 349000, l
 assert.ok(two.includes('02020d'.padEnd(64, '0')), 'actions 0x02020d')
 
 // PancakeSwap（BSC）：v3 池地址的 create2 推导、Infinity PoolKey 的 poolId（含带 hook 的动态费率池），都对照链上已知的池
-const { computePoolAddress } = await import('./lp-v3.ts')
+const { computePoolAddress, UNI_POOL_INIT_CODE_HASH, v3Tiers } = await import('./lp-v3.ts')
+const { CHAINS: chainConfigs, selectChain: chooseChain, protocolLabel: labelOf } = await import('./chains.ts')
+const ethConfig = chainConfigs.ethereum
+assert.equal(chooseChain(['--chain=ethereum'], {}).cfg.id, 1)
+assert.equal(labelOf('ethereum', 'v3'), 'Uniswap v3')
+assert.equal(computePoolAddress(ethConfig.contracts.v3!.factory as `0x${string}`, ethConfig.quote.address, ethConfig.wnative, 500, UNI_POOL_INIT_CODE_HASH), '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640', 'Uniswap v3 USDC/WETH 0.05% CREATE2')
+assert.deepEqual(v3Tiers('ethereum').map((t) => [t.fee, t.spacing]), [[100, 1], [500, 10], [3000, 60], [10000, 200]])
+assert.equal(v3Tiers('bsc')[2].fee, 2500, 'Pancake v3 fee tier remains independent')
 const USDT = '0x55d398326f99059fF775485246999027B3197955', CAKE = '0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82'
 assert.equal(computePoolAddress('0x41ff9AA7e16B8B1a8a8dc4f0eFacd93D02d071c9', CAKE, USDT, 2500), '0x7f51c8AaA6B0599aBd16674e2b17FEc7a9f674A1', 'Pancake v3 CAKE/USDT 0.25% pool address')
 const { encodeAbiParameters } = await import('viem')
 const INFI_KEY = { type: 'tuple', components: [{ name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'hooks', type: 'address' }, { name: 'poolManager', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'parameters', type: 'bytes32' }] } as const
 const infiId = keccak256(encodeAbiParameters([INFI_KEY], [{ currency0: CAKE, currency1: USDT, hooks: '0x1A3DFBCAc585e22F993Cc8e09BcC0dB388Cc1Ca3', poolManager: '0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b', fee: 0x800000, parameters: '0x0000000000000000000000000000000000000000000000000000000000320040' }]))
 assert.equal(infiId, '0x47516855520496b84a169f7bb92ace7ffb6e8c535bccb52a308ccff113aeccfb', 'Infinity CAKE/USDT dynamic-fee pool id')
+
+// Solana：Raydium CLMM 的 sqrtPriceX64 左移 32 位当 X96 直接用 v4.ts 的 tick 数学（Raydium 的常数表按 64 位精度算，相对差在 1e-11 以内，远小于滑点余量），
+// Meteora DLMM 的 bin 价格公式 (1 + binStep/1e4)^binId 与 SDK 一致（SOL/USDC 池 binStep 4、活跃 bin -5721 时 SDK 报 0.101475 USDC 每 lamport 组… 即每 SOL 101.475）
+const { TickUtil } = await import('@raydium-io/raydium-sdk-v2')
+for (const tick of [-443636, -22885, -1, 0, 1, 81831, 443636]) {
+  const sdk = BigInt(TickUtil.getSqrtPriceAtTick(tick).toString()), mine = getSqrtRatioAtTick(tick) >> 32n
+  const diff = mine > sdk ? mine - sdk : sdk - mine
+  assert.ok(diff * 10n ** 10n <= sdk, `Raydium sqrtPriceX64 at tick ${tick}: sdk ${sdk} vs v4>>32 ${mine}`)
+}
+const dlmmSdk: any = await import('@meteora-ag/dlmm')
+const binPrice = (binId: number, binStep: number) => (1 + binStep / 10_000) ** binId
+for (const [binId, binStep] of [[-5721, 4], [-823, 100], [0, 1], [1200, 25]] as const) {
+  const sdk = Number(dlmmSdk.getPriceOfBinByBinId(binId, binStep).toString())
+  assert.ok(Math.abs(binPrice(binId, binStep) / sdk - 1) < 1e-9, `DLMM bin ${binId} step ${binStep}: sdk ${sdk} vs ${binPrice(binId, binStep)}`)
+}
+assert.ok(Math.abs(binPrice(-5721, 4) * 1e3 - 101.475) < 0.01, 'SOL/USDC active bin -5721 ≈ 101.475 USDC/SOL')
 
 // 网页内联脚本只做语法解析（不执行）：一个重复声明就会让整个页面不动，右上角停在"连接中…"
 for (const [, src] of readFileSync(new URL('./ui/index.html', import.meta.url), 'utf8').matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)) new Function(src)

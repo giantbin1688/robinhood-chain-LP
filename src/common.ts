@@ -7,6 +7,7 @@ import {
   type Address, type Hex, type PublicClient, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
+import { rpcUrl as settingsRpcUrl, uniswapApiUrl } from './settings.ts'
 import * as v4 from './v4.ts'
 import { CHAINS, selectChain, type ChainConfig, type ChainName, type ProtocolName } from './chains.ts'
 import { makeLp, type Lp, type Pool } from './lp.ts'
@@ -62,7 +63,7 @@ export async function makeClients(o: ClientsOptions = {}) {
   const account = process.env.PRIVATE_KEY ? privateKeyToAccount(process.env.PRIVATE_KEY as Hex) : undefined
   const wallet: Address = account?.address ?? (o.from ? getAddress(o.from) : die('请在 .env 里设置 PRIVATE_KEY（或 --dry-run 配合 --from <地址>）'))
   if (!account && needKey) die('非 --dry-run 模式必须提供 PRIVATE_KEY')
-  const rpc = process.env[cfg.rpcEnv]
+  const rpc = settingsRpcUrl(cfg.name, cfg.rpcEnv) || undefined // 设置页优先，其次 .env
   const own = !!rpc && rpc !== cfg.publicRpc
   const chain = viemChain(cfg, rpc ?? cfg.publicRpc)
   const transport = own
@@ -99,7 +100,7 @@ export async function nativePriceUsd(c: Clients) {
 // ---- Uniswap Trading API（聚合路由；BSC 上它只走 Uniswap 自家的池，Pancake 的深度看不到，所以 BSC 主要靠 OKX）----
 export function uniswapApi(c: Pick<Clients, 'wallet' | 'cfg'>, slippage: number) {
   const { wallet, cfg } = c
-  const API_URL = process.env.UNISWAP_API_URL ?? 'https://trade-api.gateway.uniswap.org/v1'
+  const API_URL = uniswapApiUrl() || 'https://trade-api.gateway.uniswap.org/v1'
   const API_KEY = process.env.UNISWAP_API_KEY ?? ''
   if (!API_KEY) return null
   async function api(path: string, body: unknown): Promise<any> {
@@ -248,7 +249,7 @@ export function swapDepsFor(c: Clients, slippage: number, via: string, fmtOut: (
   if (via === 'okx' && !d.okx) die('--via okx 需要在 .env 里配置 OKX_API_KEY / OKX_SECRET_KEY / OKX_API_PASSPHRASE')
   if (via === 'uniswap' && !d.uni) die('--via uniswap 需要在 .env 里配置 UNISWAP_API_KEY')
   if (!d.uni && !d.okx) log('提示: 没配置聚合器（UNISWAP_API_KEY / OKX_API_KEY），换币只能在 LP 的池里直换，市场价也按池价算')
-  else if (c.cfg.name !== 'robinhood' && !d.okx && via !== 'uniswap') log('提示: BSC 上 Uniswap API 只看 Uniswap 自家的池，PancakeSwap 的深度要配 OKX_API_KEY 才能用到')
+  else if (c.cfg.name === 'bsc' && !d.okx && via !== 'uniswap') log('提示: BSC 上 Uniswap API 只看 Uniswap 自家的池，PancakeSwap 的深度要配 OKX_API_KEY 才能用到')
   return d
 }
 // external = 只问聚合器（探测市场价用：拿要做 LP 的池自己当市场价，就查不出它偏离市场）；聚合器都报不出才退回池价

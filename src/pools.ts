@@ -7,7 +7,7 @@ import type { Pool } from './lp.ts'
 
 export type FoundPool = { pool: Pool; liquidityUsd: number; volume24h: number; name: string; empty: boolean | null } // empty=null：链上流动性读不到，未知
 // GeckoTerminal 的 dex id（/networks/{net}/dexes 里的原值，按链带不同后缀）：Robinhood 上 Uniswap v4 是 uniswap-v4-robinhood，BSC 上是 uniswap-v4-bsc
-const GECKO_DEX: Record<string, Record<string, string>> = { robinhood: { v4: 'uniswap-v4-robinhood' }, bsc: { v4: 'uniswap-v4-bsc', infinity: 'pancakeswap-infinity-clmm', v3: 'pancakeswap-v3-bsc' } }
+const GECKO_DEX: Record<string, Record<string, string>> = { ethereum: { v4: 'uniswap-v4-ethereum', v3: 'uniswap_v3' }, robinhood: { v4: 'uniswap-v4-robinhood' }, bsc: { v4: 'uniswap-v4-bsc', infinity: 'pancakeswap-infinity-clmm', v3: 'pancakeswap-v3-bsc' } }
 
 // GeckoTerminal 上这个代币的全部池子（任何 DEX、任何计价币），失败返回 []；strict = 失败抛错（安全检查要区分「没有池」和「Gecko 限流」）
 async function fetchGeckoPools(network: string, token: Address, strict = false): Promise<any[]> {
@@ -78,7 +78,7 @@ export async function listTokenPools(c: Clients, token: Address, strict = false)
       let err = ''
       const pool = await lp.poolById(id).catch((e) => { err = String(e?.shortMessage ?? e?.message).slice(0, 80); return null })
       if (err) out.push({ ...base, status: `读链失败（${err}），刷新再试` })
-      else if (!pool) out.push({ ...base, status: c.protocol === 'v3' ? '不是 PancakeSwap 工厂建的池' : '查不到 PoolKey（PositionManager 没记录，链上也没有它的 Initialize 事件），不复用' })
+      else if (!pool) out.push({ ...base, status: c.protocol === 'v3' ? `不是 ${lp.label} 工厂建的池` : '查不到 PoolKey（PositionManager 没记录，链上也没有它的 Initialize 事件），不复用' })
       else {
         const hasHook = pool.hooks !== '0x0000000000000000000000000000000000000000'
         const row = { ...base, fee: pool.fee, fee24h: pool.fee ? (volume24h * pool.fee) / 1_000_000 : base.fee24h, feeText: feeText(pool) + (pool.dynamic && feeN ? `≈${feeN / 10000}%` : ''), spacing: pool.spacing, hooks: hasHook ? pool.hooks : null, usable: true }

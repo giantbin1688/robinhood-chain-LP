@@ -286,7 +286,7 @@ export async function withdraw(o: WithdrawOptions) {
 }
 
 // ---- 命令行入口 ----
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.env.RH_MAIN === 'exit' || import.meta.url === pathToFileURL(process.argv[1]).href) { // 直接运行，或经 run.ts 分派
   failFast()
   const { values: opt } = parseArgs({
     options: {
@@ -307,7 +307,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       json: { type: 'boolean', default: false },                            // 给网页界面用：计划确定后打印一行 "@@plan {json}"
     },
   })
-  if (!opt.token && !opt.position) die('用法: npm run exit -- [--chain robinhood|bsc] [--protocol v4|infinity|v3] --token <代币地址> [--position <仓位id,仓位id>] [--percent <1-100>] [--via okx|uniswap|pool|best] [--keep-tokens] [--sell-all] [--collect [--sell]] [--yes] [--dry-run]')
+  if (!opt.token && !opt.position) die('用法: npm run exit -- [--chain robinhood|bsc|ethereum] [--protocol v4|infinity|v3] --token <代币地址> [--position <仓位id,仓位id>] [--percent <1-100>] [--via okx|uniswap|pool|best] [--keep-tokens] [--sell-all] [--collect [--sell]] [--yes] [--dry-run]')
   if (!['okx', 'uniswap', 'pool', 'best'].includes(opt.via)) die('--via 只能是 okx / uniswap / pool / best')
   if (opt.collect && opt.percent !== undefined) die('--collect 只领手续费，不能和 --percent 一起用')
   const positions = opt.position ? opt.position.split(',').map((x) => BigInt(x.trim())) : undefined

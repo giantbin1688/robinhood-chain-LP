@@ -8,15 +8,20 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { formatEther, isAddress, type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
+import { Keypair } from '@solana/web3.js'
+import bs58 from 'bs58'
 import * as v4 from '../v4.ts'
-import { CHAINS, PROTOCOL_LABEL, type ChainName, type ProtocolName } from '../chains.ts'
+import { CHAINS, protocolLabel, type ChainName, type ProtocolName } from '../chains.ts'
+import { v3Tiers } from '../lp-v3.ts'
 import { env, erc20Abi, feeText, log, makeClients, nativePriceUsd, p6, tokenMeta, trim, type Clients } from '../common.ts'
 import { findPositions, positionFees, same, type Position } from '../exit.ts'
 import { closedPositions, positionLedger, refreshLedger, type LedgerEvent } from '../history.ts'
 import type { Pool } from '../lp.ts'
 import { listTokenPools } from '../pools.ts'
 import * as sig from '../signals.ts'
-import { masked, saveSettings, secretValues, settings } from '../settings.ts'
+import { masked, rpcUrl as effectiveRpc, saveSettings, secretValues, settings, solanaCfg } from '../settings.ts'
+import { PROTOCOL_LABEL as SOL_PROTOCOL_LABEL, SOL_CHAIN, isSolAddress, type SolProtocol } from '../sol/common.ts'
+import * as solUi from '../sol/ui.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const PORT = Number(env('UI_PORT', '3000'))
@@ -28,8 +33,8 @@ const hasKey = !!process.env.PRIVATE_KEY
 // 只按 .env 里的原值精确替换：不能用「0x+64 位十六进制」这类通配规则，那会把交易哈希一起抹掉。
 // RPC 变量名从 chains.ts 推导（RPC_URL / BSC_RPC_URL / …），以后加链不用再回来补这份名单。
 const SECRET_ENVS: [string, string][] = [
-  ...Object.values(CHAINS).map((c) => [c.rpcEnv, '<RPC>'] as [string, string]),
-  ['PRIVATE_KEY', '<私钥>'], ['UNISWAP_API_KEY', '<key>'], ['OKX_API_KEY', '<key>'], ['OKX_SECRET_KEY', '<key>'], ['OKX_API_PASSPHRASE', '<key>'], ['TG_BOT_TOKEN', '<key>'],
+  ...Object.values(CHAINS).map((c) => [c.rpcEnv, '<RPC>'] as [string, string]), [SOL_CHAIN.rpcEnv, '<RPC>'],
+  ['PRIVATE_KEY', '<私钥>'], ['SOL_PRIVATE_KEY', '<私钥>'], ['UNISWAP_API_KEY', '<key>'], ['OKX_API_KEY', '<key>'], ['OKX_SECRET_KEY', '<key>'], ['OKX_API_PASSPHRASE', '<key>'], ['TG_BOT_TOKEN', '<key>'], ['JUPITER_API_KEY', '<key>'],
   // 代理只在带账号密码时才算秘密，否则 127.0.0.1:7897 这种被抹掉反而看不懂日志
   ...['HTTPS_PROXY', 'HTTP_PROXY'].filter((k) => (process.env[k] ?? '').includes('@')).map((k) => [k, '<代理>'] as [string, string]),
 ]
@@ -41,12 +46,19 @@ export const redact = (s: string) => {
 }
 
 const wallet = hasKey ? privateKeyToAccount(process.env.PRIVATE_KEY as `0x${string}`).address : null
+// Solana 钱包：SOL_PRIVATE_KEY（base58 或 JSON 字节数组）只在这里解出公钥；私钥同样只由子进程读
+const solWallet: string | null = (() => {
+  const k = process.env.SOL_PRIVATE_KEY?.trim()
+  if (!k) return null
+  try { return Keypair.fromSecretKey(k.startsWith('[') ? Uint8Array.from(JSON.parse(k)) : bs58.decode(k)).publicKey.toBase58() } catch { log('SOL_PRIVATE_KEY 格式不对（要 base58 或 JSON 字节数组），Solana 只能看不能操作'); return null }
+})()
 
 // ---- 任务：每个子进程一个任务，可同时跑多个（多个仓位各自监控、同时进场/撤退）。
 // 唯一限制：同一条链上真发交易的进场/撤退同一时刻只能有一个在"发交易"阶段——两个进程各自缓存 nonce 会互相撞；
 // 进场带 --watch 的任务在组完 LP 后进入监控阶段，不再占这个名额。监控触发的撤退在监控进程内发交易，这里管不到（和命令行多开监控一样）。
+type ChainKind = ChainName | 'solana'
 type Job = {
-  id: number; kind: 'launch' | 'exit' | 'watch'; label: string; dryRun: boolean; phase: 'run' | 'watch'; chain: ChainName; protocol: ProtocolName; token?: string; positions: string[]
+  id: number; kind: 'launch' | 'exit' | 'watch'; label: string; dryRun: boolean; phase: 'run' | 'watch'; chain: ChainKind; protocol: string; token?: string; positions: string[]
   startedAt: number; endedAt?: number; exitCode?: number | null; lines: string[]; partial: string; plan?: unknown; proc?: ChildProcess
 }
 const jobs = new Map<number, Job>()
@@ -55,16 +67,17 @@ const streams = new Set<ServerResponse>()
 const emit = (ev: object) => { const s = `data: ${JSON.stringify(ev)}\n\n`; for (const r of streams) r.write(s) }
 const summary = (j: Job) => ({ id: j.id, kind: j.kind, label: j.label, dryRun: j.dryRun, phase: j.phase, chain: j.chain, protocol: j.protocol, token: j.token, positions: j.positions, startedAt: j.startedAt, endedAt: j.endedAt, exitCode: j.exitCode, running: j.exitCode === undefined })
 const isRunning = (j: Job) => j.exitCode === undefined
-const sendingTx = (chain: ChainName) => [...jobs.values()].find((j) => isRunning(j) && j.chain === chain && !j.dryRun && j.kind !== 'watch' && j.phase === 'run')
+const sendingTx = (chain: ChainKind) => [...jobs.values()].find((j) => isRunning(j) && j.chain === chain && !j.dryRun && j.kind !== 'watch' && j.phase === 'run')
 
 function startJob(sel: Sel, kind: Job['kind'], label: string, script: string, args: string[], meta: { dryRun: boolean; token?: string; positions?: string[] }) {
   if (!meta.dryRun && kind !== 'watch') { const busy = sendingTx(sel.chain); if (busy) throw new Error(`「${busy.label}」正在发交易，等它完成再开始（避免两个进程的 nonce 互相冲突）`) }
-  const job: Job = { id: ++seq, kind, label: `[${sel.chain === 'bsc' ? 'BSC' : 'RHC'}] ${label}`, dryRun: meta.dryRun, phase: 'run', chain: sel.chain, protocol: sel.protocol, token: meta.token, positions: meta.positions ?? [], startedAt: Date.now(), lines: [], partial: '' }
+  const job: Job = { id: ++seq, kind, label: `[${{ ethereum: 'ETH', bsc: 'BSC', robinhood: 'RHC', solana: 'SOL' }[sel.chain]}] ${label}`, dryRun: meta.dryRun, phase: 'run', chain: sel.chain, protocol: sel.protocol, token: meta.token, positions: meta.positions ?? [], startedAt: Date.now(), lines: [], partial: '' }
   jobs.set(job.id, job)
   // 只留最近 50 个已结束的任务
   const done = [...jobs.values()].filter((j) => !isRunning(j)).sort((a, b) => a.id - b.id)
   for (const j of done.slice(0, Math.max(0, done.length - 50))) jobs.delete(j.id)
   const full = [`--chain=${sel.chain}`, `--protocol=${sel.protocol}`, ...args, '--json']
+  if (sel.chain === 'solana') script = script.replace('src/', 'src/sol/') // Solana 的三条命令在 sol/ 下，参数一样
   const proc = spawn(process.execPath, ['--env-file=.env', '--env-file=params.env', '--import', 'tsx', script, ...full], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   job.proc = proc
   log(`任务 #${job.id} ${job.label}: ${script} ${full.join(' ')}`)
@@ -102,24 +115,42 @@ function startJob(sel: Sel, kind: Job['kind'], label: string, script: string, ar
   return job
 }
 
-// ---- 链 / 协议上下文 ----
-type Sel = { chain: ChainName; protocol: ProtocolName }
+// ---- 链 / 协议上下文（EVM 两条链走 makeClients；Solana 走 sol/ui.ts 的上下文）----
+type Sel = { chain: ChainKind; protocol: string; quote: 'SOL' | 'USDC' } // quote 只有 Solana 用：顶栏余额和进场默认计价币
+type EvmSel = { chain: ChainName; protocol: ProtocolName }
 function selOf(q: { get(k: string): string | null } | Record<string, unknown>): Sel {
   const g = (k: string) => String('get' in q && typeof q.get === 'function' ? q.get(k) ?? '' : (q as Record<string, unknown>)[k] ?? '').trim().toLowerCase()
-  const chain = (g('chain') || 'robinhood') as ChainName
+  const chain = (g('chain') || 'robinhood') as ChainKind
+  const quote = g('quote').toUpperCase() === 'USDC' ? 'USDC' : 'SOL'
+  if (chain === 'solana') {
+    const protocol = (g('protocol') || SOL_CHAIN.protocols[0]) as SolProtocol
+    if (!SOL_CHAIN.protocols.includes(protocol)) throw new Error(`Solana 上没有 ${protocol}`)
+    return { chain, protocol, quote }
+  }
   if (!CHAINS[chain]) throw new Error(`不支持的链 ${chain}`)
   const protocol = (g('protocol') || CHAINS[chain].protocols[0]) as ProtocolName
   if (!CHAINS[chain].protocols.includes(protocol)) throw new Error(`${CHAINS[chain].label} 上没有 ${protocol}`)
-  return { chain, protocol }
+  return { chain, protocol, quote }
 }
+const evm = (sel: Sel): EvmSel => { if (sel.chain === 'solana') throw new Error('这个接口不支持 Solana'); return { chain: sel.chain, protocol: sel.protocol as ProtocolName } }
+const solCtxs = new Map<string, Promise<solUi.SolCtx>>()
+function solCtxOf(sel: Sel): Promise<solUi.SolCtx> {
+  if (!solWallet) throw new Error('.env 里没有 SOL_PRIVATE_KEY')
+  const k = `solana:${sel.protocol}`
+  if (!solCtxs.has(k)) { const p = solUi.makeSolCtx(sel.protocol as SolProtocol, solWallet); p.catch(() => solCtxs.delete(k)); solCtxs.set(k, p) }
+  return solCtxs.get(k)!
+}
+// 正在盯着某个仓位的任务：按仓位监控的看 positions；按代币整体监控的看 token
+const watcherOf = (sel: Sel, id: string, token: string) => [...jobs.values()].find((j) => isRunning(j) && j.chain === sel.chain && j.protocol === sel.protocol && (j.kind === 'watch' || j.phase === 'watch') && (j.positions.length ? j.positions.includes(id) : same(j.token ?? '', token)))?.id ?? null
 type Ctx = {
-  sel: Sel; c: Clients
+  sel: EvmSel; c: Clients
   meta: Map<string, { symbol: string; decimals: number }>; known: Position[]
   ledgerAt: number; ledgerOk: boolean; ledgerError: string
   depthCache: Map<string, { at: number; data: unknown }>; closedCache: Map<bigint, ClosedRow>; blockTime: Map<bigint, Promise<number>>
 }
 const ctxs = new Map<string, Promise<Ctx>>()
-function ctxOf(sel: Sel): Promise<Ctx> {
+function ctxOf(sel0: Sel): Promise<Ctx> {
+  const sel = evm(sel0)
   if (!hasKey) throw new Error('.env 里没有 PRIVATE_KEY')
   const k = `${sel.chain}:${sel.protocol}`
   if (!ctxs.has(k)) ctxs.set(k, makeClients({ needKey: false, chain: sel.chain, protocol: sel.protocol }).then((c) => ({ sel, c, meta: new Map(), known: [], ledgerAt: 0, ledgerOk: false, ledgerError: '', depthCache: new Map(), closedCache: new Map(), blockTime: new Map() })))
@@ -325,10 +356,19 @@ async function poolsFor(x: Ctx, token: Address) {
 }
 
 async function state(sel: Sel) {
-  const params = Object.fromEntries(['USDG_AMOUNT', 'POOL_FEE', 'POOL_SELECT', 'TICK_SPACING', 'PRICE_RANGE', 'RANGE', 'LP_SHAPE', 'LP_LAYERS', 'SWAP_SLIPPAGE', 'LP_SLIPPAGE', 'MAX_DEVIATION', 'SWAP_VIA', 'EXIT_SWAP_VIA', 'WATCH_INTERVAL', 'WATCH_CONFIRM', 'WATCH_UPPER_GRACE'].map((k) => [k, process.env[k] ?? '']))
+  const params = Object.fromEntries(['USDG_AMOUNT', 'POOL_FEE', 'POOL_SELECT', 'TICK_SPACING', 'PRICE_RANGE', 'RANGE', 'LP_SHAPE', 'LP_LAYERS', 'SWAP_SLIPPAGE', 'LP_SLIPPAGE', 'MAX_DEVIATION', 'SWAP_VIA', 'EXIT_SWAP_VIA', 'WATCH_INTERVAL', 'WATCH_CONFIRM', 'WATCH_UPPER_GRACE', 'SOL_QUOTE'].map((k) => [k, process.env[k] ?? '']))
+  const chains = [
+    ...Object.values(CHAINS).map((ch) => ({ name: ch.name as string, label: ch.label, quote: ch.quote.symbol, quotes: [ch.quote.symbol], native: ch.native.symbol, protocols: ch.protocols.map((p) => ({ name: p as string, label: protocolLabel(ch.name, p) })), rpc: !!effectiveRpc(ch.name, ch.rpcEnv), rpcEnv: ch.rpcEnv })),
+    { name: 'solana', label: SOL_CHAIN.label, quote: sel.quote, quotes: ['SOL', 'USDC'], native: 'SOL', protocols: SOL_CHAIN.protocols.map((p) => ({ name: p as string, label: SOL_PROTOCOL_LABEL[p] })), rpc: !!effectiveRpc('solana', SOL_CHAIN.rpcEnv), rpcEnv: SOL_CHAIN.rpcEnv },
+  ]
+  const common = { params, chains, chain: sel.chain, protocol: sel.protocol, okx: !!process.env.OKX_API_KEY, uniswapKey: !!process.env.UNISWAP_API_KEY, jupiterKey: !!solanaCfg().jupiterApiKey, jobs: [...jobs.values()].map(summary), telegram: sig.telegramConfigured() }
+  if (sel.chain === 'solana') {
+    const base = { ...common, wallet: solWallet, protocolLabel: SOL_PROTOCOL_LABEL[sel.protocol as SolProtocol], quote: sel.quote, native: 'SOL', explorer: SOL_CHAIN.explorer }
+    if (!solWallet) return { ...base, usdg: null, eth: null, ethPrice: null, alchemy: false }
+    return { ...base, ...(await solUi.stateOf(await solCtxOf(sel), sel.quote)) }
+  }
   const cfg = CHAINS[sel.chain]
-  const chains = Object.values(CHAINS).map((ch) => ({ name: ch.name, label: ch.label, quote: ch.quote.symbol, native: ch.native.symbol, protocols: ch.protocols.map((p) => ({ name: p, label: PROTOCOL_LABEL[p] })), rpc: !!process.env[ch.rpcEnv], rpcEnv: ch.rpcEnv }))
-  const base = { wallet, params, chains, chain: sel.chain, protocol: sel.protocol, protocolLabel: PROTOCOL_LABEL[sel.protocol], quote: cfg.quote.symbol, native: cfg.native.symbol, okx: !!process.env.OKX_API_KEY, uniswapKey: !!process.env.UNISWAP_API_KEY, explorer: cfg.explorer, jobs: [...jobs.values()].map(summary), telegram: sig.telegramConfigured() }
+  const base = { ...common, wallet, protocolLabel: protocolLabel(cfg.name, sel.protocol as ProtocolName), quote: cfg.quote.symbol, native: cfg.native.symbol, explorer: cfg.explorer, ...(sel.protocol === 'v3' ? { tiers: v3Tiers(cfg.name).map((t) => t.fee / 10000) } : {}) }
   if (!hasKey) return { ...base, usdg: null, eth: null, ethPrice: null, alchemy: false }
   const x = await ctxOf(sel)
   const { pub, Q } = x.c
@@ -340,14 +380,17 @@ async function state(sel: Sel) {
 
 // ---- 表单 -> 命令行参数。数值原样透传，合法性由命令本身检查（出错会打印"错误: …"并退出）；一律 --key=value，负数才不会被当成另一个选项 ----
 const str = (x: unknown) => String(x ?? '').trim()
-const ids = (x: unknown) => str(x).split(',').map((s) => s.trim()).filter((s) => /^\d+$/.test(s))
-const via = (x: unknown) => (['okx', 'uniswap', 'pool', 'best'].includes(str(x)) ? str(x) : 'best')
-function launchArgs(b: any) {
+// 仓位 id：EVM 是 NFT 编号（数字），Solana 是账户 / NFT mint 地址（base58）
+const ids = (x: unknown) => str(x).split(',').map((s) => s.trim()).filter((s) => /^\d+$/.test(s) || isSolAddress(s))
+const via = (x: unknown) => (['okx', 'uniswap', 'jupiter', 'pool', 'best'].includes(str(x)) ? str(x) : 'best')
+const validAddr = (chain: ChainKind, a: string) => (chain === 'solana' ? isSolAddress(a) : isAddress(a))
+function launchArgs(b: any, sel: Sel) {
   const token = str(b.token)
-  if (!isAddress(token)) throw new Error('代币地址不合法')
+  if (!validAddr(sel.chain, token)) throw new Error('代币地址不合法')
   const args = [`--token=${token}`, `--usdg=${str(b.usdg)}`, `--fee=${str(b.fee)}`, `--slippage=${str(b.slippage)}`, `--lp-slippage=${str(b.lpSlippage)}`, `--max-deviation=${str(b.maxDeviation)}`, `--pool-select=${str(b.poolSelect)}`]
+  if (sel.chain === 'solana') args.push(`--quote=${sel.quote}`)
   if (str(b.spacing)) args.push(`--spacing=${str(b.spacing)}`)
-  if (/^0x[0-9a-fA-F]{64}$|^0x[0-9a-fA-F]{40}$/.test(str(b.pool))) args.push(`--pool=${str(b.pool)}`) // 池子列表里点"用这个池"选中的 id，带 hook 的池只能这样指定
+  if (/^0x[0-9a-fA-F]{64}$|^0x[0-9a-fA-F]{40}$/.test(str(b.pool)) || (sel.chain === 'solana' && isSolAddress(str(b.pool)))) args.push(`--pool=${str(b.pool)}`) // 池子列表里点"用这个池"选中的 id，带 hook 的池只能这样指定
   if (b.rangeMode === 'price') args.push(`--price-range=${str(b.priceRange)}`)
   else args.push(`--range=${str(b.range)}`)
   if (['curve', 'bidask'].includes(str(b.shape))) { args.push(`--shape=${str(b.shape)}`); if (str(b.layers)) args.push(`--layers=${str(b.layers)}`) }
@@ -356,10 +399,10 @@ function launchArgs(b: any) {
   if (b.watch && !b.dryRun) args.push('--watch')
   return args
 }
-function exitArgs(b: any) {
+function exitArgs(b: any, sel: Sel) {
   const args: string[] = []
   if (ids(b.positions).length) args.push(`--position=${ids(b.positions).join(',')}`)
-  else if (isAddress(str(b.token))) args.push(`--token=${str(b.token)}`)
+  else if (validAddr(sel.chain, str(b.token))) args.push(`--token=${str(b.token)}`)
   else throw new Error('要么给仓位 id，要么给代币地址')
   args.push(`--via=${via(b.via)}`)
   if (b.keepTokens) args.push('--keep-tokens')
@@ -372,9 +415,10 @@ function exitArgs(b: any) {
   args.push(b.dryRun ? '--dry-run' : '--yes')
   return args
 }
+const shortId = (x: string) => (x.length > 12 ? x.slice(0, 6) + '…' : x) // Solana 的仓位 id 是 44 位地址，任务名里缩一下
 const pctLabel = (b: any) => { const p = Number(b.percent); return b.percent !== undefined && b.percent !== '' && Number.isFinite(p) && p < 100 ? `${p}% ` : '' }
-function watchArgs(b: any) {
-  if (!isAddress(str(b.token))) throw new Error('代币地址不合法')
+function watchArgs(b: any, sel: Sel) {
+  if (!validAddr(sel.chain, str(b.token))) throw new Error('代币地址不合法')
   const args = [`--token=${str(b.token)}`]
   if (ids(b.positions).length) args.push(`--position=${ids(b.positions).join(',')}`)
   if (b.dryRun) args.push('--dry-run')
@@ -383,8 +427,9 @@ function watchArgs(b: any) {
 
 // ---- HTTP ----
 const json = (res: ServerResponse, code: number, body: unknown) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(body)) }
-const readBody = (req: IncomingMessage) => new Promise<any>((resolve, reject) => { let s = ''; req.on('data', (c) => (s += c)); req.on('end', () => { try { resolve(s ? JSON.parse(s) : {}) } catch (e) { reject(e) } }); req.on('error', reject) })
-const needKey = () => { if (!hasKey) throw new Error('.env 里没有 PRIVATE_KEY') }
+// 同一个请求可以读多次（前面的链检查读过一次，处理函数再读时直接给缓存）
+const readBody = (req: IncomingMessage) => { const r = req as IncomingMessage & { bodyP?: Promise<any> }; if (!r.bodyP) r.bodyP = new Promise<any>((resolve, reject) => { let s = ''; req.on('data', (c) => (s += c)); req.on('end', () => { try { resolve(s ? JSON.parse(s) : {}) } catch (e) { reject(e) } }); req.on('error', reject) }); return r.bodyP }
+const needKey = (sel: Sel) => { if (sel.chain === 'solana' ? !solWallet : !hasKey) throw new Error(`.env 里没有 ${sel.chain === 'solana' ? 'SOL_PRIVATE_KEY' : 'PRIVATE_KEY'}`) }
 
 // ---- 跨站防护。服务只听 127.0.0.1，但浏览器里任何网页都能往这里发请求：
 // readBody 不看 Content-Type，而 text/plain 属于 CORS 安全列表、不触发预检，
@@ -409,6 +454,14 @@ const server = createServer(async (req, res) => {
       return res.end(readFileSync(join(ROOT, 'src', 'ui', 'index.html')))
     }
     if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, await state(selOf(url.searchParams)))
+    if (req.method === 'GET' && ['/api/positions', '/api/depth', '/api/history', '/api/closed', '/api/pools'].includes(url.pathname) && selOf(url.searchParams).chain === 'solana') { // Solana 的读接口：sol/ui.ts
+      const sel = selOf(url.searchParams)
+      if (url.pathname === '/api/positions') return json(res, 200, { positions: await solUi.listPositions(await solCtxOf(sel), url.searchParams.get('full') === '1', (id, token) => watcherOf(sel, id, token)) })
+      if (url.pathname === '/api/depth') return json(res, 200, await solUi.depth(await solCtxOf(sel), str(url.searchParams.get('id'))))
+      if (url.pathname === '/api/history') return json(res, 200, await solUi.history(await solCtxOf(sel), str(url.searchParams.get('id'))))
+      if (url.pathname === '/api/closed') return json(res, 200, await solUi.closedList(await solCtxOf(sel)))
+      const t = str(url.searchParams.get('token')); if (!isSolAddress(t)) throw new Error('代币 mint 地址不合法'); return json(res, 200, await solUi.poolsFor(await solCtxOf(sel), t))
+    }
     if (req.method === 'GET' && url.pathname === '/api/positions') return json(res, 200, { positions: await listPositions(await ctxOf(selOf(url.searchParams)), url.searchParams.get('full') === '1') })
     if (req.method === 'GET' && url.pathname === '/api/depth') return json(res, 200, await depth(await ctxOf(selOf(url.searchParams)), str(url.searchParams.get('id'))))
     if (req.method === 'GET' && url.pathname === '/api/history') return json(res, 200, await history(await ctxOf(selOf(url.searchParams)), str(url.searchParams.get('id'))))
@@ -433,16 +486,39 @@ const server = createServer(async (req, res) => {
       res.write(`data: ${JSON.stringify({ type: 'rht', status: sig.rhtStatus() })}\n\n`)
       return
     }
-    // ---- 设置页：Telegram。GET 只回"配没配 + 末 4 位"，原值不出服务 ----
+    // ---- 设置页：Telegram / RPC 节点 / Solana 选项。GET 只回"配没配 + 末 4 位"，原值不出服务 ----
     if (req.method === 'GET' && url.pathname === '/api/settings') {
       const st = settings()
       return json(res, 200, {
         telegram: { botToken: masked(st.telegram.botToken), chatId: st.telegram.chatId, env: !!(process.env.TG_BOT_TOKEN && process.env.TG_CHAT_ID) },
+        rpc: {
+          robinhood: { set: masked(st.rpc.robinhood), env: !!process.env.RPC_URL },
+          bsc: { set: masked(st.rpc.bsc), env: !!process.env.BSC_RPC_URL },
+          ethereum: { set: masked(st.rpc.ethereum), env: !!process.env.ETH_RPC_URL },
+          solana: { set: masked(st.rpc.solana), env: !!process.env.SOL_RPC_URL },
+          uniswapUrl: st.api.uniswapUrl,
+        },
+        solana: { jupiterApiKey: { set: masked(st.solana.jupiterApiKey), env: !!process.env.JUPITER_API_KEY }, priorityFee: st.solana.priorityFee, historyTxs: st.solana.historyTxs },
       })
     }
     if (req.method === 'POST' && url.pathname === '/api/settings') {
       const b = await readBody(req), st = settings()
       if (b.section === 'telegram') { st.telegram = { botToken: str(b.botToken), chatId: str(b.chatId) }; saveSettings(); return json(res, 200, { ok: true, configured: sig.telegramConfigured() }) }
+      // 密码类字段（RPC / key）：空 = 保持原值（不然改一项会把其它项清掉），填 "-" = 清除（回退 .env / 公共节点 / 默认）
+      const keep = (v: string, old: string) => (v === '-' ? '' : v || old)
+      if (b.section === 'rpc') { // 保存后丢掉缓存的链上下文，网页数据立即用新节点；新任务子进程自己读 settings.json
+        const u = (k: string, old: string) => { const v = keep(str(b[k]), old); if (v && !/^https?:\/\//.test(v)) throw new Error(`${k} 要是 http(s):// 开头的节点地址`); return v }
+        st.rpc = { ethereum: u('ethereum', st.rpc.ethereum), robinhood: u('robinhood', st.rpc.robinhood), bsc: u('bsc', st.rpc.bsc), solana: u('solana', st.rpc.solana) }
+        st.api.uniswapUrl = u('uniswapUrl', '') // 明文框，值就在输入框里：空 = 清除
+        saveSettings(); ctxs.clear(); solCtxs.clear()
+        return json(res, 200, { ok: true })
+      }
+      if (b.section === 'solana') {
+        const n = (k: string, lo: number, hi: number) => { const v = str(b[k]); if (v && !(Number.isInteger(Number(v)) && Number(v) >= lo && Number(v) <= hi)) throw new Error(`${k} 要是 ${lo}~${hi} 的整数`); return v }
+        st.solana = { jupiterApiKey: keep(str(b.jupiterApiKey), st.solana.jupiterApiKey), priorityFee: n('priorityFee', 0, 100_000_000), historyTxs: n('historyTxs', 100, 100_000) }
+        saveSettings(); solCtxs.clear()
+        return json(res, 200, { ok: true })
+      }
       throw new Error('未知的设置项')
     }
     if (req.method === 'POST' && url.pathname === '/api/settings/test') {
@@ -453,48 +529,50 @@ const server = createServer(async (req, res) => {
     // ---- 信号：FOMO 交易者名单 + rhtrenches 推来的买卖 + 安全检查（signals.ts）----
     if (req.method === 'GET' && url.pathname === '/api/signals') {
       const { chain } = selOf(url.searchParams)
-      return json(res, 200, { traders: sig.traders().filter((t) => t.chain === chain), signals: sig.signals(chain).slice(-400), rht: sig.rhtStatus(), telegram: sig.telegramConfigured() })
+      if (chain === 'solana') return json(res, 200, { traders: [], signals: [], rht: null, telegram: sig.telegramConfigured() }) // Solana 暂无信号源
+      return json(res, 200, { traders: sig.traders().filter((t) => t.chain === chain), signals: sig.signals(chain as ChainName).slice(-400), rht: sig.rhtStatus(chain as ChainName), telegram: sig.telegramConfigured() })
     }
-    if (req.method === 'POST' && url.pathname === '/api/traders/add') { const b = await readBody(req); return json(res, 200, { trader: await sig.addTrader({ handle: str(b.handle), wallet: str(b.wallet), chain: selOf(b).chain }) }) }
+    if (req.method === 'POST' && ['/api/traders/add', '/api/traders/update', '/api/traders/remove', '/api/signals/clear', '/api/safety'].includes(url.pathname)) { if (selOf(await readBody(req)).chain === 'solana') throw new Error('信号 / 安全检查只支持 Robinhood Chain / BSC') }
+    if (req.method === 'POST' && url.pathname === '/api/traders/add') { const b = await readBody(req); return json(res, 200, { trader: await sig.addTrader({ handle: str(b.handle), wallet: str(b.wallet), chain: selOf(b).chain as ChainName }) }) }
     if (req.method === 'POST' && url.pathname === '/api/traders/update') {
       const b = await readBody(req)
       const patch: { on?: boolean; muted?: boolean } = {}
       if (typeof b.on === 'boolean') patch.on = b.on
       if (typeof b.muted === 'boolean') patch.muted = b.muted
-      return json(res, 200, { trader: sig.updateTrader(selOf(b).chain, str(b.wallet), patch) })
+      return json(res, 200, { trader: sig.updateTrader(selOf(b).chain as ChainName, str(b.wallet), patch) })
     }
-    if (req.method === 'POST' && url.pathname === '/api/traders/remove') { const b = await readBody(req); sig.removeTrader(selOf(b).chain, str(b.wallet)); return json(res, 200, { ok: true }) }
-    if (req.method === 'POST' && url.pathname === '/api/signals/clear') { const b = await readBody(req); sig.clearSignals(selOf(b).chain); return json(res, 200, { ok: true }) }
+    if (req.method === 'POST' && url.pathname === '/api/traders/remove') { const b = await readBody(req); sig.removeTrader(selOf(b).chain as ChainName, str(b.wallet)); return json(res, 200, { ok: true }) }
+    if (req.method === 'POST' && url.pathname === '/api/signals/clear') { const b = await readBody(req); sig.clearSignals(selOf(b).chain as ChainName); return json(res, 200, { ok: true }) }
     if (req.method === 'POST' && url.pathname === '/api/safety') {
       const b = await readBody(req)
       if (!isAddress(str(b.token))) throw new Error('代币地址不合法')
-      return json(res, 200, { safety: await sig.recheckToken(selOf(b).chain, str(b.token) as Address) })
+      return json(res, 200, { safety: await sig.recheckToken(selOf(b).chain as ChainName, str(b.token) as Address) })
     }
     if (req.method === 'POST' && url.pathname === '/api/launch') {
-      needKey(); const b = await readBody(req); const sel = selOf(b)
-      const job = startJob(sel, 'launch', `${b.dryRun ? '进场演练' : '进场'} ${str(b.token).slice(0, 10)}…`, 'src/cli.ts', launchArgs(b), { dryRun: !!b.dryRun, token: str(b.token) })
+      const b = await readBody(req); const sel = selOf(b); needKey(sel)
+      const job = startJob(sel, 'launch', `${b.dryRun ? '进场演练' : '进场'} ${str(b.token).slice(0, 10)}…`, 'src/cli.ts', launchArgs(b, sel), { dryRun: !!b.dryRun, token: str(b.token) })
       return json(res, 200, { job: summary(job) })
     }
     if (req.method === 'POST' && url.pathname === '/api/exit') {
-      needKey(); const b = await readBody(req); const sel = selOf(b)
-      const job = startJob(sel, 'exit', `${b.dryRun ? '撤退演练' : '撤退'} ${pctLabel(b)}${ids(b.positions).length ? '#' + ids(b.positions).join(',#') : str(b.symbol) || str(b.token).slice(0, 10) + '…'}`, 'src/exit.ts', exitArgs(b), { dryRun: !!b.dryRun, token: isAddress(str(b.token)) ? str(b.token) : undefined, positions: ids(b.positions) })
+      const b = await readBody(req); const sel = selOf(b); needKey(sel)
+      const job = startJob(sel, 'exit', `${b.dryRun ? '撤退演练' : '撤退'} ${pctLabel(b)}${ids(b.positions).length ? '#' + ids(b.positions).map(shortId).join(',#') : str(b.symbol) || str(b.token).slice(0, 10) + '…'}`, 'src/exit.ts', exitArgs(b, sel), { dryRun: !!b.dryRun, token: validAddr(sel.chain, str(b.token)) ? str(b.token) : undefined, positions: ids(b.positions) })
       return json(res, 200, { job: summary(job) })
     }
     if (req.method === 'POST' && url.pathname === '/api/collect') { // 只领手续费：exit.ts --collect（sell = 领到的币顺便卖成计价币）
-      needKey(); const b = await readBody(req); const sel = selOf(b)
+      const b = await readBody(req); const sel = selOf(b); needKey(sel)
       if (!ids(b.positions).length) throw new Error('要给仓位 id')
       const args = [`--position=${ids(b.positions).join(',')}`, '--collect', b.dryRun ? '--dry-run' : '--yes']
       if (b.sell) args.push('--sell', `--via=${via(b.via)}`)
-      const job = startJob(sel, 'exit', `${b.dryRun ? '领手续费演练' : '领手续费'}${b.sell ? '+卖币' : ''} ${ids(b.positions).length > 3 ? `${ids(b.positions).length} 个仓位` : '#' + ids(b.positions).join(',#')}`, 'src/exit.ts', args, { dryRun: !!b.dryRun, positions: ids(b.positions) })
+      const job = startJob(sel, 'exit', `${b.dryRun ? '领手续费演练' : '领手续费'}${b.sell ? '+卖币' : ''} ${ids(b.positions).length > 3 ? `${ids(b.positions).length} 个仓位` : '#' + ids(b.positions).map(shortId).join(',#')}`, 'src/exit.ts', args, { dryRun: !!b.dryRun, positions: ids(b.positions) })
       return json(res, 200, { job: summary(job) })
     }
     if (req.method === 'POST' && url.pathname === '/api/watch') {
-      needKey(); const b = await readBody(req); const sel = selOf(b)
+      const b = await readBody(req); const sel = selOf(b); needKey(sel)
       // 同一个仓位不许两个监控同时盯：触发时会各自撤退、互相撞 nonce
       const watching = [...jobs.values()].filter((j) => isRunning(j) && j.chain === sel.chain && j.protocol === sel.protocol && (j.kind === 'watch' || j.phase === 'watch'))
       const dup = watching.find((j) => same(j.token ?? '', str(b.token)) && (!j.positions.length || !ids(b.positions).length || j.positions.some((p) => ids(b.positions).includes(p))))
       if (dup) throw new Error(`任务 #${dup.id}「${dup.label}」已经在监控这个仓位`)
-      const job = startJob(sel, 'watch', `监控 ${ids(b.positions).length ? '#' + ids(b.positions).join(',#') : '全部 ' + (str(b.symbol) || str(b.token).slice(0, 10) + '…')}${b.dryRun ? '（演练）' : ''}`, 'src/monitor.ts', watchArgs(b), { dryRun: !!b.dryRun, token: str(b.token), positions: ids(b.positions) })
+      const job = startJob(sel, 'watch', `监控 ${ids(b.positions).length ? '#' + ids(b.positions).map(shortId).join(',#') : '全部 ' + (str(b.symbol) || str(b.token).slice(0, 10) + '…')}${b.dryRun ? '（演练）' : ''}`, 'src/monitor.ts', watchArgs(b, sel), { dryRun: !!b.dryRun, token: str(b.token), positions: ids(b.positions) })
       return json(res, 200, { job: summary(job) })
     }
     if (req.method === 'POST' && url.pathname === '/api/stop') {
@@ -510,7 +588,7 @@ const server = createServer(async (req, res) => {
   }
 })
 server.listen(PORT, '127.0.0.1', () => {
-  log(`网页界面: http://127.0.0.1:${PORT}${hasKey ? `  钱包 ${wallet}` : '  （.env 里没有 PRIVATE_KEY，只能看不能操作）'}`)
+  log(`网页界面: http://127.0.0.1:${PORT}${hasKey ? `  钱包 ${wallet}` : '  （.env 里没有 PRIVATE_KEY，只能看不能操作）'}${solWallet ? `  Solana 钱包 ${solWallet}` : '  （没有 SOL_PRIVATE_KEY，Solana 只能看不能操作）'}`)
   sig.onEvent((ev) => emit(ev))
   sig.start()
   const n = sig.traders().filter((t) => t.on).length

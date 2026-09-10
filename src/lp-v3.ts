@@ -1,12 +1,15 @@
-// PancakeSwap v3（BSC）的适配：Uniswap v3 的 fork。每个池是独立合约（Factory create2），仓位 NFT 由 NonfungiblePositionManager 管理，
-// 直接 ERC20 授权给 NPM / SwapRouter（没有 Permit2），费率只有 0.01 / 0.05 / 0.25 / 1% 四档（间距 1 / 10 / 50 / 200），协议费从 LP 费里分、不改变总费率
+// Uniswap v3（Ethereum）/ PancakeSwap v3（BSC）。每个池是独立合约（CREATE2），仓位 NFT 由 NonfungiblePositionManager 管理。
+// 直接 ERC20 授权给 NPM / SwapRouter；费率和 init code hash 按链选择。协议费从 LP 费里分、不改变总费率。
 import { encodeAbiParameters, encodeFunctionData, getAddress, keccak256, maxUint128, parseAbi, parseAbiItem, parseEventLogs, type Address, type Hex, type Log } from 'viem'
 import * as v4 from './v4.ts'
+import { protocolLabel, type ChainName } from './chains.ts'
 import type { DirectEvent, Lp, LpDeps, Mod, Pool, RawPosition, Slot0 } from './lp.ts'
 
 const ZERO = v4.ZERO_ADDRESS
 const POOL_INIT_CODE_HASH = '0x6ce8eb472fa82df5469c6ab6d485f17c3ad13c8cd7af59b3d4a8026c5ce0f7e2'
+export const UNI_POOL_INIT_CODE_HASH = '0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54'
 const TIERS = [{ fee: 100, spacing: 1 }, { fee: 500, spacing: 10 }, { fee: 2500, spacing: 50 }, { fee: 10000, spacing: 200 }]
+export const v3Tiers = (chain: ChainName) => chain === 'ethereum' ? [{ fee: 100, spacing: 1 }, { fee: 500, spacing: 10 }, { fee: 3000, spacing: 60 }, { fee: 10000, spacing: 200 }] : TIERS
 
 const factoryAbi = parseAbi(['function getPool(address, address, uint24) view returns (address)'])
 const poolAbi = parseAbi([
@@ -53,27 +56,29 @@ const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 600)
 
 // 池地址 = create2(deployer, keccak(token0, token1, fee), initCodeHash)：池还没建时也能算出来当 id 用
-export function computePoolAddress(deployer: Address, token0: Address, token1: Address, fee: number): Address {
+export function computePoolAddress(deployer: Address, token0: Address, token1: Address, fee: number, initCodeHash: Hex = POOL_INIT_CODE_HASH): Address {
   const salt = keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'address' }, { type: 'uint24' }], [token0, token1, fee]))
-  return getAddress(`0x${keccak256(`0xff${deployer.slice(2)}${salt.slice(2)}${POOL_INIT_CODE_HASH.slice(2)}`).slice(26)}`)
+  return getAddress(`0x${keccak256(`0xff${deployer.slice(2)}${salt.slice(2)}${initCodeHash.slice(2)}`).slice(26)}`)
 }
 
 export async function v3Lp(d: LpDeps): Promise<Lp> {
   const { pub, wallet, cfg } = d
+  const label = protocolLabel(cfg.name, 'v3')
+  const tiers = v3Tiers(cfg.name)
   const A = cfg.contracts.v3! as unknown as Record<string, Address>
   const NPM = A.positionManager, FACTORY = A.factory, ROUTER = A.swapRouter, QUOTER = A.quoter
   const poolCache = new Map<string, Pool>()
 
-  const spacingFor = (fee: number) => TIERS.find((t) => t.fee === fee)?.spacing ?? null
+  const spacingFor = (fee: number) => tiers.find((t) => t.fee === fee)?.spacing ?? null
   async function pool(a: Address, b: Address, fee: number): Promise<Pool> {
     const [token0, token1] = BigInt(a) < BigInt(b) ? [a, b] : [b, a]
     const k = `${token0}:${token1}:${fee}`.toLowerCase()
     let p = poolCache.get(k)
     if (p) return p
     const spacing = spacingFor(fee)
-    if (spacing === null) throw new Error(`PancakeSwap v3 只有 0.01 / 0.05 / 0.25 / 1% 四档费率，没有 ${fee / 10000}%`)
+    if (spacing === null) throw new Error(`${label} 支持 ${tiers.map((t) => t.fee / 10000 + '%').join(' / ')}，没有 ${fee / 10000}%`)
     const onchain = await pub.readContract({ address: FACTORY, abi: factoryAbi, functionName: 'getPool', args: [token0, token1, fee] })
-    const address = same(onchain, ZERO) ? computePoolAddress(A.deployer, token0, token1, fee) : onchain
+    const address = same(onchain, ZERO) ? computePoolAddress(A.deployer, token0, token1, fee, cfg.name === 'ethereum' ? UNI_POOL_INIT_CODE_HASH : POOL_INIT_CODE_HASH) : onchain
     p = { id: address, key: { token0, token1, fee }, currency0: token0, currency1: token1, fee, spacing, hooks: ZERO }
     poolCache.set(k, p)
     return p
@@ -134,7 +139,7 @@ export async function v3Lp(d: LpDeps): Promise<Lp> {
   }
 
   return {
-    protocol: 'v3', label: 'PancakeSwap v3', manager: NPM, permit2: A.permit2, tiers: TIERS, spacingFor,
+    protocol: 'v3', label, manager: NPM, permit2: A.permit2, tiers, spacingFor,
     pool: (token, fee) => pool(cfg.quote.address, token, fee),
     poolById: async (id) => {
       try {
@@ -143,7 +148,7 @@ export async function v3Lp(d: LpDeps): Promise<Lp> {
           pub.readContract({ address: addr, abi: poolAbi, functionName: 'token0' }), pub.readContract({ address: addr, abi: poolAbi, functionName: 'token1' }), pub.readContract({ address: addr, abi: poolAbi, functionName: 'fee' }),
         ])
         const p = await pool(t0, t1, fee)
-        return same(p.id, addr) ? p : null // 不是 Pancake 工厂建的池（比如 Uniswap v3 的）就不认
+        return same(p.id, addr) ? p : null // 只接受当前链配置的工厂创建的池
       } catch { return null }
     },
     slot0,

@@ -1,15 +1,18 @@
-# rh-uni — 一键 LP：进场 / 监控 / 撤退（Robinhood Chain · BNB Chain）
+# rh-uni — 一键 LP：进场 / 监控 / 撤退（Ethereum · Robinhood Chain · BNB Chain · Solana）
 
 围绕一个代币做集中流动性 LP 的全套命令行工具 + 网页界面，三条命令覆盖整个生命周期。支持的链和协议：
 
 | 链 | 协议（`--protocol`） | 计价币 | 说明 |
 |---|---|---|---|
+| Ethereum Mainnet（`--chain ethereum`） | `v4` Uniswap v4（默认）/ `v3` Uniswap v3 | USDC | ETH 支付 gas；v3 费率 0.01 / 0.05 / 0.3 / 1% |
 | Robinhood Chain（`--chain robinhood`，默认） | `v4` Uniswap v4 | USDG | 原有功能 |
 | BNB Smart Chain（`--chain bsc`） | `infinity` PancakeSwap Infinity CLAMM（默认） | USDT | BSC 上成交最活跃的 CL 池多是带 hook 的动态费率池，本工具能复用它们（只是不能新建带 hook 的池） |
 | | `v3` PancakeSwap v3 | USDT | BSC 成交量的主战场；费率只有 0.01 / 0.05 / 0.25 / 1% 四档 |
 | | `v4` Uniswap v4 | USDT | 合约在、流动性很薄，主要用于工具直接复用的场景 |
+| Solana（`--chain solana`） | `dlmm` Meteora DLMM（默认） | SOL 或 USDC | bin 式流动性；spot / curve / bidask 是它原生的策略；费率动态（基础费 + 波动费）；仓位是账户不是 NFT，关闭退租金 |
+| | `clmm` Raydium CLMM | SOL 或 USDC | Uniswap v3 式 tick 集中流动性，费率固定档，仓位是 NFT |
 
-链上差异（PoolKey 结构、Permit2 地址、路由编码、仓位 NFT 合约、手续费计算）都收在 `src/lp.ts` 的适配器后面，进场 / 监控 / 撤退 / 网页对三种协议是同一套逻辑。
+链上差异（PoolKey 结构、Permit2 地址、路由编码、仓位 NFT 合约、手续费计算）都收在 `src/lp.ts` 的适配器后面，进场 / 监控 / 撤退 / 网页对三种 EVM 协议是同一套逻辑。Solana 的账户模型和 EVM 完全不同（没有合约调用、交易要签名者、仓位是账户 / NFT mint），所以 `src/sol/` 下是一套平行实现：同样的命令、同样的参数、同样的网页，见下文「Solana」一节。
 
 | 命令 | 做什么 |
 |---|---|
@@ -43,9 +46,16 @@ npm run watch -- --token 0x代币地址
 # 3. 任何时候想手动撤退（监控会自动发现并停止）
 npm run exit -- --token 0x代币地址
 
+# Ethereum：默认 Uniswap v4，也支持 v3；预算以 USDC 计
+npm run launch -- --chain ethereum --protocol v3 --token 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 --usdg 50 --fee 0.05 --dry-run
+
 # BSC：在每条命令前面加 --chain bsc [--protocol infinity|v3|v4]（或在 .env 里设 CHAIN / PROTOCOL 作默认）
 npm run launch -- --chain bsc --protocol infinity --token 0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82 --usdg 50 --dry-run
 npm run exit   -- --chain bsc --protocol v3 --token 0x…
+
+# Solana：--chain solana [--protocol dlmm|clmm] [--quote SOL|USDC]，代币填 mint 地址，预算是 SOL（或 USDC）的数量
+npm run launch -- --chain solana --protocol dlmm --token DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 --usdg 0.5 --fee 1 --dry-run
+npm run exit   -- --chain solana --protocol clmm --token DezX…
 ```
 
 每条命令都支持 `--dry-run`（只看计划 / 模拟交易，不花钱）和 `--yes`（跳过确认）。
@@ -62,9 +72,9 @@ npm run ui          # 打开 http://127.0.0.1:3000（端口可用 UI_PORT 改）
 - **进场**页：左侧表单（默认值来自 `params.env`），输入代币地址后右侧自动列出该代币在 GeckoTerminal 上的**全部池子**（v4 / v3 / 其他 DEX、USDG 或 WETH 计价），按流动性只显示前 10 个（其余点"显示其余"展开），每个池给出费率/间距、链上池价、流动性、24h 成交和 **24h 手续费**（成交 × 费率，就是这个池一天分给全体 LP 的钱；下面的百分比是它占流动性的比例，即整池每天的费率回报，选池看这个比看成交额直观）和**你的份额**（左侧预算投进去后占池子流动性的比例 = 预算 ÷ (流动性 + 预算)，以及按这个比例分到的预估日收；这是把预算摊到整池算的，做窄区间时实际更高；改预算实时重算），状态只标"可用 / 空池"，不能复用的（不是当前协议、计价不是 USDG、查不到 PoolKey）整行灰掉、鼠标悬停看原因；可复用的点"用这个池"就按池 id 指定这个池（带 hook 的池也行；之后手动改代币/费率/间距/池选择会取消指定）。GeckoTerminal 的流动性 / 成交量会滞后，所以可复用的池还会读一次链上流动性：现价处流动性为 0 的标成**空池**（Gecko 的旧数字归零、排到末尾，按钮变成"仍要用"），`POOL_SELECT=auto` 也不会复用空池——复用要先花预算 1% 纠价、之后也没成交量，不如按市场价新建一个不同间距的池。点"计划"先演练，右侧出现换币 / 池子 / 仓位 / 钱包四张卡片；确认无误再点"执行这个计划"（会弹一次确认）。勾上"继续监控"等于 `--watch`。改过参数必须重新计划才能执行。
 - 进场页和仓位页底部的"运行"只显示一行状态（任务名、状态、最后一行日志），"在任务中查看"跳到任务页看完整日志，"展开日志"就地展开交易步骤表和日志。
 - **仓位**页：页顶五格汇总——**投入价值**（各仓位存入 − 已撤本金）、**现金价值**（本金现值 + 未领手续费）、**手续费收益**（已领 + 未领）、**总盈亏**（= 现金价值 + 已领手续费 − 投入价值，也就是各仓位 uPNL 之和）、**DPR 日收益率**（总盈亏 ÷ Σ 各仓位投入×持仓天数，即按资金量和时间加权的每天收益率；小字给出加权持仓时长和只算手续费的日收益率）。下面是钱包名下所有 USDG 池的仓位，按形状分成 **Spot / Curve / Bid-Ask** 三个区（`positions.json` 里没记录形状的、包括不是本工具建的，都算 Spot）；Curve、Bid-Ask 区里同一次进场建的几段连在一起，组头一行给出整组的价值 / 手续费 / uPNL 和建仓交易，带**整组撤退**（同一个池合成 1 笔交易）和**整组监控**按钮。分区标题行和组头行都可以点击折叠 / 展开（默认全部平铺；折叠的组头会补一句几段在区间内），折叠状态记在浏览器里，刷新不丢。每个仓位一行：仓位（交易对、费率、id、持仓时间）、区间（USDG/代币，带现价标尺和在不在区间内）、**投入**、**价值**、**手续费**（已领 + 未领）、**uPNL**、**DPR**，以及操作按钮；美元一律 2 位小数，两种币的数量和手续费的已领/未领拆分鼠标悬停可见。uPNL = 现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入，每一笔都按发生当时的池价折算（不含进场换币的手续费/滑点）；**点 uPNL 数字展开资金明细**：这个仓位的每笔交易（加流动性 / 领手续费 / 撤流动性）的两种币数量、当时价值、当时池价和交易链接，最新在前。流水从链上重建（钱包和 PoolManager 之间的转账 + PoolManager 的 ModifyLiquidity 事件按仓位 id 归类），对任何仓位（包括不是本工具建的）都能算，但需要 `RPC_URL` 是 Alchemy 节点（用它的转账记录接口和历史状态）；不是的话 uPNL 显示"—"，持仓时间仍然有。点 id 展开**该仓位所在池子的流动性分布图**（蓝 = 现价下方的 USDG 侧，绿 = 现价上方的代币侧，淡色 = 你的区间外，悬停看每段数量）。每个仓位可"领取"手续费（只领手续费，本金不动，等于 `npm run exit -- --position <id> --collect`；确认框里可以勾选"顺便把领到的币卖成 USDG"，等于加 `--sell`）、"监控"（各仓位独立监控，跳出区间自动撤退）、"撤 %"（部分撤出：在确认框里填比例 1~99 或点 25 / 50 / 75，只撤这个比例的流动性，未领手续费一并全领走，NFT 保留、剩下的继续做 LP，撤出来的币照常卖成 USDG；等于加 `--percent <n>`；流水里记为一次"撤流动性"，投入价值随之减少）、"撤退"（只撤这一个、只卖撤出来的币；确认框里可以勾选"顺便把钱包里全部该币卖光"，等于加 `--sell-all`）。正在监控的仓位会标出是哪个任务在盯。工具栏的**"领取全部手续费"**一次领所有仓位（未领 ≥ $0.01 的）的手续费：所有池的领取合成 **1 笔交易**（`PositionManager.multicall`），然后（勾选了卖币的话）每种币按实际到账数量重新报价，所有卖币交易**同时广播、落在同一个区块**——广播前逐笔模拟，模拟不过的直接剔除不占 nonce；没卖出去的币（报不出价、模拟不过、上链回滚）随后逐个进入"卖出为止"的重试（见撤退一节），不影响别的币；等于 `npm run exit -- --position <id,id,…> --collect --sell` 跨代币一起给。
-- **信号**页：盯 [fomo.family](https://fomo.family) 上交易者的买入 / 卖出，来一笔就记一条信号并提醒，买入的币顺手做一遍**安全检查**。数据源是 [rhtrenches.com](https://rhtrenches.com)：第三方、只读、免登录的 fomo 头部交易者成交流（公开 API + WebSocket，147 个钱包），它能分出**别人买了塞进钱包**的假买入（`planted` / `transferred` / `spoofed` / `airdropped`）和本人买入——这两种在链上一模一样（都是中继代付、代币经 fomo 路由进钱包，只有付款方不同），典型的塞币是十几美元一笔、批量打进大 V 钱包，fomo 个人页的交易记录里不会出现；标了塞的记成"塞币/空投"，默认不显示、不提醒、不查安全。服务启动先同步它最近 400 笔（静默），再连 WebSocket（断了退回 5 秒轮询，按 id 去重；90 秒没回应算失联，状态灯变红）。**只能盯它名单里的人**：添加交易者填 FOMO handle，钱包从它的名单里取，不在名单里会拒绝（名单看 rhtrenches.com 的 Traders 页）；加上后先把它最近成交里这个人的补进来。头像用 fomo 公开的分享卡片图裁出来；每个交易者可以 ON/OFF、静音（只记录不提醒）、移除；信号存在 `signals.json`（最多 1000 条）。信号流按类型 / 安全结论 / 最低金额（"金额 ≥ $"，只管买卖行，记在浏览器里）筛选、按交易者或代币搜索，每行给出金额（美元和枚数、成交单价）、说明、安全检查结论和交易链接，买入行有"进场"（跳到进场页、代币地址填好）和"重查"。**安全检查**（排队做、间隔 2.5 秒，免得把 GeckoTerminal 打到 429）只用链上和 GeckoTerminal 能查到的东西（GoPlus 之类不支持 Robinhood Chain）：所有池里流动性最大的那个（< $2k 风险、< $10k 注意）、池龄（< 1 小时注意）、24h 涨幅（> 500% 注意）、24h 买卖人数（很多人买没人卖过注意）、流动性占 FDV 比例（< 1% 注意）、合约是不是可升级代理、owner 放没放弃、字节码里有没有 `mint` / `pause` / 黑名单函数（有且 owner 还在 = 风险）、代币能不能从池子转出（`eth_call` 模拟 PoolManager 转账失败 = 貔貅，风险）、100 美元买进再卖出的往返损耗（> 20% 注意、> 50% 风险，报价失败也标注意）。结论 **通过 / 注意 / 风险** 只是筛选参考，鼠标悬停看全部理由和数据。提醒：页面 toast + 浏览器桌面通知（点"开启桌面通知"授权一次，页面不在前台时才弹）+ 可选 Telegram（设置页或 `.env` 里 `TG_BOT_TOKEN` / `TG_CHAT_ID`，买卖各一条，安全检查不通过再补一条）。
+- **信号**页：盯 [fomo.family](https://fomo.family) 上交易者的买入 / 卖出，来一笔就记一条信号并提醒，买入的币顺手做一遍**安全检查**。数据源按链选择：Robinhood 用 [rhtrenches.com](https://rhtrenches.com)，BSC 用 [bsctrenches.com](https://bsctrenches.com)。两者都是第三方、只读、免登录的 fomo 头部交易者成交流（公开 API + WebSocket，147 个钱包），它能分出**别人买了塞进钱包**的假买入（`planted` / `transferred` / `spoofed` / `airdropped`）和本人买入——这两种在链上一模一样（都是中继代付、代币经 fomo 路由进钱包，只有付款方不同），典型的塞币是十几美元一笔、批量打进大 V 钱包，fomo 个人页的交易记录里不会出现；标了塞的记成"塞币/空投"，默认不显示、不提醒、不查安全。服务启动先同步它最近 400 笔（静默），再连 WebSocket（断了退回 5 秒轮询，按 id 去重；90 秒没回应算失联，状态灯变红）。**只能盯它名单里的人**：添加交易者填 FOMO handle，钱包从它的名单里取，不在名单里会拒绝（名单看对应链数据源的 Traders 页）；加上后先把它最近成交里这个人的补进来。头像用 fomo 公开的分享卡片图裁出来；每个交易者可以 ON/OFF、静音（只记录不提醒）、移除；信号存在 `signals.json`（最多 1000 条）。信号流按类型 / 安全结论 / 最低金额（"金额 ≥ $"，只管买卖行，记在浏览器里）筛选、按交易者或代币搜索，每行给出金额（美元和枚数、成交单价）、说明、安全检查结论和交易链接，买入行有"进场"（跳到进场页、代币地址填好）和"重查"。**安全检查**（排队做、间隔 2.5 秒，免得把 GeckoTerminal 打到 429）只用链上和 GeckoTerminal 能查到的东西（GoPlus 之类不支持 Robinhood Chain）：所有池里流动性最大的那个（< $2k 风险、< $10k 注意）、池龄（< 1 小时注意）、24h 涨幅（> 500% 注意）、24h 买卖人数（很多人买没人卖过注意）、流动性占 FDV 比例（< 1% 注意）、合约是不是可升级代理、owner 放没放弃、字节码里有没有 `mint` / `pause` / 黑名单函数（有且 owner 还在 = 风险）、代币能不能从池子转出（`eth_call` 模拟 PoolManager 转账失败 = 貔貅，风险）、100 美元买进再卖出的往返损耗（> 20% 注意、> 50% 风险，报价失败也标注意）。结论 **通过 / 注意 / 风险** 只是筛选参考，鼠标悬停看全部理由和数据。提醒：页面 toast + 浏览器桌面通知（点"开启桌面通知"授权一次，页面不在前台时才弹）+ 可选 Telegram（设置页或 `.env` 里 `TG_BOT_TOKEN` / `TG_CHAT_ID`，买卖各一条，安全检查不通过再补一条）。
 - 为什么不自己盯链：做过（按钱包地址扫 ERC-20 `Transfer` 日志），但公共节点前面是 Cloudflare，动不动 429 / 人机验证，Alchemy 免费档 `eth_getLogs` 一次只给 10 个区块；而且链上抓到的真实买卖 rhtrenches 全都有，多出来的只是空投碎币和资金进出，所以拆掉了（git 历史里有）。fomo.family 自己没有公开接口（后端要登录态的 Privy token，且在 Cloudflare 机器人拦截后面，token 有效也回 430），也试过、放弃了。
-- **设置**页：Telegram（bot token + chat id，"发测试消息"验证），存在 `settings.json`（已 gitignore；同名项优先于 `.env`；接口只回"配没配 + 末 4 位"，原值不出服务）。fomo.family 本身的账号接入试过了：它的后端在 Cloudflare 机器人拦截后面，脚本请求即使 token 有效也被拒（HTTP 430），所以没有这一项；FomoScan（付费的 handle 查钱包）也去掉了，钱包直接来自 rhtrenches 的名单。
+- **设置**页：Telegram（bot token + chat id，"发测试消息"验证）、**节点 RPC**（三条链的节点地址 + Uniswap API 网关，保存立即生效：网页换新节点、之后启动的任务也用新节点；密码框留空 = 保持不变，填 `-` = 清除回退 `.env`）、**Solana 选项**（Jupiter API key、优先费、日历扫描笔数）。都存在 `settings.json`（已 gitignore；同名项优先于 `.env`；接口只回"配没配 + 末 4 位"，原值不出服务）。链 / 协议 / 计价币不在这里——顶栏和进场页选，记在浏览器里。fomo.family 本身的账号接入试过了：它的后端在 Cloudflare 机器人拦截后面，脚本请求即使 token 有效也被拒（HTTP 430），所以没有这一项；FomoScan（付费的 handle 查钱包）也去掉了，钱包直接来自 rhtrenches 的名单。
 - **盈亏日历**页：已平仓仓位按平仓日排成月历（周一起，本地时间），每格是当天平掉的仓位各自整段盈亏（拿回本金 + 手续费 − 存入，每笔按当时池价折算）之和和胜负平数，页顶是本月盈亏 / 平仓数 / 胜率（盈亏在 ±1 分内算平，不计入胜率）/ 最好一天 / 最差一天，‹ › 切换月份，点某一天列出当天平掉的每个仓位（存入、拿回本金、手续费、盈亏、持仓时间、平仓交易）。"已平仓" = 流动性全部撤出的仓位，NFT 销没销毁都算（Uniswap 网页撤流动性不销毁 NFT）；只算 USDG 池的。撤出后拿到的代币再卖掉的盈亏不在这里（那是换币，不是 LP）。第一次打开要从创世块起读钱包全部 LP 交易并逐笔取当时池价，约半分钟，之后秒开；同样需要 Alchemy 的 `RPC_URL`。
 - **任务**页：所有任务（进场 / 撤退 / 监控）的状态和日志，可随时停止。多个监控可以同时跑；进场和撤退的演练也可以随时跑。唯一限制是**真正发交易的进场/撤退同一时刻只能有一个**（两个进程各自缓存 nonce 会互相冲突），带监控的进场组完 LP 后就不再占这个名额；同一仓位也不允许开两个监控。
 - 页面只是把表单拼成命令行、以子进程跑 `cli.ts` / `exit.ts` / `monitor.ts`（多一个 `--json` 开关用来喂卡片），交易逻辑和命令行完全相同。服务只监听本机 `127.0.0.1`，私钥仍只在 `.env` 里由子进程读取，浏览器看不到。关掉浏览器不影响正在跑的任务，重新打开能看到全部日志；关掉服务（Ctrl+C）会结束它启动的所有任务。
@@ -80,7 +90,9 @@ npm run ui          # 打开 http://127.0.0.1:3000（端口可用 UI_PORT 改）
 | `PRIVATE_KEY` | 付款钱包私钥（`0x` 开头 64 位十六进制）。钱包里要有 `USDG_AMOUNT` 的 USDG 和少量 ETH |
 | `UNISWAP_API_KEY` | Uniswap Trading API key，只用于问路由/拿交易数据，和钱包无关。免费申请：https://developers.uniswap.org/dashboard |
 | `OKX_API_KEY` `OKX_SECRET_KEY` `OKX_API_PASSPHRASE` | 可选。撤退卖币时用 OKX DEX 聚合器和 Uniswap 比价（实测常比 Uniswap 多换回 1~2%）。在 https://web3.okx.com/onchainos 申请 |
+| `ETH_RPC_URL` | Ethereum 主网节点；优先使用设置页保存的 Ethereum RPC，其次环境变量，公共节点仅备用。私钥与其他 EVM 链共用，预算 `--usdg` 在此链代表 USDC |
 | `RPC_URL` | 可选，默认公共节点 `https://rpc.mainnet.chain.robinhood.com`。强烈建议换成自己的 Alchemy 等节点：实测每次请求 50ms vs 公共节点 260ms，整趟快一倍。配了自己的节点后公共节点自动作为备用（节点限流/超时的请求改走公共节点） |
+| `SOL_PRIVATE_KEY` `SOL_RPC_URL` `SOL_QUOTE` `JUPITER_API_KEY` `SOL_PRIORITY_FEE` `SOL_HISTORY_TXS` | Solana 专用，见「Solana」一节 |
 | `HTTPS_PROXY` | 可选。本机直连不了 `trade-api.gateway.uniswap.org` / `web3.okx.com` 时填本地代理，如 `http://127.0.0.1:7897` |
 | `TG_BOT_TOKEN` `TG_CHAT_ID` | 可选。信号页的买入 / 卖出 / 安全检查不通过推到 Telegram（@BotFather 建 bot，chat id 用 @userinfobot 查）。也可以在网页设置页填，设置页优先 |
 
@@ -262,26 +274,57 @@ npm run exit -- --token 0x… --yes               # 跳过确认
 
 如果某个代币只有这一个池、没有别的市场，API 报价就是池价本身，偏离恒为 0，不会触发校正。
 
+## Solana（Meteora DLMM / Raydium CLMM）
+
+三条命令、`params.env` 的全部参数、网页的全部页面（进场 / 仓位 / 盈亏日历 / 任务 / 设置）在 Solana 上都能用，差异如下。
+
+**配置**：`.env` 里 `SOL_PRIVATE_KEY`（base58 或 JSON 字节数组）、`SOL_RPC_URL`（Alchemy 的 Solana 节点，不填走公共节点）；`SOL_QUOTE=SOL|USDC` 是进场默认计价币（网页进场页也能选）。换币走 [Jupiter](https://jup.ag) 聚合器，默认用免 key 的 `lite-api.jup.ag`，不用申请任何 key；`JUPITER_API_KEY` 可选。Alchemy 免费档不给 `getProgramAccounts`（每次都超它的每秒算力额度），本工具把这一种请求（按钱包扫 DLMM 仓位、读费率预设）自动改走公共节点 `api.mainnet-beta.solana.com`，其余走 Alchemy。
+
+**计价币**：Solana 上 meme 币几乎都对 SOL 建池，所以默认计价币是 SOL，`USDG_AMOUNT` 就是 SOL 的数量；也可以选 USDC。仓位页把两种计价的仓位都列出来，每行标自己的计价币，美元一律按当时的 SOL 价折算（SOL 价读 Meteora 的 SOL/USDC 池）。SOL/USDC 池本身按 USDC 计价、SOL 算"代币"。
+
+**费率与间距**：两个协议的费率都是链上固定档，不能像 Uniswap 那样随便填：Meteora 的档来自链上的 `presetParameter2` 账户（每档是「基础费率 + binStep」的组合，网页进场页的费率提示里有全部档位，`TICK_SPACING` 填 binStep，留空取该费率的默认档），Raydium 的档来自它的 AmmConfig（0.01% ~ 4%，间距 1 / 10 / 60 / 120 随费率定）。`POOL_SELECT=auto` 时配置的费率没有对应档也没关系，只是不能新建池、只会复用 GeckoTerminal 上已有的池；网页会把 `params.env` 的费率自动改成最接近的档。Meteora 的费率是动态的：池子显示"动态(基础 1%)"，实际成交费 = 基础费 + 随波动上浮的部分。
+
+**区间与形状**：DLMM 按 bin 算（binStep 100 = 每格 1%），区间是闭区间 `[minBin, maxBin]`；`spot` / `curve` / `bidask` 直接用 Meteora 原生的 Spot / Curve / BidAsk 策略（`LP_LAYERS` 不用）。超过 70 个 bin 的区间由 SDK 拆成扩展仓位、分几笔交易加流动性（每笔最多 26 个 bin 的分块），计划里会打印要几笔交易、租金多少：仓位账户租金约 0.057 SOL / 70 bin（关闭时退还），没人建过的 bin 数组每个 0.075 SOL（不退）。Raydium 和 Uniswap v3 一样按 tick 算，`curve` / `bidask` 用和 EVM 相同的多层拆分，每层一个仓位（各自一笔交易、各铸一个 NFT，租金约 0.01 SOL 可退；没初始化过的 tick 数组每个约 0.07 SOL 不退）。租金和手续费从 SOL 余额里扣，计划阶段会算出还要留多少 SOL，不够就不发交易。
+
+**池价校正**：只做"在池内交易把价格推回市场价"这一种（二分投入量、用协议自己的报价看终点价）；池价到市场价之间没有流动性时（一笔交易就跳过头）放弃，不像 EVM 那样建过渡仓位。
+
+**撤退 / 领取 / 部分撤出**：DLMM 全撤 = `removeLiquidity`（全部 bin）+ 领手续费 + 关闭仓位退租金，宽仓位拆成几笔；部分撤出按比例撤每个 bin 的份额，手续费全领，仓位保留；领取走 `claimAllRewardsByPosition`（手续费 + 流动性挖矿奖励一起）。Raydium 用 `decreaseLiquidity`（全撤时顺带关闭 NFT），领取是 `decreaseLiquidity(0)`。卖币 Jupiter 和仓位所在的池同时报价取高者，卖不掉一直重试（同 EVM）。撤退演练会逐笔用 `simulateTransaction` 模拟。
+
+**盈亏 / 日历**：资金流水从仓位账户（DLMM）/ 仓位 PDA（Raydium）的交易历史重建，事件用程序的 Anchor IDL 解码（Meteora 的 `AddLiquidity` / `RemoveLiquidity` / `Rebalancing` / `ClaimFee`，Raydium 的 `CreatePersonalPosition` / `IncreaseLiquidity` / `DecreaseLiquidity` / `CollectPersonalFee`），每笔按事件里当时的 bin / tick 折算；事件里没有价格的（纯领手续费、Raydium 仓位不跨现价）退到 GeckoTerminal 的分钟 K 线。已平仓仓位靠扫钱包自己最近的交易（默认 800 笔，`SOL_HISTORY_TXS` 可调）找出来，Alchemy 免费档对 `getTransaction` 限流很紧，第一次打开日历约 1~3 分钟，之后增量。
+
+**信号页**支持 Robinhood Chain（rhtrenches.com）和 BSC（bsctrenches.com）。顶栏切换链后添加对应名单中的 FOMO handle；两条链的连接状态、交易者和成交去重独立，Ethereum / Solana 暂无信号源。
+
+**仓位 id**：DLMM 是仓位账户地址，Raydium 是 NFT 的 mint 地址（44 位 base58），网页里缩写显示、悬停看全文；`--position` 用它们。`positions.json` 的记录带 `chain: "solana"` / `protocol` / `quote`。
+
+**链上程序**：Meteora DLMM `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo`；Raydium CLMM `CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK`；USDC `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`；SOL 价来自 DLMM SOL/USDC 池 `5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6`。SDK：`@meteora-ag/dlmm`、`@raydium-io/raydium-sdk-v2`。
+
 ## 文件说明
 
 | 文件 | 作用 |
 |---|---|
-| `src/cli.ts` | 进场命令 |
+| `src/run.ts` | 命令入口：按 `--chain` 把 launch / exit / watch 分派到 EVM 或 Solana 的实现 |
+| `src/cli.ts` | 进场命令（EVM） |
 | `src/monitor.ts` | 监控命令（也被 `launch --watch` 调用） |
 | `src/exit.ts` | 撤退命令（也被监控触发时调用） |
+| `src/shape.ts` | 流动性形状（spot / curve / bidask）的多层拆分与配比数学，EVM 进场和 Raydium CLMM 共用 |
+| `src/sol/common.ts` | Solana 公共部分：节点连接（Alchemy 优先，`getProgramAccounts` 走公共节点）、钱包、发交易 / 模拟、代币元数据、SOL 价、Anchor 事件解码 |
+| `src/sol/lp.ts` `src/sol/dlmm.ts` `src/sol/clmm.ts` | Solana 协议适配层：Meteora DLMM 与 Raydium CLMM |
+| `src/sol/swap.ts` `src/sol/pools.ts` | Jupiter 换币 / 池内直换比价；GeckoTerminal 池子发现 |
+| `src/sol/cli.ts` `src/sol/exit.ts` `src/sol/monitor.ts` | Solana 的进场 / 撤退 / 监控 |
+| `src/sol/history.ts` `src/sol/ui.ts` | Solana 的资金流水 / 已平仓扫描；网页服务的 Solana 数据（仓位、深度、明细、日历、池子、顶栏） |
 | `src/ui/server.ts` `src/ui/index.html` | 网页界面：本地服务 + 单页面，子进程跑上面的命令 |
-| `src/signals.ts` `src/rht.ts` | 信号：rhtrenches.com 的 fomo 交易者成交流（WebSocket + 轮询，识别塞币）、代币安全检查、Telegram 推送；名单和信号存 `signals.json` |
-| `src/settings.ts` | 设置页存的 Telegram（`settings.json`） |
+| `src/signals.ts` `src/rht.ts` | 信号：rhtrenches.com / bsctrenches.com 的 fomo 交易者成交流（WebSocket + 轮询，识别塞币）、代币安全检查、Telegram 推送；名单和信号存 `signals.json` |
+| `src/settings.ts` | 设置页存的 Telegram / 节点 RPC / Solana 选项（`settings.json`，设置页优先于 `.env`，命令行子进程也读它） |
 | `src/chains.ts` | 链与协议配置：合约地址、计价币、公共节点、区块浏览器；`--chain` / `--protocol` 的解析 |
 | `src/lp.ts` | 协议适配器接口（池子 / 池价 / 仓位 / 手续费 / mint / burn / collect / 池内换币 / 深度 / 流水），命令和网页只跟它打交道 |
 | `src/lp-singleton.ts` | Uniswap v4 与 PancakeSwap Infinity CLAMM 的实现（同一套 singleton 架构，差别在 PoolKey 结构和状态读取合约） |
-| `src/lp-v3.ts` | PancakeSwap v3 的实现（每个池一个合约、NonfungiblePositionManager、直接 ERC20 授权） |
+| `src/lp-v3.ts` | Uniswap v3（Ethereum）/ PancakeSwap v3（BSC）的实现（每个池一个合约、NonfungiblePositionManager、直接 ERC20 授权） |
 | `src/common.ts` | 公共部分：客户端、Uniswap / OKX API、发交易与授权、仓位记录 |
 | `src/v4.ts` | 集中流动性数学与 singleton 编码：tick / 流动性 / 手续费增长 / mint / burn / swap（三种协议共用） |
 | `src/selfcheck.ts` | 离线自检：用链上一笔真实 mint 交易复算并逐字节比对 |
 | `params.env` | 策略参数 |
 | `.env` | 密钥（不进 git） |
-| `positions.json` | 本地仓位记录（不进 git）；每条带 `chain` / `protocol`，没有的是早期的 Robinhood v4 记录 |
+| `positions.json` | 本地仓位记录（不进 git）；每条带 `chain` / `protocol`（Solana 的还有 `quote`），没有的是早期的 Robinhood v4 记录 |
 
 ```bash
 npm run selfcheck    # 自检
@@ -327,6 +370,7 @@ npm run typecheck    # 类型检查
 - BSC 上 PancakeSwap Infinity 成交最活跃的池几乎都带 hook（动态费率，池名里的 0.205% 之类只是估计值，链上 `lpFee` 为 0，界面标"动态"）。本工具复用这类池时 PoolKey 从 PositionManager 的 `poolKeys` 反查，mint / burn / collect 走同一套动作；换币前用 Quoter 真实模拟，费率估计不准也不会多花钱。新建池只能是无 hook 的标准档。
 - `poolKeys` 只记录有人通过 PositionManager 建过仓的池。Robinhood 上发行平台直接调 PoolManager 建的池（带 hook 的动态费池，近期新池约四分之一是这种）查不到时，退到公共节点按 poolId 过滤 PoolManager 的 `Initialize` 事件拿 PoolKey（过滤够窄，全链范围也只要零点几秒；Alchemy 免费档 `eth_getLogs` 限 10 个区块，走不了）。这类池 GeckoTerminal 常常没收录，网页列表里不会出现，可以拿 poolId 用 `--pool` 直接指定。
 - BSC 上换币走 OKX DEX 聚合器（`OKX_API_KEY` 等三项）；Uniswap Trading API 在 BSC 只路由 Uniswap 自家的池。
-- 本机直连不了 `alchemy.com` 的话在 `.env` 里填 `HTTPS_PROXY`，否则 Alchemy 节点会一直超时、退回公共节点。
+- 本机直连不了 `alchemy.com` 的话在 `.env` 里填 `HTTPS_PROXY`，否则 Alchemy 节点会一直超时、退回公共节点。Solana 的 Jupiter / GeckoTerminal / Alchemy 同样走这个代理。
+- Solana 上每个仓位、每个没人建过的 bin 数组 / tick 数组都要付租金（见「Solana」一节），宽区间的 DLMM 仓位一次要几笔交易；SOL 计价时预算和租金从同一个 SOL 余额里出，计划里会算清楚。
 - 新币风险自负：貔貅币能 mint 成功但卖不掉；池子薄时你的仓位可能就是主要流动性，退出会砸价；无常损失由 LP 承担。建议先用小预算试。
 - Robinhood Chain gas 很便宜，进场 + 撤退整套流程通常不到 1.5 美元。
