@@ -11,16 +11,17 @@ export type Fill = {
   token: string; symbol: string; name: string; liquidity: number | null; mcap: number | null; pair_created_at: number | null; buys24: number; sells24: number; flags: string[]
 }
 export type RhtTrader = { address: string; handle: string; display_name: string; followers: number; volume: number; fills: number; net_pnl: number; active: boolean }
-export type RhtStatus = { state: 'off' | 'connecting' | 'live' | 'polling' | 'down'; wallets: number; lastFillAt: number; lastId: number; error: string }
+export type RhtStatus = { state: 'off' | 'connecting' | 'live' | 'polling' | 'down'; wallets: number; lastFillAt: number; lastOkAt: number; lastId: number; error: string }
 
 const BASE = 'https://rhtrenches.com'
 const UA = { 'user-agent': 'rh-uni (local LP tool; https://github.com/giantbin1688/robinhood-chain-LP)' }
-const status: RhtStatus = { state: 'off', wallets: 0, lastFillAt: 0, lastId: 0, error: '' }
+const STALE_MS = 90_000 // 超过这么久没从它拿到任何回应就算失联（状态灯变红；ws 在线时每 60 秒也会补拉一次 tape 兜底）
+const status: RhtStatus = { state: 'off', wallets: 0, lastFillAt: 0, lastOkAt: 0, lastId: 0, error: '' }
 export const rhtStatus = () => ({ ...status })
-export const rhtLive = () => status.state === 'live' || status.state === 'polling'
 let onFill: (f: Fill, live: boolean) => void = () => {}
 let onStatus: (s: RhtStatus) => void = () => {}
 const push = () => onStatus({ ...status })
+const ok = () => { status.lastOkAt = Date.now(); if (status.state === 'down') { status.state = 'polling'; push() } }
 
 async function getJson<T>(path: string): Promise<T> {
   const r = await fetch(BASE + path, { headers: UA, signal: AbortSignal.timeout(20_000) })
@@ -29,19 +30,16 @@ async function getJson<T>(path: string): Promise<T> {
 }
 export const tape = (limit = 400) => getJson<Fill[]>(`/api/tape?limit=${limit}&stocks=true`)
 
-// 交易者名单（handle ↔ 钱包），10 分钟缓存；添加交易者只填 handle 时先查这里，免费
+// 交易者名单（handle ↔ 钱包），10 分钟缓存；添加交易者时从这里取钱包、并校验在不在名单里
 let tradersCache: { at: number; p: Promise<RhtTrader[]> } | null = null
 export function traders(): Promise<RhtTrader[]> {
   if (!tradersCache || Date.now() - tradersCache.at > 10 * 60_000) { const p = getJson<RhtTrader[]>('/api/traders'); p.catch(() => { tradersCache = null }); tradersCache = { at: Date.now(), p } }
   return tradersCache.p
 }
-export async function lookupHandle(handle: string): Promise<RhtTrader | null> {
-  const list = await traders().catch(() => [] as RhtTrader[])
-  return list.find((t) => t.handle.toLowerCase() === handle.toLowerCase()) ?? null
-}
 
 // 每条成交只处理一次：按 id 单调推进。ws 和轮询可能重叠，轮询也可能补回 ws 断线期间漏掉的
 function ingest(rows: Fill[], live: boolean) {
+  ok()
   for (const f of [...rows].sort((a, b) => a.id - b.id)) {
     if (f.id <= status.lastId) continue
     status.lastId = f.id; status.lastFillAt = Date.now()
@@ -53,24 +51,31 @@ let ws: WebSocket | null = null
 let pollTimer: NodeJS.Timeout | null = null
 let pingTimer: NodeJS.Timeout | null = null
 let started = false
+const pull = (n: number) => tape(n).then((rows) => ingest(rows, true)).catch((e) => {
+  status.error = String(e?.message).slice(0, 120)
+  if (Date.now() - status.lastOkAt > STALE_MS && status.state !== 'down') { status.state = 'down'; push(); log(`rhtrenches: 失联（${status.error}），恢复前收不到信号`) }
+})
 function startPolling() {
   if (pollTimer) return
-  status.state = 'polling'; push()
-  const tick = () => tape(60).then((rows) => ingest(rows, true)).catch((e) => { status.error = String(e?.message).slice(0, 120) })
-  tick(); pollTimer = setInterval(tick, 5_000); pollTimer.unref()
+  if (status.state !== 'down') { status.state = 'polling'; push() }
+  pull(60); pollTimer = setInterval(() => pull(60), 5_000); pollTimer.unref()
 }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null } }
 function connect() {
-  status.state = status.state === 'polling' ? 'polling' : 'connecting'; push()
+  if (status.state === 'off') status.state = 'connecting'
+  push()
   let opened = false
   try { ws = new WebSocket(`wss://rhtrenches.com/ws`) } catch (e: any) { status.error = String(e?.message).slice(0, 120); startPolling(); setTimeout(connect, 30_000).unref(); return }
   const openTimeout = setTimeout(() => { if (!opened) startPolling() }, 8_000); openTimeout.unref()
   ws.onopen = () => {
     opened = true; clearTimeout(openTimeout); stopPolling()
-    status.state = 'live'; status.error = ''; push()
-    pingTimer = setInterval(() => { if (ws?.readyState === 1) ws.send('p') }, 20_000); pingTimer.unref()
+    status.state = 'live'; status.error = ''; ok(); push()
+    // 心跳；每 60 秒顺手拉一次 tape：ws 没成交时也能确认它还活着（lastOkAt），ws 悄悄卡死也能靠 id 去重补上
+    let n = 0
+    pingTimer = setInterval(() => { if (ws?.readyState === 1) ws.send('p'); if (++n % 3 === 0) void pull(60) }, 20_000); pingTimer.unref()
   }
   ws.onmessage = (ev) => {
+    ok()
     let m: any; try { m = JSON.parse(String(ev.data)) } catch { return }
     if (m.type === 'fills') ingest(m.data ?? [], true)
     else if (m.type === 'hello') { status.wallets = Number(m.data?.wallets ?? 0); push() }
@@ -79,8 +84,8 @@ function connect() {
   ws.onclose = () => {
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null }
     clearTimeout(openTimeout)
+    if (status.state === 'live') { status.state = 'polling'; push() }
     startPolling() // 断线期间靠轮询顶上，5 秒一次，按 id 去重不会重复
-    status.state = 'polling'; push()
     setTimeout(connect, 5_000 + Math.random() * 5_000).unref()
   }
 }
@@ -90,8 +95,9 @@ export async function start(o: { onFill: typeof onFill; onStatus: typeof onStatu
   started = true; onFill = o.onFill; onStatus = o.onStatus
   try {
     const rows = await tape(400)
+    status.state = 'polling'
     ingest(rows, false)
     log(`rhtrenches: 已同步最近 ${rows.length} 笔成交，连接实时流`)
-  } catch (e: any) { status.error = String(e?.message).slice(0, 120); log(`rhtrenches: 初始同步失败 ${status.error}`) }
+  } catch (e: any) { status.error = String(e?.message).slice(0, 120); status.state = 'down'; log(`rhtrenches: 初始同步失败 ${status.error}，会每 5 秒重试`) }
   connect()
 }

@@ -29,7 +29,7 @@ const hasKey = !!process.env.PRIVATE_KEY
 // RPC 变量名从 chains.ts 推导（RPC_URL / BSC_RPC_URL / …），以后加链不用再回来补这份名单。
 const SECRET_ENVS: [string, string][] = [
   ...Object.values(CHAINS).map((c) => [c.rpcEnv, '<RPC>'] as [string, string]),
-  ['PRIVATE_KEY', '<私钥>'], ['UNISWAP_API_KEY', '<key>'], ['OKX_API_KEY', '<key>'], ['OKX_SECRET_KEY', '<key>'], ['OKX_API_PASSPHRASE', '<key>'], ['FOMOSCAN_KEY', '<key>'], ['TG_BOT_TOKEN', '<key>'],
+  ['PRIVATE_KEY', '<私钥>'], ['UNISWAP_API_KEY', '<key>'], ['OKX_API_KEY', '<key>'], ['OKX_SECRET_KEY', '<key>'], ['OKX_API_PASSPHRASE', '<key>'], ['TG_BOT_TOKEN', '<key>'],
   // 代理只在带账号密码时才算秘密，否则 127.0.0.1:7897 这种被抹掉反而看不懂日志
   ...['HTTPS_PROXY', 'HTTP_PROXY'].filter((k) => (process.env[k] ?? '').includes('@')).map((k) => [k, '<代理>'] as [string, string]),
 ]
@@ -430,22 +430,19 @@ const server = createServer(async (req, res) => {
       streams.add(res)
       req.on('close', () => streams.delete(res))
       for (const j of jobs.values()) res.write(`data: ${JSON.stringify({ type: 'status', job: summary(j) })}\n\n`)
-      for (const ch of Object.values(CHAINS)) if (ch.fomo) res.write(`data: ${JSON.stringify({ type: 'watcher', status: sig.watcherStatus(ch.name) })}\n\n`)
       res.write(`data: ${JSON.stringify({ type: 'rht', status: sig.rhtStatus() })}\n\n`)
       return
     }
-    // ---- 设置页：Telegram / FomoScan。GET 只回"配没配 + 末 4 位"，原值不出服务 ----
+    // ---- 设置页：Telegram。GET 只回"配没配 + 末 4 位"，原值不出服务 ----
     if (req.method === 'GET' && url.pathname === '/api/settings') {
       const st = settings()
       return json(res, 200, {
         telegram: { botToken: masked(st.telegram.botToken), chatId: st.telegram.chatId, env: !!(process.env.TG_BOT_TOKEN && process.env.TG_CHAT_ID) },
-        fomoscan: { key: masked(st.fomoscan.key), env: !!process.env.FOMOSCAN_KEY },
       })
     }
     if (req.method === 'POST' && url.pathname === '/api/settings') {
       const b = await readBody(req), st = settings()
       if (b.section === 'telegram') { st.telegram = { botToken: str(b.botToken), chatId: str(b.chatId) }; saveSettings(); return json(res, 200, { ok: true, configured: sig.telegramConfigured() }) }
-      if (b.section === 'fomoscan') { st.fomoscan = { key: str(b.key) }; saveSettings(); return json(res, 200, { ok: true }) }
       throw new Error('未知的设置项')
     }
     if (req.method === 'POST' && url.pathname === '/api/settings/test') {
@@ -453,10 +450,10 @@ const server = createServer(async (req, res) => {
       if (b.section === 'telegram') { await sig.telegram('rh-uni 测试消息：Telegram 推送已连通'); return json(res, 200, { ok: true }) }
       throw new Error('未知的设置项')
     }
-    // ---- 信号：FOMO 交易者名单 + 链上抓到的买卖 + 安全检查（signals.ts）----
+    // ---- 信号：FOMO 交易者名单 + rhtrenches 推来的买卖 + 安全检查（signals.ts）----
     if (req.method === 'GET' && url.pathname === '/api/signals') {
       const { chain } = selOf(url.searchParams)
-      return json(res, 200, { traders: sig.traders().filter((t) => t.chain === chain), signals: sig.signals(chain).slice(-400), status: sig.watcherStatus(chain), rht: sig.rhtStatus(), telegram: sig.telegramConfigured(), fomoscan: sig.fomoscanConfigured() })
+      return json(res, 200, { traders: sig.traders().filter((t) => t.chain === chain), signals: sig.signals(chain).slice(-400), rht: sig.rhtStatus(), telegram: sig.telegramConfigured() })
     }
     if (req.method === 'POST' && url.pathname === '/api/traders/add') { const b = await readBody(req); return json(res, 200, { trader: await sig.addTrader({ handle: str(b.handle), wallet: str(b.wallet), chain: selOf(b).chain }) }) }
     if (req.method === 'POST' && url.pathname === '/api/traders/update') {
@@ -515,7 +512,7 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   log(`网页界面: http://127.0.0.1:${PORT}${hasKey ? `  钱包 ${wallet}` : '  （.env 里没有 PRIVATE_KEY，只能看不能操作）'}`)
   sig.onEvent((ev) => emit(ev))
-  sig.startWatchers()
+  sig.start()
   const n = sig.traders().filter((t) => t.on).length
   if (n) log(`信号: 盯着 ${n} 个 FOMO 钱包`)
 })

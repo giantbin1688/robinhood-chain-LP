@@ -344,6 +344,7 @@
   .chips .chip2.on { color:var(--text); border-color:var(--text); background:var(--sel-bg) } .chips .chip2 b { font-weight:500; color:var(--faint) }
   .chips .sep { width:1px; height:16px; background:var(--rule) }
   .chips input { width:200px; min-height:26px; margin-left:auto; padding:3px 8px; font-size:12.5px }
+  .chips input#sig-min { width:110px } .chips input#sig-q { margin-left:0 }
   #sig-table td { vertical-align:middle } #sig-table .num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap }
   #sig-table .tok { font-weight:600 } #sig-table .tok .sub { display:block; font:12px var(--mono); color:var(--blue); font-weight:400 }
   #sig-table .why { font-size:12px; color:var(--muted); display:block; margin-top:2px; max-width:360px }
@@ -496,20 +497,20 @@
   </div>
 </section>
 
-<!-- ===================== 信号：FOMO 交易者的链上买卖 + 安全检查 ===================== -->
+<!-- ===================== 信号：FOMO 交易者的买卖（rhtrenches.com 推送）+ 安全检查 ===================== -->
 <section class="page" id="page-signals">
   <div class="toolbar">
     <span class="badge wait" id="sig-state">连接中…</span><span class="small" id="sig-meta"></span>
     <span class="sp"></span>
     <button class="btn sm" id="sig-notify" title="浏览器桌面通知：有买入 / 卖出信号时弹出（页面不在前台也能看到）">开启桌面通知</button>
     <button class="btn sm" id="sig-refresh">刷新</button>
-    <button class="btn sm" id="sig-clear" title="清掉这条链上已记录的信号（交易者名单不动）">清空</button>
+    <button class="btn sm" id="sig-clear" title="清掉已记录的信号（交易者名单不动）">清空</button>
   </div>
-  <div class="sig-h">盯着的交易者 <span class="small" style="font-weight:400;margin-left:6px">两个来源：本工具直接盯钱包的链上日志（买入 = 代币从 fomo 路由进钱包，卖出 = 反向），加上 rhtrenches.com 的成交流——它能分出"别人买了塞进钱包"和本人买入（链上看不出来），塞的和空投都记成"塞币/空投"，不提醒</span></div>
+  <div class="sig-h">盯着的交易者 <span class="small" style="font-weight:400;margin-left:6px">信号来自 rhtrenches.com 的成交流（公开、免登录，盯 fomo 头部 147 个交易者）；它能分出"别人买了塞进钱包"和本人买入，塞的和空投都记成"塞币/空投"，不提醒。只能盯它名单里的人</span></div>
   <div class="traders" id="sig-traders"></div>
   <div class="sig-h">信号流</div>
   <div class="card">
-    <div class="chips" id="sig-chips"></div>
+    <div class="chips"><span id="sig-chips" style="display:contents"></span><input type="number" id="sig-min" min="0" step="100" placeholder="金额 ≥ $" title="只看买入 / 卖出金额不低于这个数的信号（美元），留空不限"><input type="text" id="sig-q" placeholder="搜交易者 / 代币"></div>
     <div style="overflow-x:auto"><table id="sig-table">
       <thead><tr><th>时间</th><th>交易者</th><th>类型</th><th>代币</th><th class="num">金额</th><th>说明</th><th>安全检查</th><th>交易</th><th></th></tr></thead>
       <tbody></tbody>
@@ -540,7 +541,7 @@
   <div class="actions" style="justify-content:flex-end"><button class="btn" value="cancel">取消</button><button class="btn danger" value="ok">确认发送交易</button></div>
 </form></dialog>
 
-<!-- ===================== 设置：Telegram / FomoScan（存 settings.json，同名项优先于 .env）===================== -->
+<!-- ===================== 设置：Telegram（存 settings.json，同名项优先于 .env）===================== -->
 <section class="page" id="page-settings">
 <div class="settings">
   <div class="card">
@@ -550,13 +551,6 @@
     <div class="row"><label>chat id</label><input type="text" id="st-tg-chat" placeholder="123456789" spellcheck="false"></div>
     <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-tg-save">保存</button><button class="btn" id="st-tg-test">发测试消息</button></div>
     <div class="st" id="st-tg-status">—</div>
-  </div>
-  <div class="card">
-    <h4>FomoScan</h4>
-    <p class="lead">第三方 handle ↔ 钱包查询（https://www.fomoscan.sh，付费）。不配就在信号页手填钱包地址。</p>
-    <div class="row"><label>API key</label><input type="password" id="st-fs-key" spellcheck="false"></div>
-    <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-fs-save">保存</button></div>
-    <div class="st" id="st-fs-status">—</div>
   </div>
 </div>
 </section>
@@ -667,7 +661,7 @@ function connectEvents() {
   es.onopen = () => setLight('events', 'ok', '实时事件流已连接')
   es.onmessage = (e) => {
     const ev = JSON.parse(e.data)
-    if (ev.type === 'signal' || ev.type === 'watcher') return onSignalEvent(ev)
+    if (ev.type === 'signal' || ev.type === 'rht') return onSignalEvent(ev)
     const j = job(ev.job?.id ?? ev.job)
     if (ev.type === 'status') { const was = j.meta; j.meta = ev.job; if (!was) j.loaded = true; onStatus(ev.job, was) }
     else if (ev.type === 'log') { j.lines.push(ev.text); j.partial = ''; for (const p of Object.values(panes)) if (p.jobId === ev.job) p.append(ev.text, false) }
@@ -1271,13 +1265,12 @@ $('#cal-next').onclick = () => { calMonth = new Date(calMonth.getFullYear(), cal
 $('#cal-refresh').onclick = loadCalendar
 $('#cal-grid').onclick = (e) => { const d = e.target.closest('.day.has'); if (!d) return; const n = Number(d.dataset.day); calSel = calSel === n ? null : n; renderCalendar() }
 
-// ---- 信号：盯着的 FOMO 交易者 + 链上抓到的买卖（服务端 signals.ts 抓，SSE 推过来）----
-let SIG = { traders: [], signals: [], status: null, rht: null, telegram: false, fomoscan: false }
-const RHT_STATE = { off: '未连接', connecting: '连接中', live: '实时', polling: '轮询', down: '断开' }
-const KIND = { buy: ['买入', 'ok'], sell: ['卖出', 'warn'], fund: ['资金', 'wait'], dust: ['塞币/空投', 'wait'], out: ['转出', 'wait'] }
-const SRC = { chain: '链上', rht: 'rht', both: '链上+rht' }
+// ---- 信号：盯着的 FOMO 交易者 + rhtrenches 推来的买卖（服务端 signals.ts 收，SSE 推过来）----
+let SIG = { traders: [], signals: [], rht: null, telegram: false }
+const RHT_STATE = { off: '未连接', connecting: '连接中', live: '实时', polling: '轮询中', down: '失联' }
+const KIND = { buy: ['买入', 'ok'], sell: ['卖出', 'warn'], dust: ['塞币/空投', 'wait'] }
 const SAFE = { ok: ['通过', 'ok'], warn: ['注意', 'amber'], bad: ['风险', 'warn'], pending: ['检查中…', 'wait'], error: ['检查失败', 'wait'] }
-const sigFilter = { kinds: new Set(JSON.parse(localStorage.getItem('sigKinds') || '["buy","sell","fund"]')), safety: null, q: '' }
+const sigFilter = { kinds: new Set(JSON.parse(localStorage.getItem('sigKinds') || '["buy","sell"]')), safety: null, q: '', minUsd: Number(localStorage.getItem('sigMinUsd')) || 0 }
 const sigUnseen = new Set()
 const agoText = (t) => { const ms = Date.now() - t; return ms < 60000 ? '刚刚' : ms < 3600000 ? `${Math.floor(ms / 60000)}m 前` : ms < 86400000 ? `${Math.floor(ms / 3600000)}h 前` : new Date(t).toLocaleDateString() }
 const sigUsd = (v) => v === null || v === undefined ? '?' : `$${v >= 100 ? Math.round(v).toLocaleString('en-US') : v.toFixed(2)}`
@@ -1288,43 +1281,38 @@ async function loadSignals() {
 }
 function sigSeen() { sigUnseen.clear(); $('#sigCount').style.display = 'none' }
 function onSignalEvent(ev) {
-  if (ev.type === 'watcher') { if (ev.status.chain === SEL.chain) { SIG.status = ev.status; renderSigStatus() }; return }
-  if (ev.type === 'rht') { SIG.rht = ev.status; if ($('#page-signals').classList.contains('on')) renderSigStatus(); return }
+  if (ev.type === 'rht') { SIG.rht = ev.status; renderSigStatus(); return }
   const s = ev.signal
   if (s.chain !== SEL.chain) return
   const i = SIG.signals.findIndex((x) => x.id === s.id)
   const fresh = i < 0
   if (fresh) SIG.signals.push(s); else SIG.signals[i] = s
   const onPage = $('#page-signals').classList.contains('on')
-  // 提醒由服务端决定（alert=true）：链上抓到的买入会先等 rhtrenches 确认不是别人塞的，静音的交易者不带 alert
+  // 提醒由服务端决定（alert=true）：新的真实买卖才带；更新标记 / 启动补回的 / 静音的交易者不带
   if (ev.alert) {
     toast(s.text)
     if (Notification.permission === 'granted' && document.hidden) new Notification(s.text, { body: `${CHAIN_LABEL[s.chain] || s.chain} · ${s.token}`, tag: 'sig-' + s.id })
     if (!onPage) { sigUnseen.add(s.id); $('#sigCount').style.display = ''; $('#sigCount').textContent = sigUnseen.size }
   }
-  if (!fresh && s.safety && s.safety.status !== 'pending' && s.safety.status !== 'ok' && s.safety.status !== 'error' && !SIG.status?.backfilling) toast(`${SAFE[s.safety.status][0]} ${s.symbol}: ${s.safety.reasons[0] || ''}`)
+  if (!fresh && s.safety && s.safety.status !== 'pending' && s.safety.status !== 'ok' && s.safety.status !== 'error') toast(`${SAFE[s.safety.status][0]} ${s.symbol}: ${s.safety.reasons[0] || ''}`)
   if (onPage) renderSignals()
 }
 function renderSigStatus() {
-  const st = SIG.status, el = $('#sig-state'), meta = $('#sig-meta')
+  const r = SIG.rht, el = $('#sig-state'), meta = $('#sig-meta')
   const n = SIG.traders.filter((t) => t.on).length
-  let cls = 'wait', txt = '未配置', light = '', ltitle = '没有盯任何钱包'
-  if (!st?.supported) { txt = '这条链不支持' ; ltitle = `${CHAIN_LABEL[SEL.chain] || SEL.chain} 上还没核对 fomo 的合约地址` }
-  else if (st.error) { cls = 'warn'; txt = '出错'; light = 'bad'; ltitle = st.error }
-  else if (st.backfilling) { cls = 'amber'; txt = '回填中'; light = 'warn'; ltitle = `正在补扫最近 1 小时，还差 ${st.lag.toLocaleString('en-US')} 块` }
-  else if (st.running) { cls = 'ok'; txt = '链上实时'; light = 'ok'; ltitle = `盯着 ${n} 个钱包，区块 ${st.head.toLocaleString('en-US')}` }
-  else if (n) { txt = '启动中…' }
+  let cls = 'wait', txt = '连接中…', light = 'warn', ltitle = '正在连 rhtrenches.com'
+  if (!n) { txt = '未配置'; light = ''; ltitle = '没有盯任何交易者' }
+  else if (r?.state === 'down') { cls = 'warn'; txt = 'rhtrenches 失联'; light = 'bad'; ltitle = `rhtrenches.com 连不上（${r.error || '无回应'}），恢复前收不到信号；每 5 秒重试` }
+  else if (r?.state === 'live') { cls = 'ok'; txt = 'rhtrenches 实时'; light = 'ok'; ltitle = `盯着 ${n} 个交易者，WebSocket 实时推送` }
+  else if (r?.state === 'polling') { cls = 'amber'; txt = 'rhtrenches 轮询中'; light = 'warn'; ltitle = 'WebSocket 断了，每 5 秒拉一次接口顶着，正在重连' }
   el.className = 'badge ' + cls; el.textContent = txt
   setLight('signals', light, ltitle)
-  const parts = []
-  if (st?.head) parts.push(`区块 ${st.head.toLocaleString('en-US')}${st.lag ? `（落后 ${st.lag.toLocaleString('en-US')}）` : ''}`)
-  parts.push(`盯 ${n} 个钱包`, `${SIG.signals.length} 条信号`)
-  const r = SIG.rht
-  if (r) parts.push(`rhtrenches ${RHT_STATE[r.state] || r.state}${r.wallets ? `（${r.wallets} 个交易者）` : ''}${r.error && r.state !== 'live' ? `：${r.error}` : ''}`)
+  const parts = [`盯 ${n} 个交易者`, `${SIG.signals.length} 条信号`]
+  if (r?.wallets) parts.push(`rhtrenches 名单 ${r.wallets} 人`)
+  if (r?.error && r.state !== 'live') parts.push(r.error)
   const last = SIG.signals.length ? Math.max(...SIG.signals.map((s) => s.time)) : 0
   if (last) parts.push(`最近 ${agoText(last)}`)
-  parts.push(SIG.telegram ? 'Telegram 推送已配置' : '未配 Telegram（.env TG_BOT_TOKEN / TG_CHAT_ID）')
-  if (st?.error) parts.push(st.error)
+  parts.push(SIG.telegram ? 'Telegram 推送已配置' : '未配 Telegram（设置页或 .env TG_BOT_TOKEN / TG_CHAT_ID）')
   meta.textContent = ' · ' + parts.join(' · ')
   $('#sig-notify').textContent = Notification.permission === 'granted' ? '桌面通知已开' : Notification.permission === 'denied' ? '桌面通知被浏览器禁止' : '开启桌面通知'
 }
@@ -1340,8 +1328,7 @@ function renderTraders() {
   </div>`).join('') + `<div class="trader add">
     <div class="who"><span class="hd">添加交易者</span></div>
     <input type="text" id="sig-handle" placeholder="FOMO handle，如 unipcs" spellcheck="false">
-    <input type="text" id="sig-wallet" placeholder="钱包 0x…（可留空）" spellcheck="false">
-    <div class="note">只填 handle：先查 rhtrenches 的名单（${SIG.rht?.wallets || 147} 个头部交易者，免费）${SIG.fomoscan ? '，再查 FomoScan' : ''}；查不到就把 fomo 个人页头像旁的钱包地址贴到第二格</div>
+    <div class="note">只能加 rhtrenches 名单里的人（${SIG.rht?.wallets || 147} 个头部交易者，见 rhtrenches.com 的 Traders 页），钱包从名单里取；不在名单里的收不到信号</div>
     <div class="ops"><button class="btn primary" id="sig-add">添加</button></div>
   </div>`
 }
@@ -1359,21 +1346,22 @@ $('#sig-traders').onclick = async (e) => {
 }
 document.addEventListener('click', async (e) => {
   if (e.target.id !== 'sig-add') return
-  const handle = $('#sig-handle').value.trim(), wallet = $('#sig-wallet').value.trim()
+  const handle = $('#sig-handle').value.trim()
   if (!handle) return toast('填 FOMO handle')
   e.target.disabled = true
-  try { const r = await api('/api/traders/add', { handle, wallet }); toast(`已添加 @${r.trader.handle} ${r.trader.wallet.slice(0, 8)}…，开始补扫最近 1 小时`); await loadSignals() } catch (err) { toast(err.message); e.target.disabled = false }
+  try { const r = await api('/api/traders/add', { handle }); toast(`已添加 @${r.trader.handle} ${r.trader.wallet.slice(0, 8)}…`); await loadSignals() } catch (err) { toast(err.message); e.target.disabled = false }
 })
 function sigRows() {
-  const q = sigFilter.q.toLowerCase()
-  return SIG.signals.filter((s) => sigFilter.kinds.has(s.kind) && (!sigFilter.safety || s.safety?.status === sigFilter.safety) && (!q || s.handle.toLowerCase().includes(q) || s.symbol.toLowerCase().includes(q) || s.token.toLowerCase().includes(q))).sort((a, b) => b.time - a.time || b.id - a.id)
+  const q = sigFilter.q.toLowerCase(), min = sigFilter.minUsd
+  // 金额门槛只管买入 / 卖出（其他类型没有金额）；金额没算出来的按 0 处理，设了门槛就不显示
+  const bigEnough = (s) => !min || !(s.kind === 'buy' || s.kind === 'sell') || (s.sizeUsd ?? 0) >= min
+  return SIG.signals.filter((s) => sigFilter.kinds.has(s.kind) && bigEnough(s) && (!sigFilter.safety || s.safety?.status === sigFilter.safety) && (!q || s.handle.toLowerCase().includes(q) || s.symbol.toLowerCase().includes(q) || s.token.toLowerCase().includes(q))).sort((a, b) => b.time - a.time || b.id - a.id)
 }
 function renderSignals() {
   const cnt = (k) => SIG.signals.filter((s) => s.kind === k).length, cntS = (k) => SIG.signals.filter((s) => s.safety?.status === k).length
   const chips = $('#sig-chips')
   chips.innerHTML = Object.entries(KIND).map(([k, [label]]) => `<span class="chip2${sigFilter.kinds.has(k) ? ' on' : ''}" data-kind="${k}">${label} <b>${cnt(k)}</b></span>`).join('')
     + `<span class="sep"></span>` + ['ok', 'warn', 'bad'].map((k) => `<span class="chip2${sigFilter.safety === k ? ' on' : ''}" data-safety="${k}">${SAFE[k][0]} <b>${cntS(k)}</b></span>`).join('')
-    + `<input type="text" id="sig-q" placeholder="搜交易者 / 代币" value="${esc(sigFilter.q)}">`
   const tb = $('#sig-table tbody')
   const rows = sigRows().slice(0, 300)
   const explorer = STATE.explorer || ''
@@ -1385,7 +1373,7 @@ function renderSignals() {
     return `<tr class="${sigUnseen.has(s.id) ? 'unseen' : ''}" data-id="${s.id}">
       <td title="${new Date(s.time).toLocaleString()}" style="white-space:nowrap">${agoText(s.time)}</td>
       <td><a href="https://fomo.family/profile/${encodeURIComponent(s.handle)}" target="_blank" style="color:var(--blue);text-decoration:none">@${esc(s.handle)}</a></td>
-      <td><span class="badge ${kc}">${kl}</span><span class="small" style="display:block;margin-top:2px" title="信号来源：链上 = 本工具直接从区块日志抓到；rht = rhtrenches.com 的成交流（能识别别人塞进钱包的假买入）">${SRC[s.source] || '链上'}</span></td>
+      <td><span class="badge ${kc}">${kl}</span></td>
       <td class="tok">${esc(s.symbol)}<span class="sub">${s.token.slice(0, 6)}…${s.token.slice(-4)}<span class="cp" data-act="copy" data-v="${s.token}" title="复制地址">⧉</span></span></td>
       <td class="num">${s.kind === 'buy' || s.kind === 'sell' ? `<b>${sigUsd(s.sizeUsd)}</b>` : ''}<span class="small" style="display:block">${sigAmt(s.amount)} 枚${s.price ? ` · $${Number(s.price).toPrecision(3)}` : ''}</span></td>
       <td style="max-width:380px">${esc(s.text)}</td>
@@ -1402,7 +1390,10 @@ $('#sig-chips').onclick = (e) => {
   else sigFilter.safety = sigFilter.safety === c.dataset.safety ? null : c.dataset.safety
   renderSignals()
 }
-$('#sig-chips').oninput = (e) => { if (e.target.id === 'sig-q') { sigFilter.q = e.target.value; const v = e.target.value; renderSignals(); const q = $('#sig-q'); q.focus(); q.setSelectionRange(v.length, v.length) } }
+// 两个输入框是固定 DOM（不随 renderSignals 重画，否则每来一条信号事件就抢走焦点）
+$('#sig-q').oninput = (e) => { sigFilter.q = e.target.value; renderSignals() }
+$('#sig-min').oninput = (e) => { sigFilter.minUsd = Math.max(0, Number(e.target.value)) || 0; localStorage.setItem('sigMinUsd', String(sigFilter.minUsd)); renderSignals() }
+$('#sig-min').value = sigFilter.minUsd || ''
 $('#sig-table').onclick = async (e) => {
   const b = e.target.closest('[data-act]'); if (!b) return
   const v = b.dataset.v
@@ -1411,7 +1402,7 @@ $('#sig-table').onclick = async (e) => {
   if (b.dataset.act === 'recheck') { b.disabled = true; try { await api('/api/safety', { token: v }); await loadSignals() } catch (err) { toast(err.message) }; b.disabled = false }
 }
 $('#sig-refresh').onclick = loadSignals
-$('#sig-clear').onclick = async () => { if (!confirm('清空这条链上记录的全部信号？')) return; try { await api('/api/signals/clear', {}); sigSeen(); await loadSignals() } catch (e) { toast(e.message) } }
+$('#sig-clear').onclick = async () => { if (!confirm('清空记录的全部信号？')) return; try { await api('/api/signals/clear', {}); sigSeen(); await loadSignals() } catch (e) { toast(e.message) } }
 $('#sig-notify').onclick = async () => { if (!('Notification' in window)) return toast('这个浏览器不支持桌面通知'); await Notification.requestPermission(); renderSigStatus() }
 setInterval(() => { if ($('#page-signals').classList.contains('on')) { renderSignals(); renderSigStatus() } }, 30000)
 
@@ -1421,13 +1412,10 @@ async function loadSettings() {
   try { r = await api('/api/settings') } catch (e) { toast(e.message); return }
   $('#st-tg-token').placeholder = r.telegram.botToken || (r.telegram.env ? '.env 里已配' : '123456:ABC…'); $('#st-tg-chat').value = r.telegram.chatId || ''
   $('#st-tg-status').textContent = r.telegram.botToken || r.telegram.env ? `已配置${r.telegram.env && !r.telegram.botToken ? '（来自 .env）' : ''}` : '未配置'
-  $('#st-fs-key').placeholder = r.fomoscan.key || (r.fomoscan.env ? '.env 里已配' : '')
-  $('#st-fs-status').textContent = r.fomoscan.key || r.fomoscan.env ? `已配置${r.fomoscan.env && !r.fomoscan.key ? '（来自 .env）' : ''}` : '未配置'
 }
 const stBusy = async (btn, fn) => { btn.disabled = true; try { await fn() } catch (e) { toast(e.message) } finally { btn.disabled = false } }
 $('#st-tg-save').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings', { section: 'telegram', botToken: $('#st-tg-token').value, chatId: $('#st-tg-chat').value }); $('#st-tg-token').value = ''; toast('已保存'); loadSettings(); loadState(false) })
 $('#st-tg-test').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings/test', { section: 'telegram' }); toast('测试消息已发出，看 Telegram') })
-$('#st-fs-save').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings', { section: 'fomoscan', key: $('#st-fs-key').value }); $('#st-fs-key').value = ''; toast('已保存'); loadSettings() })
 
 // ---- 任务列表 ----
 const fmtDur = (ms) => ms < 60000 ? `${Math.round(ms / 1000)}s` : ms < 3600000 ? `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s` : `${(ms / 3600000).toFixed(1)}h`
