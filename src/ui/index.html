@@ -540,22 +540,9 @@
   <div class="actions" style="justify-content:flex-end"><button class="btn" value="cancel">取消</button><button class="btn danger" value="ok">确认发送交易</button></div>
 </form></dialog>
 
-<!-- ===================== 设置：fomo 账号 / Telegram / FomoScan（存 settings.json，同名项优先于 .env）===================== -->
+<!-- ===================== 设置：Telegram / FomoScan（存 settings.json，同名项优先于 .env）===================== -->
 <section class="page" id="page-settings">
 <div class="settings">
-  <div class="card">
-    <h4>fomo 账号</h4>
-    <p class="lead"><b>实测不可靠</b>：fomo 后端前面有 Cloudflare 机器人拦截，脚本发的请求即使 token 有效也大多被拒（HTTP 430）；留着这里是为了偶尔试试，别指望它。fomo.family 没有公开接口，用你自己的登录态调它的后端：按 handle 查钱包 / 头像。两个都要贴：access token 1 小时过期，服务拿它 + refresh token 自动续期，续下来的新值自己存。</p>
-    <div class="row"><label>privy-token（access token）</label><textarea id="st-fomo-token" placeholder="eyJ…" spellcheck="false"></textarea></div>
-    <div class="row"><label>privy-refresh-token</label><textarea id="st-fomo-refresh" placeholder="…" spellcheck="false"></textarea></div>
-    <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-fomo-save">保存并验证</button><button class="btn" id="st-fomo-test">重新验证</button><button class="btn" id="st-fomo-clear">清除</button></div>
-    <div class="st" id="st-fomo-status">—</div>
-    <ol>
-      <li><b>开一个无痕窗口</b>登录 fomo.family（refresh token 是一次性的，和你日常用的浏览器共用同一次登录会互相踢下线）</li>
-      <li>F12 → Application → <b>Local storage</b> → https://fomo.family，复制 <code>privy:token</code> 和 <code>privy:refresh_token</code> 的值（refresh token 只在 localStorage 里，Cookies 里只有 <code>privy-token</code>；值外面的引号不用带）</li>
-      <li>贴到上面，保存；然后<b>关掉无痕窗口</b>，别再用它。日常浏览器不受影响</li>
-    </ol>
-  </div>
   <div class="card">
     <h4>Telegram 推送</h4>
     <p class="lead">买入 / 卖出信号、安全检查不通过时推消息。@BotFather 建 bot 拿 token，@userinfobot 查自己的 chat id，先给 bot 发一句话它才能给你发。</p>
@@ -566,7 +553,7 @@
   </div>
   <div class="card">
     <h4>FomoScan</h4>
-    <p class="lead">第三方 handle ↔ 钱包查询（https://www.fomoscan.sh，付费）。配了 fomo 账号就用不上它。</p>
+    <p class="lead">第三方 handle ↔ 钱包查询（https://www.fomoscan.sh，付费）。不配就在信号页手填钱包地址。</p>
     <div class="row"><label>API key</label><input type="password" id="st-fs-key" spellcheck="false"></div>
     <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-fs-save">保存</button></div>
     <div class="st" id="st-fs-status">—</div>
@@ -681,7 +668,6 @@ function connectEvents() {
   es.onmessage = (e) => {
     const ev = JSON.parse(e.data)
     if (ev.type === 'signal' || ev.type === 'watcher') return onSignalEvent(ev)
-    if (ev.type === 'fomo') return onFomoStatus(ev.status)
     const j = job(ev.job?.id ?? ev.job)
     if (ev.type === 'status') { const was = j.meta; j.meta = ev.job; if (!was) j.loaded = true; onStatus(ev.job, was) }
     else if (ev.type === 'log') { j.lines.push(ev.text); j.partial = ''; for (const p of Object.values(panes)) if (p.jobId === ev.job) p.append(ev.text, false) }
@@ -725,7 +711,7 @@ async function stopJob(id) {
 }
 
 // ---- 顶栏状态灯：绿 = 正常，黄 = 降级，红 = 不可用，蓝闪 = 在跑，灰 = 未配置 ----
-const LIGHTS = { rpc: '节点', key: '钱包', uniswap: 'Uniswap', okx: 'OKX', fomo: 'fomo', events: '事件流', signals: '信号', jobs: '任务' }
+const LIGHTS = { rpc: '节点', key: '钱包', uniswap: 'Uniswap', okx: 'OKX', events: '事件流', signals: '信号', jobs: '任务' }
 const lightState = {}
 function setLight(k, cls, title) {
   lightState[k] = { cls, title }
@@ -777,7 +763,6 @@ async function loadState(fillForm) {
   setLight('key', w ? 'ok' : 'bad', w ? `钱包 ${w}` : '.env 里没有 PRIVATE_KEY，只能看不能操作')
   setLight('uniswap', STATE.uniswapKey ? 'ok' : '', STATE.uniswapKey ? 'UNISWAP_API_KEY 已配置' : '没有 UNISWAP_API_KEY')
   setLight('okx', STATE.okx ? 'ok' : '', STATE.okx ? 'OKX_API_KEY 已配置' : '没有 OKX_API_KEY')
-  if (STATE.fomo) onFomoStatus(STATE.fomo)
   for (const m of STATE.jobs) { const j = job(m.id); const was = j.meta; j.meta = m; if (was?.running !== m.running) onStatus(m, was) }
   if (fillForm) {
     const p = STATE.params
@@ -1344,7 +1329,7 @@ function renderTraders() {
   const box = $('#sig-traders')
   const explorer = STATE.explorer || ''
   box.innerHTML = SIG.traders.map((t) => `<div class="trader${t.on ? '' : ' off'}" data-w="${t.wallet}">
-    <div class="who"><span class="av">${esc(t.handle.slice(0, 1))}${t.avatar ? `<img src="${esc(t.avatar)}" alt="" style="left:0;top:0;width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : `<img src="https://image-renderer.fomo.cloud/og/profile/${encodeURIComponent(t.handle)}/card.png" alt="" onerror="this.remove()">`}</span><span class="hd"><a href="https://fomo.family/profile/${encodeURIComponent(t.handle)}" target="_blank" title="fomo 主页">@${esc(t.handle)}</a></span>
+    <div class="who"><span class="av">${esc(t.handle.slice(0, 1))}<img src="https://image-renderer.fomo.cloud/og/profile/${encodeURIComponent(t.handle)}/card.png" alt="" onerror="this.remove()"></span><span class="hd"><a href="https://fomo.family/profile/${encodeURIComponent(t.handle)}" target="_blank" title="fomo 主页">@${esc(t.handle)}</a></span>
       <span class="badge ${t.on ? 'ok' : 'wait'} sw" data-act="toggle" title="${t.on ? '点击暂停盯这个钱包' : '点击恢复'}">${t.on ? 'ON' : 'OFF'}</span></div>
     <div class="addr"><a href="${explorer}/address/${t.wallet}" target="_blank">${t.wallet.slice(0, 6)}…${t.wallet.slice(-4)}</a><span class="cp" data-act="copy" title="复制地址">⧉</span></div>
     <div class="note">${t.muted ? '已静音：只记录，不弹提醒 / 不推 Telegram' : '买入 / 卖出弹提醒' + (SIG.telegram ? '，推 Telegram' : '')}</div>
@@ -1352,8 +1337,8 @@ function renderTraders() {
   </div>`).join('') + `<div class="trader add">
     <div class="who"><span class="hd">添加交易者</span></div>
     <input type="text" id="sig-handle" placeholder="FOMO handle，如 unipcs" spellcheck="false">
-    <input type="text" id="sig-wallet" placeholder="钱包 0x…${FOMO.connected || SIG.fomoscan ? '（可留空，按 handle 自动查）' : '（必填）'}" spellcheck="false">
-    <div class="note">${FOMO.connected ? `已登录 fomo（@${esc(FOMO.handle)}）：留空钱包按 handle 查，头像也从 fomo 拿` : SIG.fomoscan ? '留空钱包时通过 FomoScan 按 handle 查（扣 credits）' : '钱包地址要手填；在设置页配 fomo 账号后可以只填 handle'}</div>
+    <input type="text" id="sig-wallet" placeholder="钱包 0x…${SIG.fomoscan ? '（可留空，按 handle 查 FomoScan）' : '（必填）'}" spellcheck="false">
+    <div class="note">${SIG.fomoscan ? '留空钱包时通过 FomoScan 按 handle 查（扣 credits）' : '钱包地址在 fomo.family/profile/<handle> 头像旁边复制；配了 FomoScan key 才能按 handle 自动查'}</div>
     <div class="ops"><button class="btn primary" id="sig-add">添加</button></div>
   </div>`
 }
@@ -1427,36 +1412,16 @@ $('#sig-clear').onclick = async () => { if (!confirm('清空这条链上记录�
 $('#sig-notify').onclick = async () => { if (!('Notification' in window)) return toast('这个浏览器不支持桌面通知'); await Notification.requestPermission(); renderSigStatus() }
 setInterval(() => { if ($('#page-signals').classList.contains('on')) { renderSignals(); renderSigStatus() } }, 30000)
 
-// ---- 设置页 + fomo 登录状态（顶栏灯）----
-let FOMO = { configured: false, connected: false, handle: '', error: '' }
-function onFomoStatus(st) {
-  FOMO = st
-  setLight('fomo', !st.configured ? '' : st.connected ? 'ok' : 'bad', !st.configured ? '没配 fomo 账号（设置页贴 Privy token）' : st.connected ? `fomo 已登录 @${st.handle}` : `fomo token 失效: ${st.error}`)
-  if ($('#page-settings').classList.contains('on')) renderFomoStatus()
-  if ($('#page-signals').classList.contains('on')) renderTraders()
-}
-function renderFomoStatus() {
-  const el = $('#st-fomo-status'), st = FOMO
-  el.innerHTML = !st.configured ? '<span class="badge wait">未配置</span>' : st.connected ? `<span class="badge ok">已登录</span> @${esc(st.handle)}${st.expiresAt ? ` · access token ${new Date(st.expiresAt).toLocaleTimeString()} 过期，到时自动续` : ''}` : `<span class="badge warn">失效</span> ${esc(st.error)}`
-}
+// ---- 设置页 ----
 async function loadSettings() {
   let r
   try { r = await api('/api/settings') } catch (e) { toast(e.message); return }
-  FOMO = r.fomo.status; renderFomoStatus()
-  $('#st-fomo-token').placeholder = r.fomo.token || 'eyJ…'; $('#st-fomo-refresh').placeholder = r.fomo.refreshToken || '…'
   $('#st-tg-token').placeholder = r.telegram.botToken || (r.telegram.env ? '.env 里已配' : '123456:ABC…'); $('#st-tg-chat').value = r.telegram.chatId || ''
   $('#st-tg-status').textContent = r.telegram.botToken || r.telegram.env ? `已配置${r.telegram.env && !r.telegram.botToken ? '（来自 .env）' : ''}` : '未配置'
   $('#st-fs-key').placeholder = r.fomoscan.key || (r.fomoscan.env ? '.env 里已配' : '')
   $('#st-fs-status').textContent = r.fomoscan.key || r.fomoscan.env ? `已配置${r.fomoscan.env && !r.fomoscan.key ? '（来自 .env）' : ''}` : '未配置'
 }
 const stBusy = async (btn, fn) => { btn.disabled = true; try { await fn() } catch (e) { toast(e.message) } finally { btn.disabled = false } }
-$('#st-fomo-save').onclick = (e) => stBusy(e.target, async () => {
-  const r = await api('/api/settings', { section: 'fomo', token: $('#st-fomo-token').value, refreshToken: $('#st-fomo-refresh').value })
-  $('#st-fomo-token').value = ''; $('#st-fomo-refresh').value = ''
-  onFomoStatus(r.status); toast(r.status.connected ? `fomo 已登录 @${r.status.handle}` : r.status.error); loadSettings()
-})
-$('#st-fomo-test').onclick = (e) => stBusy(e.target, async () => { const r = await api('/api/settings/test', { section: 'fomo' }); onFomoStatus(r.status); toast(r.status.connected ? `fomo 已登录 @${r.status.handle}` : r.status.error || '未配置') })
-$('#st-fomo-clear').onclick = (e) => stBusy(e.target, async () => { if (!confirm('清除 fomo 的 token？')) return; const r = await api('/api/settings', { section: 'fomo', clear: true }); onFomoStatus(r.status); loadSettings() })
 $('#st-tg-save').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings', { section: 'telegram', botToken: $('#st-tg-token').value, chatId: $('#st-tg-chat').value }); $('#st-tg-token').value = ''; toast('已保存'); loadSettings(); loadState(false) })
 $('#st-tg-test').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings/test', { section: 'telegram' }); toast('测试消息已发出，看 Telegram') })
 $('#st-fs-save').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings', { section: 'fomoscan', key: $('#st-fs-key').value }); $('#st-fs-key').value = ''; toast('已保存'); loadSettings() })

@@ -16,7 +16,6 @@ import { closedPositions, positionLedger, refreshLedger, type LedgerEvent } from
 import type { Pool } from '../lp.ts'
 import { listTokenPools } from '../pools.ts'
 import * as sig from '../signals.ts'
-import * as fomo from '../fomo.ts'
 import { masked, saveSettings, secretValues, settings } from '../settings.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -329,7 +328,7 @@ async function state(sel: Sel) {
   const params = Object.fromEntries(['USDG_AMOUNT', 'POOL_FEE', 'POOL_SELECT', 'TICK_SPACING', 'PRICE_RANGE', 'RANGE', 'LP_SHAPE', 'LP_LAYERS', 'SWAP_SLIPPAGE', 'LP_SLIPPAGE', 'MAX_DEVIATION', 'SWAP_VIA', 'EXIT_SWAP_VIA', 'WATCH_INTERVAL', 'WATCH_CONFIRM', 'WATCH_UPPER_GRACE'].map((k) => [k, process.env[k] ?? '']))
   const cfg = CHAINS[sel.chain]
   const chains = Object.values(CHAINS).map((ch) => ({ name: ch.name, label: ch.label, quote: ch.quote.symbol, native: ch.native.symbol, protocols: ch.protocols.map((p) => ({ name: p, label: PROTOCOL_LABEL[p] })), rpc: !!process.env[ch.rpcEnv], rpcEnv: ch.rpcEnv }))
-  const base = { wallet, params, chains, chain: sel.chain, protocol: sel.protocol, protocolLabel: PROTOCOL_LABEL[sel.protocol], quote: cfg.quote.symbol, native: cfg.native.symbol, okx: !!process.env.OKX_API_KEY, uniswapKey: !!process.env.UNISWAP_API_KEY, explorer: cfg.explorer, jobs: [...jobs.values()].map(summary), fomo: fomo.fomoStatus(), telegram: sig.telegramConfigured() }
+  const base = { wallet, params, chains, chain: sel.chain, protocol: sel.protocol, protocolLabel: PROTOCOL_LABEL[sel.protocol], quote: cfg.quote.symbol, native: cfg.native.symbol, okx: !!process.env.OKX_API_KEY, uniswapKey: !!process.env.UNISWAP_API_KEY, explorer: cfg.explorer, jobs: [...jobs.values()].map(summary), telegram: sig.telegramConfigured() }
   if (!hasKey) return { ...base, usdg: null, eth: null, ethPrice: null, alchemy: false }
   const x = await ctxOf(sel)
   const { pub, Q } = x.c
@@ -432,25 +431,18 @@ const server = createServer(async (req, res) => {
       req.on('close', () => streams.delete(res))
       for (const j of jobs.values()) res.write(`data: ${JSON.stringify({ type: 'status', job: summary(j) })}\n\n`)
       for (const ch of Object.values(CHAINS)) if (ch.fomo) res.write(`data: ${JSON.stringify({ type: 'watcher', status: sig.watcherStatus(ch.name) })}\n\n`)
-      res.write(`data: ${JSON.stringify({ type: 'fomo', status: fomo.fomoStatus() })}\n\n`)
       return
     }
-    // ---- 设置页：fomo 账号（Privy token）/ Telegram / FomoScan。GET 只回"配没配 + 末 4 位"，原值不出服务 ----
+    // ---- 设置页：Telegram / FomoScan。GET 只回"配没配 + 末 4 位"，原值不出服务 ----
     if (req.method === 'GET' && url.pathname === '/api/settings') {
       const st = settings()
       return json(res, 200, {
-        fomo: { token: masked(st.fomo.token), refreshToken: masked(st.fomo.refreshToken), updatedAt: st.fomo.updatedAt, status: fomo.fomoStatus() },
         telegram: { botToken: masked(st.telegram.botToken), chatId: st.telegram.chatId, env: !!(process.env.TG_BOT_TOKEN && process.env.TG_CHAT_ID) },
         fomoscan: { key: masked(st.fomoscan.key), env: !!process.env.FOMOSCAN_KEY },
       })
     }
     if (req.method === 'POST' && url.pathname === '/api/settings') {
       const b = await readBody(req), st = settings()
-      if (b.section === 'fomo') {
-        if (b.clear) { st.fomo = { token: '', refreshToken: '', updatedAt: 0 }; saveSettings(); return json(res, 200, { status: await fomo.verify() }) }
-        if (!str(b.token) || !str(b.refreshToken)) throw new Error('两个都要填：Privy 续期接口要同时带 access token 和 refresh token')
-        return json(res, 200, { status: await fomo.setTokens(str(b.token), str(b.refreshToken)) })
-      }
       if (b.section === 'telegram') { st.telegram = { botToken: str(b.botToken), chatId: str(b.chatId) }; saveSettings(); return json(res, 200, { ok: true, configured: sig.telegramConfigured() }) }
       if (b.section === 'fomoscan') { st.fomoscan = { key: str(b.key) }; saveSettings(); return json(res, 200, { ok: true }) }
       throw new Error('未知的设置项')
@@ -458,7 +450,6 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/settings/test') {
       const b = await readBody(req)
       if (b.section === 'telegram') { await sig.telegram('rh-uni 测试消息：Telegram 推送已连通'); return json(res, 200, { ok: true }) }
-      if (b.section === 'fomo') return json(res, 200, { status: await fomo.verify() })
       throw new Error('未知的设置项')
     }
     // ---- 信号：FOMO 交易者名单 + 链上抓到的买卖 + 安全检查（signals.ts）----
@@ -523,8 +514,6 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   log(`网页界面: http://127.0.0.1:${PORT}${hasKey ? `  钱包 ${wallet}` : '  （.env 里没有 PRIVATE_KEY，只能看不能操作）'}`)
   sig.onEvent((ev) => emit(ev))
-  fomo.onFomoStatus((status) => emit({ type: 'fomo', status }))
-  fomo.verify().then((st) => { if (st.configured) log(st.connected ? `fomo: 已登录 @${st.handle}` : `fomo: ${st.error}`) })
   sig.startWatchers()
   const n = sig.traders().filter((t) => t.on).length
   if (n) log(`信号: 盯着 ${n} 个 FOMO 钱包`)

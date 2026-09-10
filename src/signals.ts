@@ -4,16 +4,15 @@
 //   买入 = 代币从 fomo router 转进钱包（USDG / ETH 由 fomo 资金池垫付，同一笔里能看到），卖出 = 代币从钱包转给 router（USDG 回 fomo vault，不回钱包）；
 //   来源不是 router 的转入基本都是别人空投的碎币（同一地址反复打同样数量），记成 dust 不提醒。
 // 金额：同一笔交易里 USDG 的最大一段转账（同一笔钱经过好几手，取最大值就是本金），没有 USDG 就看 WETH（含从 0 地址 mint 的那段）按 ETH 价折算。
-// 交易者的钱包地址可手填；设置页配了 fomo 账号（fomo.ts）就按 handle 从 fomo 查钱包和头像，或配 FOMOSCAN_KEY（第三方 fomoscan.sh，付费）查。
+// 交易者的钱包地址手填（fomo 个人页头像旁），或配 FomoScan key（第三方 fomoscan.sh，付费）按 handle 查。fomo 自己的后端在 Cloudflare 机器人拦截后面，脚本调不了，试过、放弃了。
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { formatUnits, getAddress, isAddress, parseAbi, parseAbiItem, parseEventLogs, parseUnits, type Address, type Hex } from 'viem'
 import { CHAINS, type ChainName } from './chains.ts'
 import { erc20Abi, log, makeClients, nativePriceUsd, tokenMeta, type Clients } from './common.ts'
 import { listTokenPools, type TokenPool } from './pools.ts'
-import * as fomo from './fomo.ts'
 import { fomoscanKey, tgConfig } from './settings.ts'
 
-export type Trader = { handle: string; wallet: Address; chain: ChainName; on: boolean; muted: boolean; addedAt: number; avatar?: string; fomoId?: string; name?: string }
+export type Trader = { handle: string; wallet: Address; chain: ChainName; on: boolean; muted: boolean; addedAt: number }
 export type SignalKind = 'buy' | 'sell' | 'fund' | 'dust' | 'out'
 export type Safety = { status: 'ok' | 'warn' | 'bad' | 'pending' | 'error'; reasons: string[]; facts: Record<string, string | number | null>; at: number }
 export type Signal = {
@@ -46,15 +45,11 @@ export async function addTrader(o: { handle: string; wallet?: string; chain: Cha
   if (!/^[A-Za-z0-9_.-]{1,40}$/.test(handle)) throw new Error('handle 只能是字母 / 数字 / _ . -')
   if (!CHAINS[o.chain]?.fomo) throw new Error(`${CHAINS[o.chain]?.label ?? o.chain} 上还没核对过 fomo 的合约地址，暂时只能盯 Robinhood Chain`)
   let wallet = o.wallet?.trim() ?? ''
-  // 配了 fomo 账号就顺便拿头像 / id；没填钱包时钱包也从这里来，再退到 FomoScan
-  let u: fomo.FomoUser | null = null
-  if (fomo.fomoConnected()) u = await fomo.userByHandle(handle).catch((e) => { log(`fomo 查 @${handle} 失败: ${String(e?.message).slice(0, 100)}`); return null })
-  if (!wallet && u?.wallet) wallet = u.wallet
-  if (!wallet) wallet = await lookupWallet(handle, !!u)
+  if (!wallet) wallet = await lookupWallet(handle)
   if (!isAddress(wallet)) throw new Error('钱包地址不合法')
   const w = getAddress(wallet)
   if (store.traders.some((t) => t.chain === o.chain && same(t.wallet, w))) throw new Error(`这个钱包已经在盯着了（@${store.traders.find((t) => same(t.wallet, w))!.handle}）`)
-  const t: Trader = { handle: u?.handle || handle, wallet: w, chain: o.chain, on: true, muted: false, addedAt: Date.now(), ...(u ? { avatar: u.avatar, fomoId: u.id, name: u.name } : {}) }
+  const t: Trader = { handle, wallet: w, chain: o.chain, on: true, muted: false, addedAt: Date.now() }
   store.traders.push(t); save()
   watcherOf(o.chain).kick()
   return t
@@ -73,9 +68,9 @@ export function removeTrader(chain: ChainName, wallet: string) {
 export function clearSignals(chain: ChainName) { store.signals = store.signals.filter((s) => s.chain !== chain); save() }
 
 // FomoScan（https://api.fomoscan.sh，独立的第三方，handle ↔ 钱包映射，每次查询扣 credits）
-async function lookupWallet(handle: string, fomoTried: boolean): Promise<string> {
+async function lookupWallet(handle: string): Promise<string> {
   const key = fomoscanKey()
-  if (!key) throw new Error(fomoTried ? `fomo 的资料里没找到 @${handle} 的 EVM 钱包，请手填` : '没填钱包地址，也没配 fomo 账号 / FomoScan key，查不到 handle 的钱包（设置页配 fomo 账号，或手填地址）')
+  if (!key) throw new Error('没填钱包地址，也没配 FomoScan key，查不到 handle 的钱包。fomo 个人页（fomo.family/profile/<handle>）头像旁的地址可以直接复制')
   const r = await fetch(`https://api.fomoscan.sh/v2/user/handle/${encodeURIComponent(handle)}`, { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) })
   const j: any = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error(`FomoScan ${r.status}: ${j.message ?? j.error ?? '查询失败'}`)
