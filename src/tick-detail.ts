@@ -45,7 +45,7 @@ export async function readTickDetail(query: { token: Address; pool?: string; fee
   const blockNumber=await c.pub.getBlockNumber({cacheTime:0})
   // 所有状态和两轮 tick multicall 固定到同一区块，避免价格跨 tick 时拼出错误深度。
   const pub = new Proxy(c.pub,{get(target,key) { if(key==='readContract'||key==='multicall') return (args: any)=>(target[key] as any)({...args,blockNumber}); return Reflect.get(target,key) }}) as PublicClient
-  const lp=await makeLp('v4',{pub,wallet:c.wallet,cfg:c.cfg,rpcIsAlchemy:c.rpcIsAlchemy,log:()=>{}})
+  const lp=await makeLp('v4',{pub,archive:pub,wallet:c.wallet,cfg:c.cfg,rpcIsAlchemy:c.rpcIsAlchemy,log:()=>{}}) // 固定的是最新区块，公共节点也有，不用归档节点
   const [slot,liquidity,meta]=await Promise.all([lp.slot0(pool),lp.liquidity(pool),tokenMeta(pub,query.token)])
   if(!slot.sqrtP) throw new Error('池子尚未初始化，没有链上 tick 明细')
   const step=pool.spacing*query.zoom,center=query.center??slot.tick

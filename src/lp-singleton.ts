@@ -62,7 +62,7 @@ const v4SwapEvent = parseAbiItem('event Swap(bytes32 indexed id, address indexed
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 
 export async function singletonLp(protocol: ProtocolName, d: LpDeps): Promise<Lp> {
-  const { pub, wallet, cfg } = d
+  const { pub, archive, wallet, cfg } = d
   const infi = protocol === 'infinity'
   const A = cfg.contracts[protocol]! as unknown as Record<string, Address>
   const minHop = cfg.contracts[protocol]!.urMinHop === true
@@ -95,7 +95,7 @@ export async function singletonLp(protocol: ProtocolName, d: LpDeps): Promise<Lp
   }
 
   async function slot0(pool: Pool, blockNumber?: bigint): Promise<Slot0> {
-    const [sqrtP, tick, protocolFee, lpFee] = await pub.readContract({ address: STATE, abi: stateViewAbi, functionName: 'getSlot0', args: [pool.id], ...(blockNumber ? { blockNumber } : {}) })
+    const [sqrtP, tick, protocolFee, lpFee] = await (blockNumber ? archive : pub).readContract({ address: STATE, abi: stateViewAbi, functionName: 'getSlot0', args: [pool.id], ...(blockNumber ? { blockNumber } : {}) })
     return { sqrtP, tick, protocolFee, lpFee }
   }
   const liquidity = (pool: Pool) => pub.readContract({ address: STATE, abi: stateViewAbi, functionName: 'getLiquidity', args: [pool.id] })
@@ -218,7 +218,7 @@ export async function singletonLp(protocol: ProtocolName, d: LpDeps): Promise<Lp
     },
     slot0, liquidity,
     slot0At: (pool, block) => slot0(pool, block),
-    liquidityAt: (id, blockNumber) => pub.readContract({ address: POSM, abi: posmAbi, functionName: 'getPositionLiquidity', args: [id], blockNumber }), // 不存在 / 已销毁的仓位合约本身就返回 0；读链失败要抛出去，不能当成 0
+    liquidityAt: (id, blockNumber) => archive.readContract({ address: POSM, abi: posmAbi, functionName: 'getPositionLiquidity', args: [id], blockNumber }), // 不存在 / 已销毁的仓位合约本身就返回 0；读链失败要抛出去，不能当成 0
     // v4 的 calculateSwapFee：协议费按方向取 12 位，与 LP 费合成
     swapFee: (s, zeroForOne, pool) => {
       const pf = zeroForOne ? s.protocolFee & 0xfff : s.protocolFee >> 12

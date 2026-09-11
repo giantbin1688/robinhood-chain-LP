@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { formatEther, getAddress, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
-import { die, env, erc20Abi, failFast, feeText, log, makeClients, nativePriceUsd, num, positionsOf, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, prepareSwap, type Clients, type PositionRecord, type SwapOffer } from './common.ts'
+import { balanceFresh, die, env, erc20Abi, failFast, feeText, log, makeClients, nativePriceUsd, num, positionsOf, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, prepareSwap, type Clients, type PositionRecord, type SwapOffer } from './common.ts'
 import type { Pool, RawPosition } from './lp.ts'
 import { ledgerTotals } from './history.ts'
 
@@ -55,16 +55,17 @@ export function seller(c: Clients, token: Address, symbol: string, fmtT: (x: big
     // 卖不掉就一直重试，直到卖出为止：报价失败、发送前模拟不过（典型是"Min return not reached"= 报价已过期）都不花钱，等几秒按最新行情重新报价再来。
     // 行情急跌时 OKX 的索引常常滞后几分钟，报出来的"更高价"其实是旧价，按它设的最低回报必然达不到；它的多跳路线也虚报过（进场买 BNC4 少给 4–7%）——
     // 哪家的报价因此失败过一次，它再比别家高出超过滑点一半就不信它，改走别家（只在这种失败后才切，因为 OKX 常常真的能找到更好的路，别的原因失败不该放弃它）。
-    // 每次都按钱包实际余额卖（上一次可能已经成交只是没等到回执）；真正上链后回滚的是花了 gas 的，连续 3 次就停，那多半是貔貅币或路由问题，不是价格问题
-    sell: async (amount: bigint, kit: ReturnType<typeof txKit>) => {
-      const balance = () => c.pub.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [c.wallet] })
+    // 每次都按钱包实际余额卖（上一次可能已经成交只是没等到回执）；真正上链后回滚的是花了 gas 的，连续 3 次就停，那多半是貔貅币或路由问题，不是价格问题。
+    // keep = 钱包里本来就有、这次不该卖的数量（--position 模式下原有的币、领手续费时的原余额）：余额只剩这些就算卖完了，不会把它们也卖掉。
+    // 余额必须读到交易之后的（balanceFresh）：读到旧余额会把 amount 压成钱包原有的那一点，撤出来的币原样留下
+    sell: async (amount: bigint, kit: ReturnType<typeof txKit>, keep = 0n) => {
       let reverts = 0
       const distrust = new Set<SwapOffer['via']>()
       for (let attempt = 1; ; attempt++) {
         const wait = Math.min(3 * attempt, 30)
-        const bal = await balance()
-        if (bal === 0n) { log(`钱包里已没有 ${symbol}，视为已卖出`); return }
-        if (bal < amount) amount = bal
+        const avail = (await balanceFresh(c, token, kit.stats.lastBlock)) - keep
+        if (avail <= 0n) { log(`钱包里已没有要卖的 ${symbol}，视为已卖出`); return }
+        if (avail < amount) amount = avail
         const got = await offers(amount)
         let best: SwapOffer | undefined = got[0]
         if (best && distrust.has(best.via)) {
@@ -160,7 +161,8 @@ export async function collectFees(o: CollectOptions) {
   const symOf = (t: Address) => (same(t, Q.address) ? Q.symbol : groups.find((g) => same(g.token, t))?.symbol ?? t)
   const kit = txKit(o.clients, usd, symOf)
   await kit.sendEstimated(`领手续费 ${pools.map((g) => g.ids.join(',')).join(' + ')}`, collectTx)
-  const balances = await Promise.all(groups.map((g) => balanceOf(g.token)))
+  const fresh = (t: Address) => balanceFresh(o.clients, t, kit.stats.lastBlock) // 读到领取之前的旧余额会算成"领到 0"、什么都不卖
+  const balances = await Promise.all(groups.map((g) => fresh(g.token)))
   const got = groups.map((g, i) => balances[i] - g.start)
   log(`领取完成: 领到 ≈${fmtU(totalUsdg)} ${Q.symbol}${groups.map((g, i) => (got[i] > 0n ? ` + ${g.fmtT(got[i])} ${g.symbol}` : '')).join('')}`)
   // 卖币：每种币按实际到账数量重新报价（并行），授权按需串行补，然后所有卖币交易同时广播、落在同一个区块
@@ -174,12 +176,12 @@ export async function collectFees(o: CollectOptions) {
     // 同时广播只是争取一次搞定：报不出价、模拟不过（报价过期）、上链回滚的币不能就这么留在钱包，逐个转入"卖出为止"的重试循环
     for (const { g, amount } of selling) {
       const i = groups.indexOf(g)
-      if ((await balanceOf(g.token)) < balances[i]) continue // 余额少了 = 这一笔已经卖掉
+      if ((await fresh(g.token)) < balances[i]) continue // 余额少了 = 这一笔已经卖掉
       log(`${g.symbol} 没卖出去，改为逐笔重试直到卖出`)
-      await g.sell!.sell(amount, kit)
+      await g.sell!.sell(amount, kit, g.start) // 只卖领到的那部分，钱包里原有的留着
     }
   }
-  log(`完成: 共收回 ${fmtU((await balanceOf(Q.address)) - usdgStart)} ${Q.symbol}${groups.some((g) => g.tokens > 0n && !g.sell) ? '，未卖的代币留在钱包' : ''}`)
+  log(`完成: 共收回 ${fmtU((await fresh(Q.address)) - usdgStart)} ${Q.symbol}${groups.some((g) => g.tokens > 0n && !g.sell) ? '，未卖的代币留在钱包' : ''}`)
   log(`gas 合计: ${kit.stats.txCount} 笔，${trim(kit.stats.gasTotal, 18)} ${o.clients.cfg.native.symbol} ($${usd(kit.stats.gasTotal)})`)
 }
 
@@ -279,13 +281,22 @@ export async function withdraw(o: WithdrawOptions) {
       }
     }
   }
-  const [usdgAfterBurn, tokenBal] = await Promise.all([balanceOf(Q.address), balanceOf(token)])
+  // 余额必须读到撤仓之后的（节点落后会读到旧余额，下面就会只卖钱包里原有的那一点）
+  const fresh = (t: Address) => balanceFresh(o.clients, t, kit.stats.lastBlock)
+  const [usdgAfterBurn, tokenBal] = await Promise.all([fresh(Q.address), fresh(token)])
   log(`撤仓完成: 拿回 ${fmtU(usdgAfterBurn - usdgStart)} ${Q.symbol} + ${fmtT(tokenBal - tokenStart)} ${symbol}（含手续费${partial ? `；剩下 ${100 - pct}% 还在仓位里` : ''}）`)
 
-  // ---- 2) 卖币：按实际余额重新报价，走更好的一家 ----
-  const toSell = sellHeld + (tokenBal - tokenStart)
-  if (s && toSell > 0n) await s.sell(toSell, kit)
-  const [usdgEnd, tokenEnd] = await Promise.all([balanceOf(Q.address), balanceOf(token)])
+  // ---- 2) 卖币：按实际余额重新报价，走更好的一家。keep = 本来就打算留在钱包里的（--position 模式下钱包原有的币）----
+  // 卖完再核对一次余额：还剩超过计划量 0.1% 的就再卖（最多 3 轮），别像以前那样打印一句"钱包还剩"就结束
+  const keep = tokenStart - sellHeld
+  let toSell = tokenBal - keep
+  for (let round = 1; s && toSell > 0n && round <= 3; round++) {
+    if (round > 1) log(`钱包还剩 ${fmtT(toSell)} ${symbol} 没卖掉，再卖一次（第 ${round} 轮）`)
+    await s.sell(toSell, kit, keep)
+    toSell = (await fresh(token)) - keep
+    if (toSell <= sellAmount / 1000n) break
+  }
+  const [usdgEnd, tokenEnd] = await Promise.all([fresh(Q.address), fresh(token)])
   const gained = Number(usdgEnd - usdgStart) / 10 ** Q.decimals
   let d = deposits ? await deposits : null
   if (d && d.dep === null) { await sleep(3000); d = await readDeposits() } // 交易都发完了，节点空下来再读一次

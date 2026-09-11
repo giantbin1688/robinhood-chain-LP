@@ -62,7 +62,7 @@ export function computePoolAddress(deployer: Address, token0: Address, token1: A
 }
 
 export async function v3Lp(d: LpDeps): Promise<Lp> {
-  const { pub, wallet, cfg } = d
+  const { pub, archive, wallet, cfg } = d
   const label = protocolLabel(cfg.name, 'v3')
   const tiers = v3Tiers(cfg.name)
   const A = cfg.contracts.v3! as unknown as Record<string, Address>
@@ -85,7 +85,7 @@ export async function v3Lp(d: LpDeps): Promise<Lp> {
   }
   async function slot0(p: Pool, blockNumber?: bigint): Promise<Slot0> {
     try {
-      const [sqrtP, tick, , , , feeProtocol] = await pub.readContract({ address: p.id as Address, abi: poolAbi, functionName: 'slot0', args: [], ...(blockNumber ? { blockNumber } : {}) })
+      const [sqrtP, tick, , , , feeProtocol] = await (blockNumber ? archive : pub).readContract({ address: p.id as Address, abi: poolAbi, functionName: 'slot0', args: [], ...(blockNumber ? { blockNumber } : {}) })
       return { sqrtP, tick, protocolFee: feeProtocol, lpFee: p.fee }
     } catch (e: any) {
       if (!blockNumber && (await pub.getCode({ address: p.id as Address })) === undefined) return { sqrtP: 0n, tick: 0, protocolFee: 0, lpFee: p.fee } // 池合约还不存在
@@ -153,7 +153,7 @@ export async function v3Lp(d: LpDeps): Promise<Lp> {
     },
     slot0,
     slot0At: (p, block) => slot0(p, block),
-    liquidityAt: (id, blockNumber) => pub.readContract({ address: NPM, abi: npmAbi, functionName: 'positions', args: [id], blockNumber }).then((r) => r[7], (e) => { if (/Invalid token ID/i.test(String(e?.message))) return 0n; throw e }), // 已销毁的 NFT 会 revert 'Invalid token ID' = 0；读链失败照常抛出
+    liquidityAt: (id, blockNumber) => archive.readContract({ address: NPM, abi: npmAbi, functionName: 'positions', args: [id], blockNumber }).then((r) => r[7], (e) => { if (/Invalid token ID/i.test(String(e?.message))) return 0n; throw e }), // 已销毁的 NFT 会 revert 'Invalid token ID' = 0；读链失败照常抛出
     liquidity: (p) => pub.readContract({ address: p.id as Address, abi: poolAbi, functionName: 'liquidity' }),
     swapFee: (_s, _z, p) => p.fee, // 协议费从 LP 费里分，交易者付的就是池费率
     ownedIds, positions, fees,

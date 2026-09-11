@@ -56,7 +56,7 @@ export interface Lp {
   ledger: LedgerSpec
 }
 
-export type LpDeps = { pub: PublicClient; wallet: Address; cfg: ChainConfig; rpcIsAlchemy: boolean; log: (...a: unknown[]) => void }
+export type LpDeps = { pub: PublicClient; archive: PublicClient; wallet: Address; cfg: ChainConfig; rpcIsAlchemy: boolean; log: (...a: unknown[]) => void } // archive: 只连自己的归档节点、不回落公共节点，历史区块的读取用它
 
 export async function makeLp(protocol: ProtocolName, d: LpDeps): Promise<Lp> {
   if (protocol === 'v3') return (await import('./lp-v3.ts')).v3Lp(d)

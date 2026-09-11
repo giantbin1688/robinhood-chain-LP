@@ -72,7 +72,11 @@ export async function makeClients(o: ClientsOptions = {}) {
   const pub = createPublicClient({ chain, transport, pollingInterval: 500 })
   const wc = account ? createWalletClient({ account, chain, transport }) : undefined
   const rpcIsAlchemy = own && /alchemy\.com/.test(rpc!)
-  const deps = { pub, wallet, cfg, rpcIsAlchemy, log }
+  // 历史区块的读取（流水估值用的 slot0At / liquidityAt）只能问自己的归档节点：公共节点没有历史状态，对带 blockNumber 的 eth_call
+  // 一律回 "Missing or invalid parameters"。让它们走 fallback 的话，Alchemy 一限流就会落到公共节点、拿一个误导人的错误回来（不会再回 Alchemy 重试）。
+  // 所以单独给一个不带备用的客户端，限流靠 http 传输层自己的退避重试（默认 3 次，429 会重试）
+  const archive = own ? createPublicClient({ chain, transport: http(rpc, { batch: true, retryCount: 5, retryDelay: 400 }), pollingInterval: 500 }) : pub
+  const deps = { pub, archive, wallet, cfg, rpcIsAlchemy, log }
   const lp = await makeLp(protocol, deps)
   const priceLp = cfg.nativePrice.protocol === protocol ? lp : await makeLp(cfg.nativePrice.protocol, deps)
   return { account, wallet, pub, wc, cfg, protocol, chain, lp, priceLp, Q: cfg.quote, rpcIsAlchemy }
@@ -171,7 +175,7 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
   const { pub, wc, wallet, chain, cfg, lp } = c
   // nonce 本地递增、gas 价整轮复用（费率稳定的链上够用，上限给 3 倍余量，实际只按基础费扣），发交易前不再逐笔查询
   let nonce: number | undefined, fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } | undefined
-  const stats = { txCount: 0, gasTotal: 0n }
+  const stats = { txCount: 0, gasTotal: 0n, lastBlock: 0n } // lastBlock: 最后一笔已确认交易所在的区块，之后读余额要求节点至少到这一块（见 balanceFresh）
   async function send(label: string, tx: { to: Address; data: Hex; value?: bigint; gas: bigint }) {
     if (nonce === undefined || !fees) [nonce, fees] = await Promise.all([pub.getTransactionCount({ address: wallet, blockTag: 'pending' }), pub.estimateFeesPerGas()])
     // 广播失败（RPC 出错、被节点拒收）时 nonce 退回去，否则重试的下一笔会用到跳号的 nonce 卡住
@@ -180,6 +184,7 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
     const rc = await pub.waitForTransactionReceipt({ hash, retryDelay: 150, retryCount: 60 })
     const cost = rc.gasUsed * rc.effectiveGasPrice
     stats.txCount++; stats.gasTotal += cost
+    if (rc.blockNumber > stats.lastBlock) stats.lastBlock = rc.blockNumber
     process.stdout.write(rc.status === 'success' ? ` 成功，${rc.gasUsed} gas $${usd(cost)}\n` : ' 失败(revert)\n')
     // 抛出而不是直接退出：卖币那层要接住重试；没人接的照样由 failFast 打印 shortMessage 后退出。onchain 标记这次是真花了 gas 的回滚
     if (rc.status !== 'success') throw Object.assign(new Error(`${label} 交易回滚`), { shortMessage: `${label} 交易回滚: ${cfg.explorer}/tx/${hash}`, onchain: true })
@@ -225,11 +230,24 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
     return sent.map((s, i) => {
       const rc = rcs[i], cost = rc.gasUsed * rc.effectiveGasPrice, ok = rc.status === 'success'
       stats.txCount++; stats.gasTotal += cost
+      if (rc.blockNumber > stats.lastBlock) stats.lastBlock = rc.blockNumber
       log(`${s.label} ${s.hash} ${ok ? `成功，${rc.gasUsed} gas $${usd(cost)}` : `失败(revert) ${cfg.explorer}/tx/${s.hash}`}`)
       return { label: s.label, hash: s.hash, ok, block: rc.blockNumber }
     })
   }
   return { send, sendEstimated, sendBatch, ensureErc20Approval, permitFor, stats }
+}
+
+// 交易确认后读余额，要求节点至少已经到了那笔交易的区块（minBlock，一般传 kit.stats.lastBlock）。
+// 备用的公共节点常比 Alchemy 慢几秒；Alchemy 被限流时读请求会落到它那里，读回来的是交易之前的旧余额——
+// 撤仓后就发生过：按旧余额只卖了钱包里原有的 14 个币，撤出来的 43 万个原样留在钱包。余额和区块号放在同一批请求里问同一个节点，落后就等一秒再读
+export async function balanceFresh(c: Pick<Clients, 'pub' | 'wallet'>, token: Address, minBlock: bigint) {
+  for (let i = 1; ; i++) {
+    const [bal, head] = await Promise.all([c.pub.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [c.wallet] }), c.pub.getBlockNumber({ cacheTime: 0 })])
+    if (head >= minBlock || i >= 30) return bal
+    if (i === 1) log(`节点区块 ${head} 还没到交易区块 ${minBlock}，等它跟上再读余额…`)
+    await sleep(1000)
+  }
 }
 
 // ---- 换币：Uniswap、OKX 和「要做 LP 的那个池」同时报价，按结果排序（精确输入看产出多少，精确输出看投入多少）----
@@ -309,11 +327,10 @@ export async function prepareSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typ
 }
 // 执行一个报价：授权 -> 发交易。返回收到的 tokenOut 数量
 export async function executeSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typeof txKit>, c: Clients, tokenIn: Address, tokenOut: Address, label: string) {
-  const balance = () => c.pub.readContract({ address: tokenOut, abi: erc20Abi, functionName: 'balanceOf', args: [c.wallet] })
-  const before = await balance()
+  const before = await balanceFresh(c, tokenOut, kit.stats.lastBlock)
   const p = await prepareSwap(o, d, kit, c, tokenIn)
   await kit.sendEstimated(`${label} (${p.via})`, p.tx, p.refGas)
-  const got = (await balance()) - before
+  const got = (await balanceFresh(c, tokenOut, kit.stats.lastBlock)) - before
   if (got <= 0n) die(`${label}交易成功但没有收到代币?`)
   return got
 }
