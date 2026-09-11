@@ -7,7 +7,7 @@ import { formatEther, getAddress, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
 import { die, env, erc20Abi, failFast, feeText, log, makeClients, nativePriceUsd, num, positionsOf, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, prepareSwap, type Clients, type PositionRecord, type SwapOffer } from './common.ts'
 import type { Pool, RawPosition } from './lp.ts'
-import { depositsOf } from './history.ts'
+import { ledgerTotals } from './history.ts'
 
 export const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase() // 合约返回的是校验和大小写地址，比较时忽略大小写
 
@@ -212,7 +212,7 @@ export async function withdraw(o: WithdrawOptions) {
   if (positions.length === 0) die(`按 ${pct}% 截下来的流动性为 0，仓位太小，直接全撤吧`)
   const sellHeld = o.positions && !o.sellAll ? 0n : tokenStart // 钱包里原有的币要不要一起卖
   // 进场金额：全撤时在最后一行和"共收回"对照着看。后台并行读流水（Alchemy），撤仓 / 卖币不等它；演练不读
-  const deposits = partial || o.dryRun ? Promise.resolve(null) : depositsOf(o.clients, found, decimals, found.every((p) => p.mint) ? found.reduce((m, p) => (p.mint!.block < m ? p.mint!.block : m), found[0].mint!.block) : 0n)
+  const deposits = partial || o.dryRun ? Promise.resolve(null) : ledgerTotals(o.clients, found, decimals, found.every((p) => p.mint) ? found.reduce((m, p) => (p.mint!.block < m ? p.mint!.block : m), found[0].mint!.block) : 0n).then((t) => t?.deposits ?? null)
   deposits.catch(() => {})
 
   // ---- 计划 ----

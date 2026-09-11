@@ -354,7 +354,7 @@ async function poolsFor(x: Ctx, token: Address) {
 }
 
 async function state(sel: Sel) {
-  const params = Object.fromEntries(['USDG_AMOUNT', 'POOL_FEE', 'POOL_SELECT', 'TICK_SPACING', 'PRICE_RANGE', 'RANGE', 'LP_SHAPE', 'LP_LAYERS', 'SWAP_SLIPPAGE', 'LP_SLIPPAGE', 'MAX_DEVIATION', 'SWAP_VIA', 'EXIT_SWAP_VIA', 'WATCH_INTERVAL', 'WATCH_CONFIRM', 'WATCH_UPPER_GRACE', 'SOL_QUOTE'].map((k) => [k, process.env[k] ?? '']))
+  const params = Object.fromEntries(['USDG_AMOUNT', 'POOL_FEE', 'POOL_SELECT', 'TICK_SPACING', 'PRICE_RANGE', 'RANGE', 'LP_SHAPE', 'LP_LAYERS', 'SWAP_SLIPPAGE', 'LP_SLIPPAGE', 'MAX_DEVIATION', 'SWAP_VIA', 'EXIT_SWAP_VIA', 'WATCH_INTERVAL', 'WATCH_CONFIRM', 'WATCH_UPPER_GRACE', 'WATCH_STOP_LOSS', 'SOL_QUOTE'].map((k) => [k, process.env[k] ?? '']))
   const chains = [
     ...Object.values(CHAINS).map((ch) => ({ name: ch.name as string, label: ch.label, quote: ch.quote.symbol, quotes: [ch.quote.symbol], native: ch.native.symbol, protocols: ch.protocols.map((p) => ({ name: p as string, label: protocolLabel(ch.name, p) })), rpc: !!effectiveRpc(ch.name, ch.rpcEnv), rpcEnv: ch.rpcEnv })),
     { name: 'solana', label: SOL_CHAIN.label, quote: sel.quote, quotes: ['SOL', 'USDC'], native: 'SOL', protocols: SOL_CHAIN.protocols.map((p) => ({ name: p as string, label: SOL_PROTOCOL_LABEL[p] })), rpc: !!effectiveRpc('solana', SOL_CHAIN.rpcEnv), rpcEnv: SOL_CHAIN.rpcEnv },
@@ -399,8 +399,15 @@ function launchArgs(b: any, sel: Sel) {
   if (['curve', 'bidask'].includes(str(b.shape))) { args.push(`--shape=${str(b.shape)}`); if (str(b.layers)) args.push(`--layers=${str(b.layers)}`) }
   else args.push('--shape=spot')
   args.push(b.dryRun ? '--dry-run' : '--yes')
-  if (b.watch && !b.dryRun) args.push('--watch')
+  if (b.watch && !b.dryRun) { args.push('--watch'); const sl = stopLossArg(b, sel); if (sl) args.push(sl) }
   return args
+}
+// 止损 %（0 / 空 = 不开）。Solana 的监控还没有这个参数，传过去 parseArgs 会报未知选项，所以只给 EVM
+function stopLossArg(b: any, sel: Sel) {
+  if (sel.chain === 'solana' || !str(b.stopLoss)) return ''
+  const p = Number(b.stopLoss)
+  if (!(Number.isFinite(p) && p >= 0 && p < 100)) throw new Error('止损比例必须是 0~99 的数字（0 = 不开）')
+  return p > 0 ? `--stop-loss=${p}` : ''
 }
 function exitArgs(b: any, sel: Sel) {
   const args: string[] = []
@@ -424,6 +431,8 @@ function watchArgs(b: any, sel: Sel) {
   if (!validAddr(sel.chain, str(b.token))) throw new Error('代币地址不合法')
   const args = [`--token=${str(b.token)}`]
   if (ids(b.positions).length) args.push(`--position=${ids(b.positions).join(',')}`)
+  const sl = stopLossArg(b, sel); if (sl) args.push(sl)
+  if (sl && str(b.entry)) { const e = Number(b.entry); if (!(Number.isFinite(e) && e > 0)) throw new Error('进场本金必须是大于 0 的数字'); args.push(`--entry=${e}`) }
   if (b.dryRun) args.push('--dry-run')
   return args
 }
@@ -599,7 +608,7 @@ const server = createServer(async (req, res) => {
       const watching = [...jobs.values()].filter((j) => isRunning(j) && j.chain === sel.chain && j.protocol === sel.protocol && (j.kind === 'watch' || j.phase === 'watch'))
       const dup = watching.find((j) => same(j.token ?? '', str(b.token)) && (!j.positions.length || !ids(b.positions).length || j.positions.some((p) => ids(b.positions).includes(p))))
       if (dup) throw new Error(`任务 #${dup.id}「${dup.label}」已经在监控这个仓位`)
-      const job = startJob(sel, 'watch', `监控 ${ids(b.positions).length ? '#' + ids(b.positions).map(shortId).join(',#') : '全部 ' + (str(b.symbol) || str(b.token).slice(0, 10) + '…')}${b.dryRun ? '（演练）' : ''}`, 'src/monitor.ts', watchArgs(b, sel), { dryRun: !!b.dryRun, token: str(b.token), positions: ids(b.positions) })
+      const job = startJob(sel, 'watch', `监控 ${ids(b.positions).length ? '#' + ids(b.positions).map(shortId).join(',#') : '全部 ' + (str(b.symbol) || str(b.token).slice(0, 10) + '…')}${stopLossArg(b, sel) ? ` 止损 ${Number(b.stopLoss)}%` : ''}${b.dryRun ? '（演练）' : ''}`, 'src/monitor.ts', watchArgs(b, sel), { dryRun: !!b.dryRun, token: str(b.token), positions: ids(b.positions) })
       return json(res, 200, { job: summary(job) })
     }
     if (req.method === 'POST' && url.pathname === '/api/stop') {

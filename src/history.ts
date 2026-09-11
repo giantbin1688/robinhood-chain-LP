@@ -144,23 +144,26 @@ export async function positionLedger(c: Clients, p: Pick<RawPosition, 'id' | 'po
   return events.sort((a, b) => (a.block < b.block ? -1 : a.block > b.block ? 1 : 0))
 }
 
-// 一组仓位累计存入了多少计价币（每笔按当时池价折算，和网页 uPNL 的"存入"同一口径）：撤退日志里给"共收回"配上参照。
-// 需要 Alchemy；拿不到（公共节点、限流、极限价估值失败）返回 null，不影响撤退本身。since = 最早的 mint 区块，不知道就从创世块扫（慢，几十秒）
-export async function depositsOf(c: Clients, positions: Pick<RawPosition, 'id' | 'pool' | 'tickLower' | 'tickUpper'>[], tokenDecimals: number, since: bigint): Promise<number | null> {
+// 一组仓位的资金流水合计（计价币，每笔按当时池价折算，和网页 uPNL 同一口径）：deposits 存入本金、withdrawn 已撤本金、fees 已领手续费。
+// 撤退日志里给"共收回"配参照，监控的止损用它算盈亏。需要 Alchemy；拿不到（公共节点、限流、极限价估值失败）返回 null，调用方自己决定退路。
+// since = 最早的 mint 区块，不知道就从创世块扫（慢，几十秒）
+export async function ledgerTotals(c: Clients, positions: Pick<RawPosition, 'id' | 'pool' | 'tickLower' | 'tickUpper'>[], tokenDecimals: number, since: bigint): Promise<{ deposits: number; withdrawn: number; fees: number } | null> {
   if (!c.rpcIsAlchemy || !positions.length) return null
   try {
     await refreshLedger(c, since)
-    let total = 0
+    const t = { deposits: 0, withdrawn: 0, fees: 0 }
     for (const p of positions) {
       const quoteIs0 = same(p.pool.currency0, c.Q.address)
       const [d0, d1] = quoteIs0 ? [c.Q.decimals, tokenDecimals] : [tokenDecimals, c.Q.decimals]
       for (const e of await positionLedger(c, p)) {
-        if (e.action !== 'add') continue
         const price = v4.priceAtTick(e.tick) * 10 ** (d0 - d1) // 1 个 currency0 = price 个 currency1（人类单位）
-        total += quoteIs0 ? Number(e.amount0) / 10 ** d0 + Number(e.amount1) / 10 ** d1 / price : Number(e.amount1) / 10 ** d1 + (Number(e.amount0) / 10 ** d0) * price
+        const usd = (a0: bigint, a1: bigint) => (quoteIs0 ? Number(a0) / 10 ** d0 + Number(a1) / 10 ** d1 / price : Number(a1) / 10 ** d1 + (Number(a0) / 10 ** d0) * price)
+        const total = usd(e.amount0, e.amount1), principal = usd(e.principal0, e.principal1)
+        if (e.action === 'add') t.deposits += total
+        else { t.withdrawn += principal; t.fees += total - principal }
       }
     }
-    return total
+    return t
   } catch { return null }
 }
 

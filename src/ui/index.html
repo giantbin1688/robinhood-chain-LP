@@ -436,6 +436,7 @@
       <div class="section">
         <h4>执行后</h4>
         <div class="row"><label>继续监控</label><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="f-watch"> 组完 LP 后盯着池价，跳出区间自动撤退</label><div class="hint">监控参数（间隔 / 确认次数 / 上沿宽限）来自 params.env；也可以之后在仓位页单独开监控</div></div>
+        <div class="row" id="row-stopLoss"><label>止损（%）</label><input type="text" id="f-stopLoss" placeholder="0 = 不开"><div class="hint">勾了监控才生效。填了就<b>只按止损撤退，不再看跳出区间</b>：整组（Curve / Bid-Ask 的几段合起来）现值 + 手续费比进场金额少这么多就撤退并卖币</div></div>
       </div>
       <div class="actions">
         <button class="btn primary" id="btn-plan">计划（演练，不发交易）</button>
@@ -495,6 +496,7 @@
     <span class="sp"></span>
     <label>卖币走 <select id="p-via"><option value="best">best（聚合器 / 池内 取高者）</option><option value="uniswap">uniswap</option><option value="okx">okx</option><option value="jupiter">jupiter</option><option value="pool">pool（仓位所在的池直换）</option></select></label>
     <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="p-keep"> 只撤仓位，不卖币</label>
+    <label id="p-stop-wrap" title="点「监控」/「整组监控」时带上。填了就只按止损撤退、不再看跳出区间：整组现值 + 手续费比进场本金少这么多就撤退并卖币。本金从链上流水读，读不到时用右边手填的">止损 <input type="text" id="p-stop" placeholder="0" style="width:3.5em"> %，本金 <input type="text" id="p-entry" placeholder="自动" style="width:5em"></label>
   </div>
   <div class="card">
     <div id="pos-summary" class="small" style="margin-bottom:6px">加载中…</div>
@@ -776,6 +778,7 @@ async function loadState(fillForm) {
   QS = STATE.quote || 'USDG'; NS = STATE.native || 'ETH'; SEL.protocol = STATE.protocol
   const sol = STATE.chain === 'solana'
   $('#row-quote').style.display = sol ? '' : 'none'; $('#f-quote').value = SEL.quote
+  $('#row-stopLoss').style.display = $('#p-stop-wrap').style.display = sol ? 'none' : '' // Solana 的监控还没有止损
   document.querySelectorAll('.q').forEach((el) => (el.textContent = QS))
   $('#pos-range-q').textContent = sol ? 'SOL 或 USDC' : QS // Solana 上两种计价的仓位都列，每行各自标
   const sel = $('#sel-chain'), selP = $('#sel-protocol')
@@ -815,7 +818,7 @@ async function loadState(fillForm) {
     $('#f-rangeMode').value = p.PRICE_RANGE ? 'price' : 'pct'; onRangeMode()
     $('#f-shape').value = ['curve', 'bidask'].includes(p.LP_SHAPE) ? p.LP_SHAPE : 'spot'; $('#f-layers').value = p.LP_LAYERS || '3'; onShape()
     $('#f-slippage').value = p.SWAP_SLIPPAGE || '5'; $('#f-lpSlippage').value = p.LP_SLIPPAGE || '5'
-    $('#p-via').value = p.EXIT_SWAP_VIA || 'best'
+    $('#p-via').value = p.EXIT_SWAP_VIA || 'best'; $('#f-stopLoss').value = p.WATCH_STOP_LOSS || ''; $('#p-stop').value = p.WATCH_STOP_LOSS && Number(p.WATCH_STOP_LOSS) > 0 ? p.WATCH_STOP_LOSS : ''
     $('#btn-plan').disabled = !w
     if (sol) { /* Jupiter 免 key */ }
     else if (!STATE.uniswapKey && !STATE.okx) toast('.env 里既没有 UNISWAP_API_KEY 也没有 OKX_API_KEY，进场/撤退会失败')
@@ -893,7 +896,7 @@ const form = (dryRun) => ({
   token: $('#f-token').value.trim(), usdg: $('#f-usdg').value, fee: $('#f-fee').value, spacing: $('#f-spacing').value, poolSelect: $('#f-poolSelect').value, pool: $('#f-pool').value,
   maxDeviation: $('#f-maxDeviation').value, rangeMode: $('#f-rangeMode').value, range: $('#f-range').value, priceRange: $('#f-priceRange').value, tickRange: $('#f-tickRange').value,
   shape: $('#f-shape').value, layers: $('#f-layers').value,
-  slippage: $('#f-slippage').value, lpSlippage: $('#f-lpSlippage').value, watch: $('#f-watch').checked, dryRun,
+  slippage: $('#f-slippage').value, lpSlippage: $('#f-lpSlippage').value, watch: $('#f-watch').checked, stopLoss: $('#f-stopLoss').value, dryRun,
 })
 const sig = (b) => JSON.stringify({ ...b, dryRun: undefined, watch: undefined })
 document.querySelectorAll('#page-launch input, #page-launch select').forEach((el) => el.addEventListener('input', updateExecButton))
@@ -1178,7 +1181,7 @@ async function loadPositions(full) {
       <td><span class="btns">
         ${SEL.chain !== 'solana' ? `<select data-classify="${p.id}" style="width:100px;min-height:26px;font-size:12px" title="修改本地分类；同池、同批建仓的仓位一起更新，不发链上交易"><option value="" ${!['spot','curve','bidask'].includes(p.shape)?'selected':''} disabled>设置分类</option>${[['spot','Spot'],['curve','Curve'],['bidask','Bid-Ask']].map(([v,n])=>`<option value="${v}" ${p.shape===v?'selected':''}>${n}</option>`).join('')}</select>` : ''}
         <button class="btn sm" data-act="collect" data-id="${p.id}" data-sym="${sym}" data-fees="${fmtUsd(unclaimed)}" data-feetoken="${fmtAmt(p.feesToken)}" ${unclaimed < 0.01 ? 'disabled' : ''} title="领取未领手续费 ≈${fmtUsd(unclaimed)}，本金不动；确认框里可勾选顺便把领到的币卖成 ${QS}">领取</button><button class="btn sm" data-act="exit-part" data-id="${p.id}" data-sym="${sym}" title="只撤一部分流动性（比例在确认框里填），手续费一并领走，NFT 保留、剩下的继续做 LP；撤出来的币卖成 ${QS}">撤 %</button><button class="btn sm danger" data-act="exit" data-id="${p.id}" data-sym="${sym}" title="撤掉这一个仓位，卖掉撤出来的币">撤退</button>
-        ${p.watchJob !== null ? `<button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button><button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}" title="停止监控 #${p.watchJob}">停止</button>` : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${sym}" title="盯着池价，跳出区间自动撤退">监控</button>`}</span></td>`
+        ${p.watchJob !== null ? `<button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button><button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}" title="停止监控 #${p.watchJob}">停止</button>` : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${sym}" title="盯着池价，跳出区间自动撤退；工具栏填了止损就改为只按本金止损">监控</button>`}</span></td>`
     tb.appendChild(tr)
     if (open) {
       const dr = document.createElement('tr'); dr.className = 'depthrow'
@@ -1214,7 +1217,7 @@ async function loadPositions(full) {
       const gk = `group:${SEL.chain}:${g}`, gShut = collapsed.has(gk)
       const sr = document.createElement('tr'); sr.className = 'sub' + (gShut ? ' shut' : '')
       sr.innerHTML = `<td colspan="7" data-act="fold" data-key="${gk}">${foldMark(gk, '这一组')}<b>${sym}/${QS}</b> <span class="badge wait">${ps[0].feeText || ps[0].fee + '%'}</span> ${ps.length} 段 ${fmtPrice(ps[0].lo)} – ${fmtPrice(ps[ps.length - 1].hi)}${gShut ? `（${ps.filter((p) => p.inRange).length} 段在区间内）` : ''} · ${summary(ps)}${ps[0].group?.startsWith('0x') ? ` · <a class="tx small" href="${STATE.explorer}/tx/${ps[0].group}" target="_blank">建仓交易</a>` : ''}</td>
-        <td><span class="btns"><button class="btn sm danger" data-act="exit-group" data-ids="${ids}" data-sym="${sym}" data-n="${ps.length}" title="撤掉这一组全部 ${ps.length} 个仓位（同一个池合成 1 笔交易），卖掉撤出来的币">整组撤退</button>${watching ? '' : `<button class="btn sm" data-act="watch-group" data-ids="${ids}" data-token="${ps[0].token}" data-sym="${sym}" title="一个监控盯整组：任一段进入区间后又跳出就整组撤退">整组监控</button>`}</span></td>`
+        <td><span class="btns"><button class="btn sm danger" data-act="exit-group" data-ids="${ids}" data-sym="${sym}" data-n="${ps.length}" title="撤掉这一组全部 ${ps.length} 个仓位（同一个池合成 1 笔交易），卖掉撤出来的币">整组撤退</button>${watching ? '' : `<button class="btn sm" data-act="watch-group" data-ids="${ids}" data-token="${ps[0].token}" data-sym="${sym}" title="一个监控盯整组：任一段进入区间后又跳出就整组撤退；工具栏填了止损就改为只按整组本金止损">整组监控</button>`}</span></td>`
       tb.appendChild(sr)
       if (!gShut) ps.forEach(addRow)
     }
@@ -1303,8 +1306,8 @@ $('#pos-table').onclick = async (e) => {
     if (d.act === 'watch-log') { showPage('tasks'); selectTask(Number(d.job)); return }
     if (d.act === 'watch-stop') { await stopJob(Number(d.job)); return }
     let r
-    if (d.act === 'watch') r = await api('/api/watch', { token: d.token, positions: d.id, symbol: d.sym })
-    else if (d.act === 'watch-group') r = await api('/api/watch', { token: d.token, positions: d.ids, symbol: d.sym })
+    if (d.act === 'watch') r = await api('/api/watch', { token: d.token, positions: d.id, symbol: d.sym, stopLoss: $('#p-stop').value, entry: $('#p-entry').value })
+    else if (d.act === 'watch-group') r = await api('/api/watch', { token: d.token, positions: d.ids, symbol: d.sym, stopLoss: $('#p-stop').value, entry: $('#p-entry').value })
     else if (d.act === 'exit-group') {
       const a = await askTx(`撤退 <b>${esc(d.sym)}/${QS}</b> 这一组全部 <b>${d.n}</b> 个仓位（#${d.ids.split(',').map(sid).join('、#')}）：撤仓 + 领手续费${SEL.chain === 'solana' ? '' : '合成 1 笔交易'}${keepTokens ? '，不卖币' : `，再把撤出来的 ${esc(d.sym)} 卖成 ${QS}`}。`, keepTokens ? null : `顺便把钱包里全部 <b>${esc(d.sym)}</b> 卖光（含不在仓位里的余额）`)
       if (!a) return; $('#card-exit').innerHTML = ''; r = await api('/api/exit', { positions: d.ids, via, keepTokens, sellAll: a.checked, dryRun: false })

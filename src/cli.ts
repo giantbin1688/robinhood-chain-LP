@@ -32,6 +32,7 @@ const { values: opt } = parseArgs({
     shape: { type: 'string', default: env('LP_SHAPE', 'spot') },             // 流动性形状：spot 一个仓位 | curve 同心嵌套、越靠现价越厚 | bidask 两侧分段、越远越厚
     layers: { type: 'string', default: env('LP_LAYERS', '3') },              // curve 的层数 / bidask 每侧的段数
     watch: { type: 'boolean', default: false },     // 组完 LP 后继续监控，跳出区间自动撤退
+    'stop-loss': { type: 'string', default: env('WATCH_STOP_LOSS', '0') }, // --watch 时：整组亏到本金的百分之几就撤（0 = 不开）
     yes: { type: 'boolean', default: false },
     'dry-run': { type: 'boolean', default: false },   // 只看计划，不发交易
     from: { type: 'string' },                         // --dry-run 时可用地址代替私钥
@@ -488,5 +489,6 @@ if (opt.json) console.log('@@positions ' + JSON.stringify(minted.map(String))) /
 if (opt.watch) await watchToken({
   token, positions: minted.length ? minted : undefined, clients, interval: Math.max(3, num('WATCH_INTERVAL', env('WATCH_INTERVAL', '10'), 0, 86400)), confirm: Math.max(1, num('WATCH_CONFIRM', env('WATCH_CONFIRM', '2'), 0, 1000)),
   upperGrace: num('WATCH_UPPER_GRACE', env('WATCH_UPPER_GRACE', '600'), 0, 86400 * 30),
+  stopLoss: num('--stop-loss', opt['stop-loss'], 0, 99), entry: Number(fmtU(usdgBudget)), // 刚建的仓位流水可能还没同步到，本金退回用本次预算
   via: env('EXIT_SWAP_VIA', 'best'), slippage: swapSlippage, lpSlippage, dryRun: false, json: opt.json,
 })
