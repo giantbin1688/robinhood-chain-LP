@@ -7,6 +7,7 @@ import { formatEther, getAddress, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
 import { die, env, erc20Abi, failFast, feeText, log, makeClients, nativePriceUsd, num, positionsOf, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, prepareSwap, type Clients, type PositionRecord, type SwapOffer } from './common.ts'
 import type { Pool, RawPosition } from './lp.ts'
+import { depositsOf } from './history.ts'
 
 export const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase() // 合约返回的是校验和大小写地址，比较时忽略大小写
 
@@ -210,6 +211,9 @@ export async function withdraw(o: WithdrawOptions) {
   const positions = partial ? found.map(cut).filter((p) => p.liquidity > 0n) : found
   if (positions.length === 0) die(`按 ${pct}% 截下来的流动性为 0，仓位太小，直接全撤吧`)
   const sellHeld = o.positions && !o.sellAll ? 0n : tokenStart // 钱包里原有的币要不要一起卖
+  // 进场金额：全撤时在最后一行和"共收回"对照着看。后台并行读流水（Alchemy），撤仓 / 卖币不等它；演练不读
+  const deposits = partial || o.dryRun ? Promise.resolve(null) : depositsOf(o.clients, found, decimals, found.every((p) => p.mint) ? found.reduce((m, p) => (p.mint!.block < m ? p.mint!.block : m), found[0].mint!.block) : 0n)
+  deposits.catch(() => {})
 
   // ---- 计划 ----
   let expectUsdg = 0n, expectToken = 0n
@@ -280,7 +284,9 @@ export async function withdraw(o: WithdrawOptions) {
   const toSell = sellHeld + (tokenBal - tokenStart)
   if (s && toSell > 0n) await s.sell(toSell, kit)
   const [usdgEnd, tokenEnd] = await Promise.all([balanceOf(Q.address), balanceOf(token)])
-  log(`完成: 共收回 ${fmtU(usdgEnd - usdgStart)} ${Q.symbol}${tokenEnd > 0n ? `，钱包还剩 ${fmtT(tokenEnd)} ${symbol}` : ''}`)
+  const gained = Number(usdgEnd - usdgStart) / 10 ** Q.decimals, dep = await deposits.catch(() => null)
+  const vs = dep && dep > 0 ? `，进场 ${dep.toFixed(Q.decimals > 6 ? 6 : Q.decimals)} ${Q.symbol}，盈亏 ${gained - dep >= 0 ? '+' : ''}${(gained - dep).toFixed(2)} (${gained - dep >= 0 ? '+' : ''}${(((gained - dep) / dep) * 100).toFixed(1)}%)` : ''
+  log(`完成: 共收回 ${fmtU(usdgEnd - usdgStart)} ${Q.symbol}${vs}${tokenEnd > 0n ? `，钱包还剩 ${fmtT(tokenEnd)} ${symbol}` : ''}`)
   log(`gas 合计: ${kit.stats.txCount} 笔，${trim(kit.stats.gasTotal, 18)} ${cfg.native.symbol} ($${usd(kit.stats.gasTotal)})`)
   return { usdgGained: usdgEnd - usdgStart, tokenLeft: tokenEnd }
 }

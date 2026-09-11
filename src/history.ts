@@ -144,6 +144,26 @@ export async function positionLedger(c: Clients, p: Pick<RawPosition, 'id' | 'po
   return events.sort((a, b) => (a.block < b.block ? -1 : a.block > b.block ? 1 : 0))
 }
 
+// 一组仓位累计存入了多少计价币（每笔按当时池价折算，和网页 uPNL 的"存入"同一口径）：撤退日志里给"共收回"配上参照。
+// 需要 Alchemy；拿不到（公共节点、限流、极限价估值失败）返回 null，不影响撤退本身。since = 最早的 mint 区块，不知道就从创世块扫（慢，几十秒）
+export async function depositsOf(c: Clients, positions: Pick<RawPosition, 'id' | 'pool' | 'tickLower' | 'tickUpper'>[], tokenDecimals: number, since: bigint): Promise<number | null> {
+  if (!c.rpcIsAlchemy || !positions.length) return null
+  try {
+    await refreshLedger(c, since)
+    let total = 0
+    for (const p of positions) {
+      const quoteIs0 = same(p.pool.currency0, c.Q.address)
+      const [d0, d1] = quoteIs0 ? [c.Q.decimals, tokenDecimals] : [tokenDecimals, c.Q.decimals]
+      for (const e of await positionLedger(c, p)) {
+        if (e.action !== 'add') continue
+        const price = v4.priceAtTick(e.tick) * 10 ** (d0 - d1) // 1 个 currency0 = price 个 currency1（人类单位）
+        total += quoteIs0 ? Number(e.amount0) / 10 ** d0 + Number(e.amount1) / 10 ** d1 / price : Number(e.amount1) / 10 ** d1 + (Number(e.amount0) / 10 ** d0) * price
+      }
+    }
+    return total
+  } catch { return null }
+}
+
 // 已平仓 = 流水里出现过、liquidityDelta 累计归零的仓位（全部撤出；销毁 NFT 前也必先撤完，网页撤完不销毁的也算）。
 // 要求流水从创世块扫起（refreshLedger(c, 0n)），否则早期的加流动性看不到、累计不归零。池子由调用方按 poolId 查（lp.poolById）
 export function closedPositions(c: Clients) {

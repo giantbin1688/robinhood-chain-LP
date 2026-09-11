@@ -455,7 +455,7 @@
         <label>每行 <select id="ticks-zoom"><option value="1">1 个间距</option><option value="4">4 个间距</option><option value="16">16 个间距</option><option value="64">64 个间距</option></select></label>
         <button class="btn sm" id="ticks-prev" type="button">较低 tick</button><button class="btn sm" id="ticks-home" type="button">回到现价</button><button class="btn sm" id="ticks-next" type="button">较高 tick</button>
       </div>
-      <div class="small" id="ticks-selection">点击起止两行选区间，单行可选一个最小间距。数量表示该段池内资产，不是你的投入。</div>
+      <div class="small" id="ticks-selection">点击起止两行选区间，单行可选一个最小间距。数量表示该段池内资产，不是你的投入。绿 = 现价上方（只有代币），蓝 = 现价下方（只有 USDG）。</div>
       <style>#ticks-table th { position:sticky; top:0; background:var(--bg); z-index:1 }</style>
       <div style="max-height:440px;overflow:auto;margin-top:8px"><table id="ticks-table"><thead><tr><th>选择 / tick [下界,上界)</th><th>价格（USDG/代币）</th><th>USDG</th><th>代币</th><th title="区间内原始流动性 L；合并显示时为最小~最大">流动性 L</th></tr></thead><tbody></tbody></table></div>
     </div>
@@ -992,7 +992,7 @@ const tickSupported = () => SEL.chain === 'robinhood' && SEL.protocol === 'v4'
 function resetLaunchTicks() {
   tickRequest++; TICK_DETAIL = null; tickAnchor = null
   $('#ticks-table tbody').innerHTML = ''; $('#ticks-info').textContent = '选池后读取链上明细，或按当前费率 / 间距读取。'
-  $('#ticks-selection').textContent = '点击起止两行选区间；单行可选一个最小间距。数量是池内资产，不是你的投入。'
+  $('#ticks-selection').textContent = '点击起止两行选区间；单行可选一个最小间距。数量是池内资产，不是你的投入。绿 = 现价上方（只有代币），蓝 = 现价下方（只有 USDG）。'
   $('#f-tickRange').value = ''
   if ($('#f-rangeMode').value === 'ticks') { $('#f-rangeMode').value = 'pct'; onRangeMode() }
   updateExecButton()
@@ -1022,9 +1022,11 @@ function renderTickRows() {
   const max = Math.max(...d.rows.map(r=>r.value),1)
   $('#ticks-table tbody').innerHTML = d.rows.map((r,i) => {
     const chosen = selected.length===2 && r.lo>=selected[0] && r.hi<=selected[1]
-    const color = r.current ? 'var(--up)' : 'var(--blue)'
-    return `<tr data-row="${i}" data-current="${r.current}" style="cursor:pointer;${chosen?'outline:1px solid var(--blue);':''}" title="点击选择本行；再点另一行选中两行之间的完整区间">
-      <td style="background:linear-gradient(90deg,var(--chart-band) ${100*r.value/max}%,transparent 0)"><button type="button" class="btn sm">${chosen?'✓ ':''}[${r.lo}, ${r.hi})</button>${r.current?' <span class="badge ok">现价</span>':''}</td>
+    // 现价上方的段只有代币（绿），下方只有 USDG（蓝），和深度图同一套颜色；现价所在行两种都有
+    const side = r.current ? 'var(--up)' : r.lo > d.tick ? 'var(--chart-token)' : 'var(--chart-quote)'
+    const color = r.current ? 'var(--up)' : side
+    return `<tr data-row="${i}" data-current="${r.current}" style="cursor:pointer;background:color-mix(in srgb,${side} 7%,transparent);${chosen?'outline:1px solid var(--blue);':''}" title="点击选择本行；再点另一行选中两行之间的完整区间">
+      <td style="background:linear-gradient(90deg,color-mix(in srgb,${side} 28%,transparent) ${100*r.value/max}%,transparent 0)"><button type="button" class="btn sm">${chosen?'✓ ':''}[${r.lo}, ${r.hi})</button>${r.current?' <span class="badge ok">现价</span>':''}</td>
       <td style="color:${color}">${tickNumber(r.priceLo)} ~ ${tickNumber(r.priceHi)}</td><td>${tickNumber(r.quote)}</td><td>${tickNumber(r.token)} ${esc(d.symbol)}</td>
       <td class="mono small">${r.liquidityMin===r.liquidityMax?r.liquidityMin:r.liquidityMin+' ~ '+r.liquidityMax}</td></tr>`
   }).join('')
