@@ -4,3 +4,5 @@ positions.json
 .scratch/
 signals.json
 settings.json
+positions.json.lock/
+positions.json.*.tmp

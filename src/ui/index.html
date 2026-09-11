@@ -420,8 +420,9 @@
       </div>
       <div class="section">
         <h4>区间</h4>
-        <div class="row"><label>区间写法</label><select id="f-rangeMode"><option value="pct">相对现价（百分比）</option><option value="price">绝对价格（<span class="q">USDG</span>/代币）</option></select></div>
+        <div class="row"><label>区间写法</label><select id="f-rangeMode"><option value="ticks" id="tick-mode-option">精确 tick（Robinhood v4）</option><option value="pct">相对现价（百分比）</option><option value="price">绝对价格（<span class="q">USDG</span>/代币）</option></select></div>
         <div class="row" id="row-range"><label>区间（%）</label><input type="text" id="f-range" placeholder="-50%,+100%"><div class="hint">-50%,+100% 双边；只填 -50% = 只做下方（全 <span class="q">USDG</span>）；只填 +100% = 只做上方（全代币）</div></div>
+        <div class="row" id="row-tickRange" style="display:none"><label>下界 tick,上界 tick</label><input type="text" id="f-tickRange" placeholder="例如 334000,349000"><div class="hint">按池子的 tick 间距对齐。右侧选择起止行可填入；计划与执行使用相同的精确边界。</div></div>
         <div class="row" id="row-priceRange" style="display:none"><label>最低价,最高价</label><input type="text" id="f-priceRange" placeholder="0.006,0.01"><div class="hint">整体在现价下方 = 纯 <span class="q">USDG</span> 等跌；整体在上方 = 全换成代币等涨</div></div>
         <div class="row"><label>形状</label><select id="f-shape"><option value="spot">Spot：一个仓位，区间内均匀</option><option value="curve">Curve：同心嵌套，越靠现价越厚</option><option value="bidask">Bid-Ask：两侧分段，越远越厚</option></select><div class="hint" id="shape-hint"></div></div>
         <div class="row" id="row-layers" style="display:none"><label>层数</label><input type="text" id="f-layers" placeholder="3"><div class="hint">Curve 的层数 / Bid-Ask 每侧的段数（2~8）；每层一个仓位，全部在同一笔交易里创建</div></div>
@@ -446,6 +447,17 @@
     <div class="card" id="pools-card" style="display:none;margin-bottom:10px">
       <h4 style="margin:0 0 8px">该代币的全部池子 <span class="small" id="pools-note" style="text-transform:none;letter-spacing:0"></span></h4>
       <table id="pools-table"><thead><tr><th>池子</th><th>费率 / 间距</th><th>池价（<span class="q">USDG</span>/代币）</th><th>流动性</th><th>24h 成交</th><th title="24h 成交 × 费率 = 这个池一天分给全部 LP 的手续费；下面的百分比是它占流动性的比例，即整池每天的费率回报">手续费 (24h)</th><th title="左边填的预算投进去后占池子流动性的比例（预算 ÷ (流动性 + 预算)），以及按这个比例分到的 24h 手续费。按整池平摊算的；做窄区间时实际更高">你的份额</th><th>状态</th><th></th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card" id="launch-ticks" style="display:none;margin-bottom:14px">
+      <div style="display:flex;align-items:center;justify-content:space-between"><h4>池子 tick 明细</h4><button class="btn sm" id="ticks-refresh" type="button">读取 / 刷新</button></div>
+      <div class="small" id="ticks-info">选用上方的池子后自动读取，也可按左侧费率和间距读取。无需先建仓。</div>
+      <div class="actions" style="margin:10px 0;flex-wrap:wrap">
+        <label>每行 <select id="ticks-zoom"><option value="1">1 个间距</option><option value="4">4 个间距</option><option value="16">16 个间距</option><option value="64">64 个间距</option></select></label>
+        <button class="btn sm" id="ticks-prev" type="button">较低 tick</button><button class="btn sm" id="ticks-home" type="button">回到现价</button><button class="btn sm" id="ticks-next" type="button">较高 tick</button>
+      </div>
+      <div class="small" id="ticks-selection">点击起止两行选区间，单行可选一个最小间距。数量表示该段池内资产，不是你的投入。</div>
+      <style>#ticks-table th { position:sticky; top:0; background:var(--bg); z-index:1 }</style>
+      <div style="max-height:440px;overflow:auto;margin-top:8px"><table id="ticks-table"><thead><tr><th>选择 / tick [下界,上界)</th><th>价格（USDG/代币）</th><th>USDG</th><th>代币</th><th title="区间内原始流动性 L；合并显示时为最小~最大">流动性 L</th></tr></thead><tbody></tbody></table></div>
     </div>
     <div id="launch-empty" class="placeholder">填好代币地址，点"计划"先看方案；计划无误再执行。</div>
     <div id="launch-plan" style="display:none">
@@ -759,6 +771,8 @@ function showPage(p) {
 async function loadState(fillForm) {
   try { STATE = await api('/api/state') } catch (e) { $('#chipWallet').textContent = '服务不可用: ' + e.message; setLight('rpc', 'bad', '服务不可用: ' + e.message); return }
   const w = STATE.wallet
+  $('#launch-ticks').style.display = STATE.chain === 'robinhood' && STATE.protocol === 'v4' ? '' : 'none';
+  $('#tick-mode-option').disabled = !(STATE.chain === 'robinhood' && STATE.protocol === 'v4');
   QS = STATE.quote || 'USDG'; NS = STATE.native || 'ETH'; SEL.protocol = STATE.protocol
   const sol = STATE.chain === 'solana'
   $('#row-quote').style.display = sol ? '' : 'none'; $('#f-quote').value = SEL.quote
@@ -809,7 +823,7 @@ async function loadState(fillForm) {
     renderTasks()
   }
 }
-function onRangeMode() { const m = $('#f-rangeMode').value; $('#row-range').style.display = m === 'pct' ? '' : 'none'; $('#row-priceRange').style.display = m === 'price' ? '' : 'none'; if (typeof drawShape === 'function') drawShape() }
+function onRangeMode() { const m = $('#f-rangeMode').value; $('#row-tickRange').style.display = m === 'ticks' ? '' : 'none'; $('#row-range').style.display = m === 'pct' ? '' : 'none'; $('#row-priceRange').style.display = m === 'price' ? '' : 'none'; if (typeof drawShape === 'function') drawShape() }
 $('#f-rangeMode').onchange = onRangeMode
 const SHAPE_HINT = {
   spot: '',
@@ -830,6 +844,7 @@ function drawShape() {
   const el = $('#shape-viz'), shape = $('#f-shape').value, layers = Math.min(8, Math.max(2, Number($('#f-layers').value) || 3))
   const spct = (v) => (v > 0 ? '+' : '') + v + '%'
   let lo, hi, labels, spot = 0, approx = false
+  if ($('#f-rangeMode').value === 'ticks') { el.textContent = '精确 tick 区间：' + ($('#f-tickRange').value || '请在右侧选择区间'); return }
   if ($('#f-rangeMode').value === 'price') {
     const m = ($('#f-priceRange').value.match(/\d*\.?\d+(?:e-?\d+)?/gi) || []).map(Number).filter((x) => x > 0).sort((x, y) => x - y)
     if (m.length !== 2 || m[0] >= m[1]) { el.innerHTML = ''; return }
@@ -869,14 +884,14 @@ function drawShape() {
   </svg>
   <div class="note">柱高 = 流动性厚度；蓝 = 现价下方（${QS}，等跌买入），绿 = 上方（代币，等涨卖出）。${legs.length} 个仓位，预算约 ${100 - tokPct}% ${QS} + ${tokPct}% 换成代币${approx ? '；现价未知，先按区间中点画，点"计划"后按真实现价重画' : ''}</div>`
 }
-for (const id of ['f-range', 'f-priceRange', 'f-layers']) $('#' + id).addEventListener('input', drawShape)
+for (const id of ['f-range', 'f-priceRange', 'f-tickRange', 'f-layers']) $('#' + id).addEventListener('input', drawShape)
 $('#f-token').addEventListener('input', () => { lastMarketPrice = null; drawShape() })
 
 // ---- 进场：计划（演练任务）-> 执行（真实任务）。执行按钮只在"当前参数的演练成功"后可用 ----
 let plannedJob = null, plannedSig = null
 const form = (dryRun) => ({
   token: $('#f-token').value.trim(), usdg: $('#f-usdg').value, fee: $('#f-fee').value, spacing: $('#f-spacing').value, poolSelect: $('#f-poolSelect').value, pool: $('#f-pool').value,
-  maxDeviation: $('#f-maxDeviation').value, rangeMode: $('#f-rangeMode').value, range: $('#f-range').value, priceRange: $('#f-priceRange').value,
+  maxDeviation: $('#f-maxDeviation').value, rangeMode: $('#f-rangeMode').value, range: $('#f-range').value, priceRange: $('#f-priceRange').value, tickRange: $('#f-tickRange').value,
   shape: $('#f-shape').value, layers: $('#f-layers').value,
   slippage: $('#f-slippage').value, lpSlippage: $('#f-lpSlippage').value, watch: $('#f-watch').checked, dryRun,
 })
@@ -891,6 +906,7 @@ function updateExecButton() {
 $('#btn-plan').onclick = async () => {
   const b = form(true)
   if (!isAddr(b.token)) return toast('请填写代币地址')
+  if (b.rangeMode === 'ticks' && !/^-?\d+\s*,\s*-?\d+$/.test(b.tickRange)) return toast('精确 tick 模式：先在右侧 tick 明细里点选起止行')
   try {
     const r = await api('/api/launch', b)
     plannedJob = r.job.id; plannedSig = sig(b)
@@ -966,9 +982,71 @@ $('#f-usdg').addEventListener('input', renderShares)
 $('#pools-table').onclick = (e) => {
   const b = e.target.closest('button'); if (!b) return
   $('#f-fee').value = b.dataset.fee; $('#f-spacing').value = b.dataset.spacing; $('#f-poolSelect').value = 'exact'; $('#f-pool').value = b.dataset.id
+  if (tickSupported()) loadLaunchTicks();
   updateExecButton(); toast(`已选用 ${b.dataset.fee}% / ${b.dataset.spacing} 池（按池 id 指定，改参数即取消）`)
 }
-for (const id of ['#f-token', '#f-fee', '#f-spacing', '#f-poolSelect']) $(id).addEventListener('input', () => { $('#f-pool').value = '' })
+for (const id of ['#f-token', '#f-fee', '#f-spacing', '#f-poolSelect']) $(id).addEventListener('input', () => { $('#f-pool').value = ''; resetLaunchTicks() })
+// 进场前的池级明细；请求序号防止换池/换链后旧结果覆盖新表单。
+let TICK_DETAIL = null, tickRequest = 0, tickAnchor = null
+const tickSupported = () => SEL.chain === 'robinhood' && SEL.protocol === 'v4'
+function resetLaunchTicks() {
+  tickRequest++; TICK_DETAIL = null; tickAnchor = null
+  $('#ticks-table tbody').innerHTML = ''; $('#ticks-info').textContent = '选池后读取链上明细，或按当前费率 / 间距读取。'
+  $('#ticks-selection').textContent = '点击起止两行选区间；单行可选一个最小间距。数量是池内资产，不是你的投入。'
+  $('#f-tickRange').value = ''
+  if ($('#f-rangeMode').value === 'ticks') { $('#f-rangeMode').value = 'pct'; onRangeMode() }
+  updateExecButton()
+}
+async function loadLaunchTicks(center) {
+  if (!tickSupported()) return
+  const token = $('#f-token').value.trim(); if (!isAddr(token)) return toast('先填代币地址')
+  const request = ++tickRequest
+  TICK_DETAIL = null; tickAnchor = null; $('#ticks-table tbody').innerHTML = ''
+  $('#ticks-info').textContent = '读取同一区块的池状态和 tick 明细…'
+  const fee = Math.round(Number($('#f-fee').value) * 10000), spacing = Number($('#f-spacing').value) || Math.max(1, Math.round(fee / 50))
+  const query = new URLSearchParams({token,pool:$('#f-pool').value,fee:String(fee),spacing:String(spacing),zoom:$('#ticks-zoom').value})
+  if (center !== undefined) query.set('center',String(center))
+  try {
+    const d = await api('/api/pool-ticks?' + query)
+    if (request !== tickRequest || !tickSupported()) return
+    TICK_DETAIL = d // 只读：不改表单里的池 / 费率 / 选池模式，点选区间时才把仓位钉到这个池上
+    $('#ticks-info').textContent = `${d.symbol}/USDG · 当前 tick ${d.tick} · 价格 ${fmtPrice(d.price)} · 间距 ${d.spacing} · 每行 ${d.zoom*d.spacing} ticks · 区块 ${d.block} · Pool ${d.pool}`
+    renderTickRows(); updateExecButton()
+    const current=$('#ticks-table [data-current="true"]'), viewport=$('#ticks-table').parentElement
+    if(current) viewport.scrollTop += current.getBoundingClientRect().top-viewport.getBoundingClientRect().top-viewport.clientHeight/2+current.clientHeight/2
+  } catch (e) { if (request === tickRequest) $('#ticks-info').textContent = '明细读取失败：' + e.message }
+}
+function renderTickRows() {
+  const d = TICK_DETAIL; if (!d) return
+  const selected = $('#f-rangeMode').value === 'ticks' ? $('#f-tickRange').value.split(',').map(Number) : []
+  const max = Math.max(...d.rows.map(r=>r.value),1)
+  $('#ticks-table tbody').innerHTML = d.rows.map((r,i) => {
+    const chosen = selected.length===2 && r.lo>=selected[0] && r.hi<=selected[1]
+    const color = r.current ? 'var(--up)' : 'var(--blue)'
+    return `<tr data-row="${i}" data-current="${r.current}" style="cursor:pointer;${chosen?'outline:1px solid var(--blue);':''}" title="点击选择本行；再点另一行选中两行之间的完整区间">
+      <td style="background:linear-gradient(90deg,var(--chart-band) ${100*r.value/max}%,transparent 0)"><button type="button" class="btn sm">${chosen?'✓ ':''}[${r.lo}, ${r.hi})</button>${r.current?' <span class="badge ok">现价</span>':''}</td>
+      <td style="color:${color}">${tickNumber(r.priceLo)} ~ ${tickNumber(r.priceHi)}</td><td>${tickNumber(r.quote)}</td><td>${tickNumber(r.token)} ${esc(d.symbol)}</td>
+      <td class="mono small">${r.liquidityMin===r.liquidityMax?r.liquidityMin:r.liquidityMin+' ~ '+r.liquidityMax}</td></tr>`
+  }).join('')
+}
+function tickNumber(value) { return Number(value).toLocaleString('en-US',{maximumSignificantDigits:10}) }
+$('#ticks-table').onclick = e => {
+  const tr=e.target.closest('[data-row]'); if(!tr || !TICK_DETAIL) return
+  const r=TICK_DETAIL.rows[Number(tr.dataset.row)]
+  const lo=Math.min(r.lo,tickAnchor?.lo??r.lo), hi=Math.max(r.hi,tickAnchor?.hi??r.hi)
+  tickAnchor=tickAnchor?null:r
+  $('#f-tickRange').value=`${lo},${hi}`; $('#f-rangeMode').value='ticks'; onRangeMode()
+  // 精确 tick 只对明细所属的这个池有意义：选了区间就按池 id 钉住它（改费率 / 间距 / 代币会清掉）
+  $('#f-pool').value=TICK_DETAIL.pool; $('#f-fee').value=TICK_DETAIL.fee/10000; $('#f-spacing').value=TICK_DETAIL.spacing; $('#f-poolSelect').value='exact'
+  $('#ticks-selection').textContent=`已选 ticks [${lo}, ${hi})，${(hi-lo)/TICK_DETAIL.spacing} 个间距，已按池 id 指定该池。${tickAnchor?'可再点终止行扩展区间。':'再点一行开始新选择。'}点击「计划」查看投入和最终仓位。`
+  renderTickRows(); updateExecButton()
+}
+$('#f-tickRange').addEventListener('input',renderTickRows)
+$('#ticks-refresh').onclick=()=>loadLaunchTicks(TICK_DETAIL?.center)
+$('#ticks-home').onclick=()=>loadLaunchTicks()
+$('#ticks-zoom').onchange=()=>loadLaunchTicks(TICK_DETAIL?.center)
+$('#ticks-prev').onclick=()=>{ if(TICK_DETAIL) loadLaunchTicks(TICK_DETAIL.center-TICK_DETAIL.spacing*TICK_DETAIL.zoom*32) }
+$('#ticks-next').onclick=()=>{ if(TICK_DETAIL) loadLaunchTicks(TICK_DETAIL.center+TICK_DETAIL.spacing*TICK_DETAIL.zoom*32) }
 function renderLaunchPlan(p, id) {
   if (p.kind !== 'launch') return
   $('#launch-empty').style.display = 'none'; $('#launch-plan').style.display = ''
@@ -1096,6 +1174,7 @@ async function loadPositions(full) {
         : `<span class="exp big" data-act="hist" data-id="${p.id}" style="color:${pnlCol(pnl)}" title="现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入（不含进场换币成本）。点击看明细">${histOpen.has(p.id) ? '▾' : '▸'} ${money(pnl)}</span><span class="sub" style="color:${pnlCol(pnl)}">${invested > 0 ? signed((pnl / invested) * 100) : ''}</span>`}</td>
       <td class="num">${dpr === null ? '<span class="small">—</span>' : `<span class="big" style="color:${pnlCol(dpr)}" title="每天 ${signed(dpr, 2)} = uPNL ÷ 投入 ÷ 持仓天数">${signed(dpr, 2)}</span>`}</td>
       <td><span class="btns">
+        ${SEL.chain !== 'solana' ? `<select data-classify="${p.id}" style="width:100px;min-height:26px;font-size:12px" title="修改本地分类；同池、同批建仓的仓位一起更新，不发链上交易"><option value="" ${!['spot','curve','bidask'].includes(p.shape)?'selected':''} disabled>设置分类</option>${[['spot','Spot'],['curve','Curve'],['bidask','Bid-Ask']].map(([v,n])=>`<option value="${v}" ${p.shape===v?'selected':''}>${n}</option>`).join('')}</select>` : ''}
         <button class="btn sm" data-act="collect" data-id="${p.id}" data-sym="${sym}" data-fees="${fmtUsd(unclaimed)}" data-feetoken="${fmtAmt(p.feesToken)}" ${unclaimed < 0.01 ? 'disabled' : ''} title="领取未领手续费 ≈${fmtUsd(unclaimed)}，本金不动；确认框里可勾选顺便把领到的币卖成 ${QS}">领取</button><button class="btn sm" data-act="exit-part" data-id="${p.id}" data-sym="${sym}" title="只撤一部分流动性（比例在确认框里填），手续费一并领走，NFT 保留、剩下的继续做 LP；撤出来的币卖成 ${QS}">撤 %</button><button class="btn sm danger" data-act="exit" data-id="${p.id}" data-sym="${sym}" title="撤掉这一个仓位，卖掉撤出来的币">撤退</button>
         ${p.watchJob !== null ? `<button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button><button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}" title="停止监控 #${p.watchJob}">停止</button>` : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${sym}" title="盯着池价，跳出区间自动撤退">监控</button>`}</span></td>`
     tb.appendChild(tr)
@@ -1113,10 +1192,10 @@ async function loadPositions(full) {
     }
   }
   // 按形状分区（Spot / Curve / Bid-Ask）；curve、bidask 里同一次进场建的仓位（同一 group = 同一笔 mint 交易）连在一起，组头一行汇总 + 整组操作
-  const shapeOf = (p) => (p.shape === 'curve' || p.shape === 'bidask' ? p.shape : 'spot')
+  const shapeOf = (p) => (['spot','curve','bidask'].includes(p.shape) ? p.shape : 'unknown')
   const sumUsd = (list, k) => list.reduce((s, p) => s + (p[k] === null ? 0 : Number(p[k])), 0)
   const summary = (list) => { const led = list.filter((p) => p.pnlUsd !== null); const pnl = sumUsd(led, 'pnlUsd'); return `价值 ${fmtUsd(sumUsd(list, 'value'))} · 手续费 ${fmtUsd(sumUsd(list, 'feesUsd') + sumUsd(led, 'collectedUsd'))}${led.length ? ` · uPNL <span style="color:${pnlCol(pnl)}">${money(pnl)}</span>` : ''}` }
-  for (const [key, name, desc] of [['spot', 'Spot', '单个仓位，区间内均匀'], ['curve', 'Curve', '同心嵌套，越靠现价越厚'], ['bidask', 'Bid-Ask', '两侧分段，越远越厚']]) {
+  for (const [key, name, desc] of [['spot', 'Spot', '单个仓位，区间内均匀'], ['curve', 'Curve', '同心嵌套，越靠现价越厚'], ['bidask', 'Bid-Ask', '两侧分段，越远越厚'], ['unknown', '未分类', '本机没有分类标签，可在仓位行指定；同池同批建仓一起更新']]) {
     const list = POS.filter((p) => shapeOf(p) === key)
     if (!list.length) continue
     const sk = 'shape:' + key, shut = collapsed.has(sk)
@@ -1126,13 +1205,13 @@ async function loadPositions(full) {
     if (shut) continue
     if (key === 'spot') { list.forEach(addRow); continue }
     const groups = new Map()
-    for (const p of list) { const g = p.group || p.id; groups.set(g, [...(groups.get(g) || []), p]) }
+    for (const p of list) { const g = (p.group || p.id) + ':' + p.poolId; groups.set(g, [...(groups.get(g) || []), p]) }
     for (const [g, ps] of groups) {
       ps.sort((x, y) => Number(x.lo) - Number(y.lo))
       const ids = ps.map((p) => p.id).join(','), sym = esc(ps[0].symbol), watching = ps.filter((p) => p.watchJob !== null).length, QS = ps[0].quote || QSg
       const gk = `group:${SEL.chain}:${g}`, gShut = collapsed.has(gk)
       const sr = document.createElement('tr'); sr.className = 'sub' + (gShut ? ' shut' : '')
-      sr.innerHTML = `<td colspan="7" data-act="fold" data-key="${gk}">${foldMark(gk, '这一组')}<b>${sym}/${QS}</b> <span class="badge wait">${ps[0].feeText || ps[0].fee + '%'}</span> ${ps.length} 段 ${fmtPrice(ps[0].lo)} – ${fmtPrice(ps[ps.length - 1].hi)}${gShut ? `（${ps.filter((p) => p.inRange).length} 段在区间内）` : ''} · ${summary(ps)}${g.startsWith('0x') ? ` · <a class="tx small" href="${STATE.explorer}/tx/${g}" target="_blank">建仓交易</a>` : ''}</td>
+      sr.innerHTML = `<td colspan="7" data-act="fold" data-key="${gk}">${foldMark(gk, '这一组')}<b>${sym}/${QS}</b> <span class="badge wait">${ps[0].feeText || ps[0].fee + '%'}</span> ${ps.length} 段 ${fmtPrice(ps[0].lo)} – ${fmtPrice(ps[ps.length - 1].hi)}${gShut ? `（${ps.filter((p) => p.inRange).length} 段在区间内）` : ''} · ${summary(ps)}${ps[0].group?.startsWith('0x') ? ` · <a class="tx small" href="${STATE.explorer}/tx/${ps[0].group}" target="_blank">建仓交易</a>` : ''}</td>
         <td><span class="btns"><button class="btn sm danger" data-act="exit-group" data-ids="${ids}" data-sym="${sym}" data-n="${ps.length}" title="撤掉这一组全部 ${ps.length} 个仓位（同一个池合成 1 笔交易），卖掉撤出来的币">整组撤退</button>${watching ? '' : `<button class="btn sm" data-act="watch-group" data-ids="${ids}" data-token="${ps[0].token}" data-sym="${sym}" title="一个监控盯整组：任一段进入区间后又跳出就整组撤退">整组监控</button>`}</span></td>`
       tb.appendChild(sr)
       if (!gShut) ps.forEach(addRow)
@@ -1140,6 +1219,15 @@ async function loadPositions(full) {
   }
   if (!POS.length) tb.innerHTML = `<tr><td colspan="8" class="placeholder">钱包名下没有 ${SEL.chain === 'solana' ? 'SOL / USDC' : QSg} 池的仓位</td></tr>`
 }
+// 分类是本地标签，链上没有策略名称。只按同池、同建仓交易扩展，不根据币名猜测。
+document.addEventListener('change', async e => {
+  const select=e.target.closest('[data-classify]'); if(!select) return
+  const p=POS.find(p=>p.id===select.dataset.classify); if(!p) return
+  const ps=p.group?POS.filter(q=>q.group===p.group&&q.poolId===p.poolId):[p]
+  select.disabled=true
+  try { await api('/api/positions/classify',{positions:ps.map(p=>p.id).join(','),shape:select.value}); toast(`已更新 ${ps.length} 个仓位的本地分类`); await loadPositions(true) }
+  catch(err) {toast(err.message);select.value=['spot','curve','bidask'].includes(p.shape)?p.shape:'';select.disabled=false}
+})
 // 资金明细：每笔交易（加流动性 / 领手续费 / 撤流动性）的两种币数量和按当时池价折算的价值，最新在前
 async function loadHistory(p) {
   const el = $('#hist-' + p.id); if (!el) return
@@ -1295,9 +1383,10 @@ function renderCalendar() {
   const sel = byDay.get(calSel), box = $('#cal-day')
   box.style.display = sel ? '' : 'none'
   if (sel) box.innerHTML = `<h4 style="margin:0 0 10px">${mo + 1} 月 ${calSel} 日平仓 ${sel.length} 个，合计 <b style="color:${pnlCol(sel.reduce((s, c) => s + c.pnl, 0))}">${money(sel.reduce((s, c) => s + c.pnl, 0))}</b></h4>
-    <table><thead><tr><th>平仓时间</th><th>仓位</th><th>交易对</th><th>存入</th><th>拿回本金</th><th>手续费</th><th>盈亏</th><th>持仓时间</th><th>交易</th></tr></thead><tbody>${[...sel].sort((a, b) => b.closedAt - a.closedAt).map((c) => `<tr>
+    <p class="small">LP 口径：统计仓位存入、撤出本金与手续费的估值，不等同于整次交易的现金收支；钱包闲置代币和 gas 未计入。</p>
+    <table><thead><tr><th>平仓时间</th><th>仓位</th><th>交易对</th><th>存入</th><th>撤出本金估值</th><th>手续费</th><th>LP 盈亏</th><th>持仓时间</th><th>交易</th></tr></thead><tbody>${[...sel].sort((a, b) => b.closedAt - a.closedAt).map((c) => `<tr>
       <td>${new Date(c.closedAt).toLocaleTimeString()}</td><td class="mono" title="${c.id}">#${sid(c.id)}</td><td>${esc(c.symbol)}/${c.quote || QS} ${c.feeText || c.fee + '%'}</td>
-      <td>${fmtUsd(c.deposits)}</td><td>${fmtUsd(c.withdrawn)}</td><td>${fmtUsd(c.fees)}</td>
+      <td>${fmtUsd(c.deposits)}</td><td>${fmtUsd(c.withdrawn)}${c.valuationTx?`<br><a class="tx small" href="${STATE.explorer}/tx/${c.valuationTx}" target="_blank" title="原池价格处于极限，撤出代币按后续实际卖币成交价估值；仅计算 LP 部分，不含钱包原有代币和 gas">按卖币成交价估值</a>`:''}</td><td>${fmtUsd(c.fees)}</td>
       <td style="color:${pnlCol(c.pnl)};font-weight:600">${money(c.pnl)}<br><span class="small" style="color:${pnlCol(c.pnl)}">${c.deposits > 0 ? signed((c.pnl / c.deposits) * 100) : ''}</span></td>
       <td>${c.openedAt ? fmtHold(c.closedAt - c.openedAt) : '—'}</td>
       <td class="mono"><a class="tx" href="${STATE.explorer}/tx/${c.closedTx}" target="_blank">${c.closedTx.slice(0, 8)}…${c.closedTx.slice(-4)}</a></td></tr>`).join('')}</tbody></table>`
@@ -1509,6 +1598,7 @@ panes.launch = new Pane('launch', { table: $('#run-table tbody'), onPlan: render
 panes.pos = new Pane('pos', { onPlan: renderExitPlan })
 panes.task = new Pane('task')
 async function switchTo(c, p) {
+  resetLaunchTicks();
   SEL.chain = c; SEL.protocol = p; localStorage.setItem('chain', c)
   plannedJob = null; plannedSig = null; poolsToken = ''; POS = []; CAL = null; expanded.clear(); histOpen.clear()
   $('#launch-plan').style.display = 'none'; $('#launch-empty').style.display = ''; $('#pools-card').style.display = 'none'; $('#card-exit').innerHTML = ''

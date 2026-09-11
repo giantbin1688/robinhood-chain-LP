@@ -58,6 +58,7 @@ const clpmAbi = parseAbi([
 const modifyLiquidityEvent = parseAbiItem('event ModifyLiquidity(bytes32 indexed id, address indexed sender, int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)')
 // v4 PoolManager 建池事件，字段就是完整 PoolKey（Infinity 的同名事件布局不同，这里不用）
 const v4InitializeEvent = parseAbiItem('event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)')
+const v4SwapEvent = parseAbiItem('event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)')
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 
 export async function singletonLp(protocol: ProtocolName, d: LpDeps): Promise<Lp> {
@@ -295,7 +296,17 @@ export async function singletonLp(protocol: ProtocolName, d: LpDeps): Promise<Lp
       counterparty: infi ? A.vault : PM,
       parseMods: (logs): Mod[] => parseEventLogs({ abi: [modifyLiquidityEvent], logs })
         .filter((l) => same(l.address, PM) && same(l.args.sender!, POSM))
-        .map((l) => ({ id: BigInt(l.args.salt!), poolId: l.args.id!, tickLower: l.args.tickLower!, tickUpper: l.args.tickUpper!, delta: l.args.liquidityDelta! })),
+        .map((l) => ({ id: BigInt(l.args.salt!), poolId: l.args.id!, tickLower: l.args.tickLower!, tickUpper: l.args.tickUpper!, delta: l.args.liquidityDelta!, logIndex:l.logIndex })),
+      // 区块末的池价可能来自撤仓之后同区块的另一笔 swap：给出该区块里本池所有改价事件，流水按 logIndex 取操作前一刻的价格。Infinity 的 Swap / Initialize 事件布局不同，暂不提供
+      ...(infi ? {} : {
+        priceEventsAt: async (pool: Pool, block: bigint) => {
+          const [swaps, inits] = await Promise.all([
+            pub.getLogs({ address: PM, event: v4SwapEvent, args: { id: pool.id }, fromBlock: block, toBlock: block }),
+            pub.getLogs({ address: PM, event: v4InitializeEvent, args: { id: pool.id }, fromBlock: block, toBlock: block }),
+          ])
+          return [...swaps, ...inits].map((l) => ({ index: l.logIndex, sqrtP: l.args.sqrtPriceX96!, tick: l.args.tick! })).sort((a, b) => a.index - b.index)
+        },
+      }),
     },
   }
 }

@@ -17,13 +17,14 @@ export type Kit = {
   ensureErc20Approval(t: Address, need: bigint, spender?: Address, spenderName?: string): Promise<void>
   permitFor(t: Address, spender: Address, need: bigint): Promise<SignedPermit | null>
 }
-export type Mod = { id: bigint; poolId: Hex; tickLower: number; tickUpper: number; delta: bigint }
+export type Mod = { id: bigint; poolId: Hex; tickLower: number; tickUpper: number; delta: bigint; logIndex?: number }
 // v3 的 NPM 事件直接给出每个仓位进出的数量，不需要按对手方转账再分摊
 export type DirectEvent = { id: bigint; poolId: Hex; tickLower: number; tickUpper: number; action: 'add' | 'collect' | 'remove'; amount0: bigint; amount1: bigint; principal0: bigint; principal1: bigint }
 export type LedgerSpec = {
   counterparty: Address | null                       // 代币进出的对手方合约（v4: PoolManager；Infinity: Vault；v3: null = 钱包直接和各池转账）
   parseMods(logs: Log[]): Mod[]                      // 该交易里本协议仓位的流动性变化
   parseDirect?(logs: Log[]): DirectEvent[]           // v3：从 NPM 事件直接得到每个仓位的数量
+  priceEventsAt?(pool: Pool, block: bigint): Promise<{ index: number; sqrtP: bigint; tick: number }[]> // 该区块内改变池价的事件（Swap / Initialize）按 logIndex 升序；流水用它还原操作当时的价格
 }
 export type SlipRevert = { kind: 'max' | 'min'; limit?: bigint; actual?: bigint }
 

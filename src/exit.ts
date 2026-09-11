@@ -25,7 +25,7 @@ export async function findPositions(c: Clients, token?: Address, explicit?: bigi
   }
   const raw = await lp.positions([...candidates])
   const found = raw
-    .map((p) => ({ ...p, kind: recs.get(p.id.toString())?.kind ?? 'lp', shape: recs.get(p.id.toString())?.shape ?? 'spot', group: recs.get(p.id.toString())?.group ?? null, mint: mints.get(p.id.toString()) ?? null }))
+    .map((p) => ({ ...p, kind: recs.get(p.id.toString())?.kind ?? 'lp', shape: recs.get(p.id.toString())?.shape ?? (recs.has(p.id.toString()) ? 'spot' : 'unknown'), group: recs.get(p.id.toString())?.group ?? mints.get(p.id.toString())?.tx ?? null, mint: mints.get(p.id.toString()) ?? null }))
     .filter((p) => p.liquidity > 0n && [p.pool.currency0, p.pool.currency1].some((x) => same(x, Q.address)) && (!token || [p.pool.currency0, p.pool.currency1].some((x) => same(x, token))))
   // 按当前池价折算每个仓位能拿回多少（手续费另计）；同一个池只读一次
   const slots = new Map<Hex, Promise<{ sqrtP: bigint; tick: number }>>()

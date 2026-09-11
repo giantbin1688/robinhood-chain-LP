@@ -36,6 +36,19 @@ const two = encodeMintUnlockData(key, [{ tickLower: 334000, tickUpper: 349000, l
 assert.ok(two.includes('02020d'.padEnd(64, '0')), 'actions 0x02020d')
 
 // PancakeSwap（BSC）：v3 池地址的 create2 推导、Infinity PoolKey 的 poolId（含带 hook 的动态费率池），都对照链上已知的池
+const { checkTickDetail } = await import('./tick-detail-check.ts')
+checkTickDetail()
+const { checkExitValuation } = await import('./exit-valuation-check.ts')
+await checkExitValuation()
+const { mergePositionRecords } = await import('./common.ts')
+const labelRecord = { id:'1', token:USDG as `0x${string}`, symbol:'TEST', poolId:poolId(key), kind:'lp' as const, at:'2026-01-01', shape:'spot' as const }
+const labelRecords = mergePositionRecords([labelRecord, {...labelRecord, chain:'bsc'}, {...labelRecord,id:'2'}], [{...labelRecord,shape:'bidask',at:'2026-09-11',chain:'robinhood',protocol:'v4'}])
+assert.equal(labelRecords.length,3)
+assert.equal(labelRecords[0].shape,'bidask')
+assert.equal(labelRecords[0].at,'2026-01-01','classification preserves original creation time')
+assert.equal(labelRecords[1].shape,'spot','same NFT id on a different chain is independent')
+assert.equal(labelRecords[2].shape,'spot','unselected positions remain unchanged')
+assert.equal(mergePositionRecords([labelRecord,labelRecord],[{...labelRecord,shape:'bidask'}]).length,1,'duplicate local records cannot override a corrected classification')
 const { computePoolAddress, UNI_POOL_INIT_CODE_HASH, v3Tiers } = await import('./lp-v3.ts')
 const { CHAINS: chainConfigs, selectChain: chooseChain, protocolLabel: labelOf } = await import('./chains.ts')
 const ethConfig = chainConfigs.ethereum

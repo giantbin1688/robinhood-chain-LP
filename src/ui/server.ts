@@ -13,10 +13,11 @@ import bs58 from 'bs58'
 import * as v4 from '../v4.ts'
 import { CHAINS, protocolLabel, type ChainName, type ProtocolName } from '../chains.ts'
 import { v3Tiers } from '../lp-v3.ts'
-import { env, erc20Abi, feeText, log, makeClients, nativePriceUsd, p6, tokenMeta, trim, type Clients } from '../common.ts'
+import { env, erc20Abi, feeText, log, makeClients, nativePriceUsd, p6, tokenMeta, trim, updatePositionRecords, type Clients, type Shape } from '../common.ts'
 import { findPositions, positionFees, same, type Position } from '../exit.ts'
 import { closedPositions, positionLedger, refreshLedger, type LedgerEvent } from '../history.ts'
 import type { Pool } from '../lp.ts'
+import { readTickDetail } from '../tick-detail.ts'
 import { listTokenPools } from '../pools.ts'
 import * as sig from '../signals.ts'
 import { masked, rpcUrl as effectiveRpc, saveSettings, secretValues, settings, solanaCfg } from '../settings.ts'
@@ -260,11 +261,7 @@ async function depth(x: Ctx, idStr: string) {
   void pub
   // 段边界 B，段 j = [B[j], B[j+1])；先定位当前 tick 所在段 = 池子当前活跃流动性，向上每跨一个 tick 加 net，向下每跨一个减 net
   const B = [lo, ...inits, hi]
-  const liq: bigint[] = new Array(B.length - 1).fill(0n)
-  const cur = B.findIndex((b, k) => k < B.length - 1 && b <= tick && tick < B[k + 1])
-  liq[cur] = L
-  for (let j = cur + 1; j < liq.length; j++) liq[j] = liq[j - 1] + net.get(B[j])!
-  for (let j = cur - 1; j >= 0; j--) liq[j] = liq[j + 1] - net.get(B[j + 1])!
+  const liq = v4.segmentLiquidity(B, Math.min(Math.max(tick, lo), hi - 1), L, net) // 池价卡在 MAX_TICK 时 hi 被截到 MAX_TICK，tick 会落在范围外，锚到最后一段
   // 按约 110 根柱子分桶（桶宽是 spacing 的倍数），每根柱子把落在里面的各段按当前价折算成两种币的数量
   const barT = spacing * Math.max(1, Math.ceil((hi - lo) / spacing / 110))
   const bars = []
@@ -315,7 +312,7 @@ async function history(x: Ctx, idStr: string) {
 
 // ---- 盈亏日历：已平仓仓位各自整段的盈亏 = 拿回本金 + 手续费 − 存入（每笔按当时池价折算），按平仓日归类由网页做 ----
 // 第一次要从创世块起拉钱包全部 LP 交易的回执、逐笔读当时池价，几十秒；平仓后的数字不会再变，算过一次就缓存
-type ClosedRow = { id: string; token: Address; symbol: string; fee: number; feeText: string; openedAt: number; closedAt: number; closedTx: Hex; deposits: number; withdrawn: number; fees: number; pnl: number }
+type ClosedRow = { id: string; token: Address; symbol: string; fee: number; feeText: string; openedAt: number; closedAt: number; closedTx: Hex; deposits: number; withdrawn: number; fees: number; pnl: number; valuationTx?: Hex }
 async function closedList(x: Ctx) {
   const { c } = x, { lp } = c
   if (!c.rpcIsAlchemy) throw new Error(`资金流水需要 Alchemy 节点（${c.cfg.rpcEnv}）`)
@@ -333,8 +330,9 @@ async function closedList(x: Ctx) {
       const p = { id: q.id, pool, tickLower: q.tickLower, tickUpper: q.tickUpper }
       const { tokenIs1, token } = tokenOf(x, p)
       const m = await metaOf(x, token)
-      const s = sumLedger(await positionLedger(c, p), usdAt(c.Q.decimals, tokenIs1, m.decimals, priceFn(x, tokenIs1, m.decimals)))
-      x.closedCache.set(q.id, { id: q.id.toString(), token, symbol: m.symbol, fee: pool.fee / 10000, feeText: feeText(pool), openedAt: s.mintedAt, closedAt: q.closed.time, closedTx: q.closed.tx, deposits: cents(s.deposits), withdrawn: cents(s.withdrawn), fees: cents(s.fees), pnl: cents(s.withdrawn + s.fees - s.deposits) })
+      const events=await positionLedger(c,p)
+      const s = sumLedger(events, usdAt(c.Q.decimals, tokenIs1, m.decimals, priceFn(x, tokenIs1, m.decimals)))
+      x.closedCache.set(q.id, { id: q.id.toString(), token, symbol: m.symbol, fee: pool.fee / 10000, feeText: feeText(pool), openedAt: s.mintedAt, closedAt: q.closed.time, closedTx: q.closed.tx, deposits: cents(s.deposits), withdrawn: cents(s.withdrawn), fees: cents(s.fees), pnl: cents(s.withdrawn + s.fees - s.deposits), valuationTx:events.find(e=>e.valuationTx)?.valuationTx })
     } catch (e: any) { failed++; log(`仓位 ${q.id} 平仓盈亏读取失败: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`) }
   }
   return { closed: [...x.closedCache.values()].sort((a, b) => a.closedAt - b.closedAt), nonUsdg, failed }
@@ -391,7 +389,12 @@ function launchArgs(b: any, sel: Sel) {
   if (sel.chain === 'solana') args.push(`--quote=${sel.quote}`)
   if (str(b.spacing)) args.push(`--spacing=${str(b.spacing)}`)
   if (/^0x[0-9a-fA-F]{64}$|^0x[0-9a-fA-F]{40}$/.test(str(b.pool)) || (sel.chain === 'solana' && isSolAddress(str(b.pool)))) args.push(`--pool=${str(b.pool)}`) // 池子列表里点"用这个池"选中的 id，带 hook 的池只能这样指定
-  if (b.rangeMode === 'price') args.push(`--price-range=${str(b.priceRange)}`)
+  if (b.rangeMode === 'ticks') {
+    if (sel.chain !== 'robinhood' || sel.protocol !== 'v4') throw new Error('精确 tick 区间目前仅支持 Robinhood Uniswap v4')
+    if (!/^-?\d+\s*,\s*-?\d+$/.test(str(b.tickRange))) throw new Error('精确 tick 模式要先在右侧 tick 明细里点选起止行') // 空串传给 cli 会被当成没给，静默退回默认百分比区间
+    args.push(`--tick-range=${str(b.tickRange)}`)
+  }
+  else if (b.rangeMode === 'price') args.push(`--price-range=${str(b.priceRange)}`)
   else args.push(`--range=${str(b.range)}`)
   if (['curve', 'bidask'].includes(str(b.shape))) { args.push(`--shape=${str(b.shape)}`); if (str(b.layers)) args.push(`--layers=${str(b.layers)}`) }
   else args.push('--shape=spot')
@@ -466,6 +469,12 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/depth') return json(res, 200, await depth(await ctxOf(selOf(url.searchParams)), str(url.searchParams.get('id'))))
     if (req.method === 'GET' && url.pathname === '/api/history') return json(res, 200, await history(await ctxOf(selOf(url.searchParams)), str(url.searchParams.get('id'))))
     if (req.method === 'GET' && url.pathname === '/api/closed') return json(res, 200, await closedList(await ctxOf(selOf(url.searchParams))))
+    if (req.method === 'GET' && url.pathname === '/api/pool-ticks') {
+      const sel=selOf(url.searchParams), q=url.searchParams
+      if(sel.chain!=='robinhood'||sel.protocol!=='v4') throw new Error('tick 明细目前仅支持 Robinhood Uniswap v4')
+      const token=str(q.get('token')); if(!isAddress(token)) throw new Error('代币地址不合法')
+      return json(res,200,await readTickDetail({token, pool:str(q.get('pool')),fee:Number(q.get('fee')),spacing:Number(q.get('spacing')),zoom:Number(q.get('zoom')||1),center:q.has('center')?Number(q.get('center')):undefined}))
+    }
     if (req.method === 'GET' && url.pathname === '/api/pools') {
       const t = str(url.searchParams.get('token'))
       if (!isAddress(t)) throw new Error('代币地址不合法')
@@ -547,6 +556,24 @@ const server = createServer(async (req, res) => {
       const b = await readBody(req)
       if (!isAddress(str(b.token))) throw new Error('代币地址不合法')
       return json(res, 200, { safety: await sig.recheckToken(selOf(b).chain as ChainName, str(b.token) as Address) })
+    }
+    if (req.method === 'POST' && url.pathname === '/api/positions/classify') {
+      const b=await readBody(req), sel=selOf(b), shape=str(b.shape)
+      if(sel.chain==='solana') throw new Error('此分类入口目前支持 EVM 仓位')
+      if(!['spot','curve','bidask'].includes(shape)) throw new Error('分类必须是 Spot / Curve / Bid-Ask')
+      const ids=str(b.positions).split(',')
+      if(!ids.length||ids.length>64||ids.some(id=>!/^\d+$/.test(id))||new Set(ids).size!==ids.length) throw new Error('仓位 ID 无效')
+      const x=await ctxOf(sel), ps=await findPositions(x.c,undefined,ids.map(id=>BigInt(id)))
+      if(ps.length!==ids.length) throw new Error('仓位不存在、不属于当前钱包或已撤出，请刷新')
+      const updates=await Promise.all(ps.map(async p=>{
+        const known=x.known.find(q=>q.id===p.id), {token}=tokenOf(x,p), meta=await metaOf(x,token)
+        const group=known?.group??p.group
+        return {id:p.id.toString(),token,symbol:meta.symbol,poolId:p.pool.id,kind:p.kind as 'lp'|'bridge',at:new Date().toISOString(),shape:shape as Shape,...(group?{group}:{}),chain:sel.chain as ChainName,protocol:sel.protocol as ProtocolName}
+      }))
+      updatePositionRecords(updates)
+      // 就地更新缓存的列表，别清空：清空后下一次分类拿不到 known 里的 group，BSC 没有 Alchemy 时 mints 也是空的，记录就丢了分组
+      for(const p of x.known) { const u=updates.find(u=>u.id===p.id.toString()); if(u) { p.shape=u.shape!; if(u.group) p.group=u.group } }
+      return json(res,200,{ok:true,count:updates.length})
     }
     if (req.method === 'POST' && url.pathname === '/api/launch') {
       const b = await readBody(req); const sel = selOf(b); needKey(sel)

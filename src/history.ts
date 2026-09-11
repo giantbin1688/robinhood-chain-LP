@@ -3,13 +3,12 @@
 //   v4 / Infinity：代币在钱包和 PoolManager（Infinity 是 Vault）之间转，同一笔里多个仓位要按各自的 liquidityDelta 分摊
 //   v3：NPM 的 IncreaseLiquidity / DecreaseLiquidity / Collect 事件直接给出每个仓位的数量
 // 需要 RPC 是 Alchemy（alchemy_getAssetTransfers + 历史状态）；不是的话 refreshLedger 抛错，网页显示"—"
-import { parseAbiItem, parseEventLogs, type Hex } from 'viem'
+import { parseEventLogs, type Hex } from 'viem'
 import * as v4 from './v4.ts'
 import { abs, min, sleep, type Clients } from './common.ts'
 import type { Mod, Pool, RawPosition } from './lp.ts'
 import { same } from './exit.ts'
-
-const transferEvent = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)')
+import { exitValuation, transferEvent } from './exit-valuation.ts'
 
 // in: 钱包 -> 池 的每种币数量（地址小写），out: 反向；direct: v3 由事件直接得到的每仓位数量
 type Direct = { action: 'add' | 'collect' | 'remove'; amount0: bigint; amount1: bigint; principal0: bigint; principal1: bigint }
@@ -18,11 +17,14 @@ export type LedgerEvent = {
   tx: Hex; block: bigint; time: number; action: 'add' | 'collect' | 'remove'
   amount0: bigint; amount1: bigint; principal0: bigint; principal1: bigint // 本仓位在这笔交易里进/出的两种币；principal = 其中的本金部分（其余是手续费）
   tick: number // 当时池价
+  valuationTx?: Hex // 极限池价时，改用紧随撤仓的实际卖币价格；tick 为成交价对应的小数 tick
 }
 
 // 每条链 / 协议各自一份缓存（网页服务同时开着多条链时不串）
 type Store = { txs: Map<Hex, ParsedTx>; slot0Cache: Map<string, Promise<readonly [bigint, number]>>; preLiqCache: Map<string, Promise<bigint>>; scannedFrom: bigint | null }
 const stores = new Map<string, Store>()
+const exitPrices = new Map<string, Promise<Awaited<ReturnType<typeof exitValuation>>>>()
+const operationPrices = new Map<string,Promise<{index:number;sqrtP:bigint;tick:number}[]>>()
 const storeOf = (c: Clients) => { const k = `${c.cfg.name}:${c.protocol}`; let s = stores.get(k); if (!s) { s = { txs: new Map(), slot0Cache: new Map(), preLiqCache: new Map(), scannedFrom: null }; stores.set(k, s) }; return s }
 
 // 缓存的是 Promise：失败（Alchemy 限流溢出到没有归档数据的公共节点、超时）就从缓存里删掉，下次再读；否则一次失败会把这个池/区块永久卡死
@@ -30,7 +32,18 @@ const cached = <T>(m: Map<string, Promise<T>>, k: string, make: () => Promise<T>
   if (!m.has(k)) { const p = make(); p.catch(() => m.delete(k)); m.set(k, p) }
   return m.get(k)!
 }
+// 结果不会再变的失败（e.permanent）也留在缓存里：每次刷新列表 / 打开日历都重查一遍 Alchemy 只是白烧额度、刷屏日志
+const cachedKeepPermanent = <T>(m: Map<string, Promise<T>>, k: string, make: () => Promise<T>) => {
+  if (!m.has(k)) { const p = make(); p.catch((e: any) => { if (!e?.permanent) m.delete(k) }); m.set(k, p) }
+  return m.get(k)!
+}
 const slot0At = (c: Clients, pool: Pool, block: bigint) => cached(storeOf(c).slot0Cache, `${pool.id}:${block}`, () => c.lp.slot0At(pool, block).then(({ sqrtP, tick }) => [sqrtP, tick] as const))
+// 区块末极限价可能来自撤仓之后的另一笔 swap，先按事件顺序还原操作当时的价格（适配器给出该区块的改价事件；没给的协议用不上）。
+async function operationSlot(c:Clients,pool:Pool,block:bigint,logIndex:number) {
+  const prices=await cached(operationPrices,`${c.cfg.name}:${c.protocol}:${pool.id}:${block}`,()=>c.lp.ledger.priceEventsAt!(pool,block))
+  const before=prices.filter(p=>p.index<logIndex).at(-1)
+  return before?[before.sqrtP,before.tick] as const:slot0At(c,pool,block-1n)
+}
 // 交易前一个区块时该仓位的流动性（多仓位同笔交易分手续费用）
 const preLiquidity = (c: Clients, id: bigint, block: bigint) => cached(storeOf(c).preLiqCache, `${id}:${block}`, () => c.lp.liquidityAt(id, block - 1n))
 
@@ -86,10 +99,21 @@ export async function positionLedger(c: Clients, p: Pick<RawPosition, 'id' | 'po
   for (const [tx, t] of S.txs) {
     const mine = t.mods.filter((m) => m.id === p.id && same(m.poolId, pid))
     if (!mine.length) continue
-    const [sqrtP, tick] = await slot0At(c, p.pool, t.block)
-    const d = t.direct.get(p.id)
-    if (d) { events.push({ tx, block: t.block, time: t.time, action: d.action, amount0: d.amount0, amount1: d.amount1, principal0: min(d.principal0, d.amount0), principal1: min(d.principal1, d.amount1), tick }); continue }
     const delta = mine.reduce((s, m) => s + m.delta, 0n)
+    let [sqrtP, poolTick] = await slot0At(c, p.pool, t.block)
+    const extreme = (tk: number) => tk <= v4.MIN_TICK + 1 || tk >= v4.MAX_TICK - 1
+    if (extreme(poolTick) && c.lp.ledger.priceEventsAt && mine[0].logIndex !== undefined) [sqrtP, poolTick] = await operationSlot(c, p.pool, t.block, mine[0].logIndex)
+    let tick = poolTick, valuationTx: Hex | undefined
+    // 操作时池价仍在极限（币被砸到归零 / 无穷）：撤出的代币按池价估会把本金记成 0，撤仓那笔改按紧随其后的实际卖币价。
+    // 加仓 / 只领手续费 / 只撤出计价币的按池价估本来就对（崩盘币 ≈ 0、计价币按面值），别抛错把整份流水弄丢
+    const quoteIs0 = same(p.pool.currency0, c.Q.address), quoteIs1 = same(p.pool.currency1, c.Q.address)
+    const token = quoteIs0 ? p.pool.currency1 : p.pool.currency0, withdrawnToken = t.out.get(token.toLowerCase()) ?? 0n
+    if (extreme(poolTick) && delta < 0n && (quoteIs0 || quoteIs1) && withdrawnToken > 0n) {
+      const price = await cachedKeepPermanent(exitPrices, `${c.cfg.name}:${c.protocol}:${c.wallet}:${tx}:${token}`, () => exitValuation(c, { tx, block: t.block, time: t.time, token, tokenIs0: quoteIs1, withdrawnToken }))
+      tick = price.tick; valuationTx = price.tx
+    }
+    const d = t.direct.get(p.id)
+    if (d) { events.push({ tx, block: t.block, time: t.time, action: d.action, amount0: d.amount0, amount1: d.amount1, principal0: min(d.principal0, d.amount0), principal1: min(d.principal1, d.amount1), tick, valuationTx }); continue }
     const action = delta > 0n ? 'add' : delta < 0n ? 'remove' : 'collect'
     const flow = action === 'add' ? t.in : t.out
     const total: [bigint, bigint] = [flow.get(c0) ?? 0n, flow.get(c1) ?? 0n]
@@ -115,7 +139,7 @@ export async function positionLedger(c: Clients, p: Pick<RawPosition, 'id' | 'po
       }
     }
     // amountsForLiquidity 向上取整，没有手续费时本金可能比实际多 1 wei：本金不超过实际数量
-    events.push({ tx, block: t.block, time: t.time, action, amount0, amount1, principal0: min(principal0, amount0), principal1: min(principal1, amount1), tick })
+    events.push({ tx, block: t.block, time: t.time, action, amount0, amount1, principal0: min(principal0, amount0), principal1: min(principal1, amount1), tick, valuationTx })
   }
   return events.sort((a, b) => (a.block < b.block ? -1 : a.block > b.block ? 1 : 0))
 }

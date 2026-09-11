@@ -1,6 +1,6 @@
 // 进场（cli.ts）和撤退（exit.ts）共用：链选择与客户端、ABI、Uniswap API / OKX 聚合器、发交易/授权工具、仓位记录
 import { createHmac } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici'
 import {
   createPublicClient, createWalletClient, defineChain, encodeFunctionData, fallback, formatUnits, getAddress, http, maxUint160, maxUint256, parseAbi,
@@ -319,14 +319,40 @@ export async function executeSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typ
 }
 
 // ---- 本地仓位记录 positions.json（进场时追加，撤退时读取）----
-// shape / group：curve、bidask 一次进场建的几个仓位共用一个 group（= mint 交易哈希），仓位页按形状分区、按 group 成组显示；没记录的（链上扫到的）按 spot 处理
+// shape / group：本地分类和建仓交易分组。链上只能恢复分组，没有本地记录的仓位显示未分类，不猜成 Spot。
 // chain / protocol 没写的是早期记录 = robinhood / v4
 export type Shape = 'spot' | 'curve' | 'bidask'
 export type PositionRecord = { id: string; token: Address; symbol: string; poolId: Hex; kind: 'lp' | 'bridge'; at: string; shape?: Shape; group?: Hex; chain?: ChainName; protocol?: ProtocolName }
 const POSITIONS_FILE = 'positions.json'
 export const loadPositions = (): PositionRecord[] => (existsSync(POSITIONS_FILE) ? JSON.parse(readFileSync(POSITIONS_FILE, 'utf8')) : [])
 export const positionsOf = (c: Pick<Clients, 'cfg' | 'protocol'>) => loadPositions().filter((p) => (p.chain ?? 'robinhood') === c.cfg.name && (p.protocol ?? 'v4') === c.protocol)
-export function savePosition(p: PositionRecord) { writeFileSync(POSITIONS_FILE, JSON.stringify([...loadPositions(), p], null, 2) + '\n') }
+// 网页服务和进场子进程会同时改这个文件（mint 后 savePosition、网页里改分类 updatePositionRecords）：读改写不是原子的，后写的会把先写的覆盖掉。
+// 用目录锁串行（mkdir 本身是原子的），超过 10 秒的锁当作崩溃进程的遗留；写入先落临时文件再 rename，别让另一边读到半个文件
+const POSITIONS_LOCK = POSITIONS_FILE + '.lock'
+function withPositionsLock<T>(fn: () => T): T {
+  const deadline = Date.now() + 5000
+  for (;;) {
+    try { mkdirSync(POSITIONS_LOCK); break } catch (e: any) {
+      if (e?.code !== 'EEXIST') throw e
+      try { if (Date.now() - statSync(POSITIONS_LOCK).mtimeMs > 10_000) { rmSync(POSITIONS_LOCK, { recursive: true, force: true }); continue } } catch {}
+      if (Date.now() > deadline) throw new Error(`${POSITIONS_FILE} 被其他进程锁住超过 5 秒，本次没有写入`)
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+    }
+  }
+  try { return fn() } finally { rmSync(POSITIONS_LOCK, { recursive: true, force: true }) }
+}
+function writePositions(list: PositionRecord[]) { const tmp = `${POSITIONS_FILE}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(list, null, 2) + '\n'); renameSync(tmp, POSITIONS_FILE) }
+export function savePosition(p: PositionRecord) { withPositionsLock(() => writePositions([...loadPositions(), p])) }
+// 只更新指定链 / 协议 / NFT 的标签，保留其他仓位和已有记录字段。
+export function mergePositionRecords(existing: PositionRecord[], updates: PositionRecord[]): PositionRecord[] {
+  const key = (p: PositionRecord) => `${p.chain ?? 'robinhood'}:${p.protocol ?? 'v4'}:${p.id}`
+  const byId = new Map(updates.map(p => [key(p), p]))
+  const seen = new Set<string>()
+  const result = existing.flatMap(p => { const k=key(p), update=byId.get(k); if(!update) return [p]; if(seen.has(k)) return []; seen.add(k); return [{...p,...update,at:p.at,kind:p.kind}] })
+  for (const k of seen) byId.delete(k)
+  return [...result,...byId.values()]
+}
+export function updatePositionRecords(updates: PositionRecord[]) { withPositionsLock(() => writePositions(mergePositionRecords(loadPositions(), updates))) }
 
 // 池子的费率文字：动态费率池标出来
 export const feeText = (p: Pool) => (p.dynamic ? `动态${p.fee ? `(${p.fee / 10000}%)` : ''}` : `${p.fee / 10000}%`)

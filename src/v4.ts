@@ -51,6 +51,17 @@ export const priceAtTick = (tick: number) => 1.0001 ** tick
 export const priceFromSqrtX96 = (sqrtPriceX96: bigint) => (Number(sqrtPriceX96) / 2 ** 96) ** 2
 export const floorToSpacing = (tick: number, spacing: number) => Math.floor(tick / spacing) * spacing
 export const ceilToSpacing = (tick: number, spacing: number) => Math.ceil(tick / spacing) * spacing
+// 已初始化 tick 之间每一段的流动性：B 是段边界（含两端），段 j = [B[j], B[j+1])。当前 tick 所在段 = 池子活跃流动性 L，
+// 向上每跨一个已初始化 tick 加 liquidityNet，向下减。网页深度图和进场 tick 明细共用，别各写一份
+export function segmentLiquidity(B: number[], tick: number, L: bigint, net: Map<number, bigint>): bigint[] {
+  const liq: bigint[] = new Array(Math.max(B.length - 1, 0)).fill(0n)
+  const cur = B.findIndex((b, k) => k < B.length - 1 && b <= tick && tick < B[k + 1])
+  if (cur < 0) throw new Error('当前 tick 不在读取范围内')
+  liq[cur] = L
+  for (let j = cur + 1; j < liq.length; j++) liq[j] = liq[j - 1] + (net.get(B[j]) ?? 0n)
+  for (let j = cur - 1; j >= 0; j--) liq[j] = liq[j + 1] - (net.get(B[j + 1]) ?? 0n)
+  return liq
+}
 
 const mulDivUp = (a: bigint, b: bigint, d: bigint) => (a * b + d - 1n) / d
 

@@ -5,6 +5,7 @@ import { parseArgs } from 'node:util'
 import { formatEther, getAddress, parseUnits, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
 import * as shapeMath from './shape.ts'
+import { exactTickRange } from './tick-detail.ts'
 import { abs, die, env, erc20Abi, failFast, feeText, log, makeClients, min, nativePriceUsd, now, num, p6, pct, savePosition, sleep, swapDepsFor, tokenMeta, trim, txKit, swapOffers, executeSwap, type SwapOffer } from './common.ts'
 import type { MintSpec, Pool } from './lp.ts'
 import { watchToken } from './monitor.ts'
@@ -22,6 +23,7 @@ const { values: opt } = parseArgs({
     spacing: { type: 'string', default: env('TICK_SPACING', '') },            // 留空 = 协议默认（v4/Infinity 为 fee/50，v3 固定四档）
     range: { type: 'string', default: env('RANGE', '-50%,+100%') },          // 区间：相对现价的百分比
     'price-range': { type: 'string', default: env('PRICE_RANGE', '') },      // 区间：绝对价格（计价币/代币）"最低价,最高价"，设置了就优先于 RANGE
+    'tick-range': { type: 'string' }, // Robinhood v4：精确池 tick 边界，优先于价格 / 百分比，不经过价格取整
     slippage: { type: 'string', default: env('SWAP_SLIPPAGE', '5') },         // 换币滑点 %
     'lp-slippage': { type: 'string', default: env('LP_SLIPPAGE', '5') },      // mint amountMax 余量 %
     'max-deviation': { type: 'string', default: env('MAX_DEVIATION', '10') },// 池价与市场价最大偏离 %
@@ -66,7 +68,8 @@ const dryRun = opt['dry-run']
 const clients = await makeClients({ from: opt.from, needKey: !dryRun })
 const { wallet, pub, cfg, lp, Q } = clients
 const QU = 10n ** BigInt(Q.decimals) // 1 个计价币的基础单位
-const rangeLabel = priceRange.length ? `${priceRange[0]} .. ${priceRange[1]} ${Q.symbol}` : `${pLo > 0 ? '+' : ''}${pLo}% .. ${pHi > 0 ? '+' : ''}${pHi}%`
+if (opt['tick-range'] && (cfg.name !== 'robinhood' || clients.protocol !== 'v4')) die('精确 tick 区间目前仅支持 Robinhood Uniswap v4')
+const rangeLabel = opt['tick-range'] ? `ticks ${opt['tick-range']}` : priceRange.length ? `${priceRange[0]} .. ${priceRange[1]} ${Q.symbol}` : `${pLo > 0 ? '+' : ''}${pLo}% .. ${pHi > 0 ? '+' : ''}${pHi}%`
 const usdgBudget = parseUnits(opt.usdg, Q.decimals)
 if (usdgBudget <= 0n) die('USDG_AMOUNT / --usdg 必须大于 0')
 let spacing = opt.spacing ? Number(opt.spacing) : lp.spacingFor(fee) ?? 0
@@ -151,6 +154,7 @@ const [dLo, dHi] = tokenIs1 ? [-tickDelta(mHi), -tickDelta(mLo)] : [tickDelta(mL
 const tickAtUsdgPerToken = (p: number) => v4.tickFromPrice((tokenIs1 ? 1 / p : p) * 10 ** (dec1 - dec0))
 // 远端边界向外取整（保证覆盖要求的范围）；0% 那条边向内取整（单边仓位不包含现价，保持纯单边）
 const rangeFor = (t: number) => {
+  if (opt['tick-range']) return exactTickRange(opt['tick-range'], spacing)
   let lo: number, hi: number
   if (priceRange.length) {
     // 绝对价格：两端向外取整；若本来整体在现价一侧、取整后却跨过了现价，把靠近现价的那端收回一格，保持纯单边
