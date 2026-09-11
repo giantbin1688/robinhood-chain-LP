@@ -32,10 +32,10 @@ export async function watchToken(o: WatchOptions) {
   let base: { deposits: number; withdrawn: number; fees: number } | null = null, baseManual = false
   if (stopLoss > 0) {
     const since = main.every((p) => p.mint) ? main.reduce((m, p) => (p.mint!.block < m ? p.mint!.block : m), main[0].mint!.block) : 0n
-    base = await ledgerTotals(o.clients, main, decimals, since)
-    if (base && !(base.deposits > 0)) base = null
+    let why = ''
+    base = await ledgerTotals(o.clients, main, decimals, since).catch((e: any) => { why = String(e?.message ?? e); return null })
     if (o.entry && o.entry > 0) { base = { deposits: o.entry, withdrawn: base?.withdrawn ?? 0, fees: base?.fees ?? 0 }; baseManual = true }
-    if (!base) die(`开了止损 ${stopLoss}% 但算不出进场本金：${o.clients.rpcIsAlchemy ? '链上流水里没有这些仓位的存入记录' : '资金流水需要 Alchemy 节点'}；请用 --entry 手填进场时的 ${Q.symbol} 金额，或去掉止损`)
+    if (!base) die(`开了止损 ${stopLoss}% 但算不出进场本金：${why}；请用 --entry 手填进场时的 ${Q.symbol} 金额，或去掉止损`)
   }
   const fmtQ = (x: number) => x.toFixed(2)
   const stopText = base ? `止损 ${stopLoss}%：整组本金 ${fmtQ(base.deposits)} ${Q.symbol}${baseManual ? '（手填）' : ''}${base.fees + base.withdrawn > 0 ? `，已领手续费 ${fmtQ(base.fees)}，已撤本金 ${fmtQ(base.withdrawn)}` : ''}，价值（含手续费）跌到 ${fmtQ(base.deposits * (1 - stopLoss / 100))} 以下即撤退` : ''

@@ -211,9 +211,11 @@ export async function withdraw(o: WithdrawOptions) {
   const positions = partial ? found.map(cut).filter((p) => p.liquidity > 0n) : found
   if (positions.length === 0) die(`按 ${pct}% 截下来的流动性为 0，仓位太小，直接全撤吧`)
   const sellHeld = o.positions && !o.sellAll ? 0n : tokenStart // 钱包里原有的币要不要一起卖
-  // 进场金额：全撤时在最后一行和"共收回"对照着看。后台并行读流水（Alchemy），撤仓 / 卖币不等它；演练不读
-  const deposits = partial || o.dryRun ? Promise.resolve(null) : ledgerTotals(o.clients, found, decimals, found.every((p) => p.mint) ? found.reduce((m, p) => (p.mint!.block < m ? p.mint!.block : m), found[0].mint!.block) : 0n).then((t) => t?.deposits ?? null)
-  deposits.catch(() => {})
+  // 进场金额：全撤时在最后一行和"共收回"对照着看。后台并行读流水（Alchemy），撤仓 / 卖币不等它；演练不读。
+  // 读失败（和撤仓、卖币同时打节点容易被限流；刚建的仓位索引可能没跟上）就记下原因，卖完币再重试一次，还是不行就把原因打出来，别静默少半句
+  const since = found.every((p) => p.mint) ? found.reduce((m, p) => (p.mint!.block < m ? p.mint!.block : m), found[0].mint!.block) : 0n
+  const readDeposits = () => ledgerTotals(o.clients, found, decimals, since).then((t) => ({ dep: t.deposits, why: '' }), (e: any) => ({ dep: null, why: String(e?.message ?? e) }))
+  const deposits = partial || o.dryRun ? null : readDeposits()
 
   // ---- 计划 ----
   let expectUsdg = 0n, expectToken = 0n
@@ -284,9 +286,13 @@ export async function withdraw(o: WithdrawOptions) {
   const toSell = sellHeld + (tokenBal - tokenStart)
   if (s && toSell > 0n) await s.sell(toSell, kit)
   const [usdgEnd, tokenEnd] = await Promise.all([balanceOf(Q.address), balanceOf(token)])
-  const gained = Number(usdgEnd - usdgStart) / 10 ** Q.decimals, dep = await deposits.catch(() => null)
+  const gained = Number(usdgEnd - usdgStart) / 10 ** Q.decimals
+  let d = deposits ? await deposits : null
+  if (d && d.dep === null) { await sleep(3000); d = await readDeposits() } // 交易都发完了，节点空下来再读一次
+  const dep = d?.dep ?? null
   const vs = dep && dep > 0 ? `，进场 ${dep.toFixed(Q.decimals > 6 ? 6 : Q.decimals)} ${Q.symbol}，盈亏 ${gained - dep >= 0 ? '+' : ''}${(gained - dep).toFixed(2)} (${gained - dep >= 0 ? '+' : ''}${(((gained - dep) / dep) * 100).toFixed(1)}%)` : ''
   log(`完成: 共收回 ${fmtU(usdgEnd - usdgStart)} ${Q.symbol}${vs}${tokenEnd > 0n ? `，钱包还剩 ${fmtT(tokenEnd)} ${symbol}` : ''}`)
+  if (d && dep === null) log(`进场金额没算出来（${d.why}），网页的历史里过会儿能看到盈亏`)
   log(`gas 合计: ${kit.stats.txCount} 笔，${trim(kit.stats.gasTotal, 18)} ${cfg.native.symbol} ($${usd(kit.stats.gasTotal)})`)
   return { usdgGained: usdgEnd - usdgStart, tokenLeft: tokenEnd }
 }

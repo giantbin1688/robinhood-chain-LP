@@ -145,10 +145,12 @@ export async function positionLedger(c: Clients, p: Pick<RawPosition, 'id' | 'po
 }
 
 // 一组仓位的资金流水合计（计价币，每笔按当时池价折算，和网页 uPNL 同一口径）：deposits 存入本金、withdrawn 已撤本金、fees 已领手续费。
-// 撤退日志里给"共收回"配参照，监控的止损用它算盈亏。需要 Alchemy；拿不到（公共节点、限流、极限价估值失败）返回 null，调用方自己决定退路。
+// 撤退日志里给"共收回"配参照，监控的止损用它算盈亏。需要 Alchemy。读不到时抛错并说清原因（公共节点、限流、极限价估值失败、
+// 转账索引还没跟上刚建的仓位），调用方决定是重试、报一行还是拒绝启动——以前这里静默返回 null，用户只看到日志少了半句，查不出为什么。
 // since = 最早的 mint 区块，不知道就从创世块扫（慢，几十秒）
-export async function ledgerTotals(c: Clients, positions: Pick<RawPosition, 'id' | 'pool' | 'tickLower' | 'tickUpper'>[], tokenDecimals: number, since: bigint): Promise<{ deposits: number; withdrawn: number; fees: number } | null> {
-  if (!c.rpcIsAlchemy || !positions.length) return null
+export async function ledgerTotals(c: Clients, positions: Pick<RawPosition, 'id' | 'pool' | 'tickLower' | 'tickUpper'>[], tokenDecimals: number, since: bigint): Promise<{ deposits: number; withdrawn: number; fees: number }> {
+  if (!c.rpcIsAlchemy) throw new Error('资金流水需要 Alchemy 节点')
+  if (!positions.length) throw new Error('没有仓位')
   try {
     await refreshLedger(c, since)
     const t = { deposits: 0, withdrawn: 0, fees: 0 }
@@ -163,8 +165,9 @@ export async function ledgerTotals(c: Clients, positions: Pick<RawPosition, 'id'
         else { t.withdrawn += principal; t.fees += total - principal }
       }
     }
+    if (!(t.deposits > 0)) throw new Error('链上流水里没有这些仓位的存入记录（刚建的仓位 Alchemy 索引可能还没跟上，过几分钟再读）')
     return t
-  } catch { return null }
+  } catch (e: any) { throw new Error(`读资金流水失败：${e?.shortMessage ?? e?.message ?? e}`) }
 }
 
 // 已平仓 = 流水里出现过、liquidityDelta 累计归零的仓位（全部撤出；销毁 NFT 前也必先撤完，网页撤完不销毁的也算）。
