@@ -1,6 +1,6 @@
 // 进场（cli.ts）和撤退（exit.ts）共用：链选择与客户端、ABI、Uniswap API / OKX 聚合器、发交易/授权工具、仓位记录
 import { createHmac } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, statSync, writeFileSync } from 'node:fs'
 import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici'
 import {
   createPublicClient, createWalletClient, defineChain, encodeFunctionData, fallback, formatUnits, getAddress, http, maxUint160, maxUint256, parseAbi,
@@ -344,19 +344,25 @@ const POSITIONS_FILE = 'positions.json'
 export const loadPositions = (): PositionRecord[] => (existsSync(POSITIONS_FILE) ? JSON.parse(readFileSync(POSITIONS_FILE, 'utf8')) : [])
 export const positionsOf = (c: Pick<Clients, 'cfg' | 'protocol'>) => loadPositions().filter((p) => (p.chain ?? 'robinhood') === c.cfg.name && (p.protocol ?? 'v4') === c.protocol)
 // 网页服务和进场子进程会同时改这个文件（mint 后 savePosition、网页里改分类 updatePositionRecords）：读改写不是原子的，后写的会把先写的覆盖掉。
-// 用目录锁串行（mkdir 本身是原子的），超过 10 秒的锁当作崩溃进程的遗留；写入先落临时文件再 rename，别让另一边读到半个文件
+// 用目录锁串行（mkdir 本身是原子的），超过 10 秒的锁当作崩溃进程的遗留；写入先落临时文件再 rename，别让另一边读到半个文件。
+// 删锁只能用 rmdirSync：Node 24.12 的 rmSync 在 Windows 上遇到含非 ASCII 字符的路径会静默什么都不做（nodejs/node#61067），
+// 本项目目录名带中文，曾因此把锁永远留在磁盘上，之后每次进场都在写记录这一步死循环（过期分支删不掉又立刻重试，绕过了超时检查）
 const POSITIONS_LOCK = POSITIONS_FILE + '.lock'
+const unlock = () => { try { rmdirSync(POSITIONS_LOCK) } catch (e: any) { if (e?.code !== 'ENOENT') throw e } }
 function withPositionsLock<T>(fn: () => T): T {
   const deadline = Date.now() + 5000
+  let stuck: unknown // 过期的锁删不掉时的错误，超时时一起报出来
   for (;;) {
     try { mkdirSync(POSITIONS_LOCK); break } catch (e: any) {
       if (e?.code !== 'EEXIST') throw e
-      try { if (Date.now() - statSync(POSITIONS_LOCK).mtimeMs > 10_000) { rmSync(POSITIONS_LOCK, { recursive: true, force: true }); continue } } catch {}
-      if (Date.now() > deadline) throw new Error(`${POSITIONS_FILE} 被其他进程锁住超过 5 秒，本次没有写入`)
+      let age = 0
+      try { age = Date.now() - statSync(POSITIONS_LOCK).mtimeMs } catch {} // 刚被对方删掉，下一轮 mkdir 就能成功
+      if (age > 10_000) try { unlock() } catch (e) { stuck = e } // 删掉后也不立刻重试，照样经过下面的超时检查：删不掉时不会原地空转
+      if (Date.now() > deadline) throw new Error(`${POSITIONS_FILE} 被其他进程锁住超过 5 秒，本次没有写入${stuck ? `（过期的锁删不掉: ${String((stuck as any)?.message ?? stuck)}）` : ''}`)
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
     }
   }
-  try { return fn() } finally { rmSync(POSITIONS_LOCK, { recursive: true, force: true }) }
+  try { return fn() } finally { unlock() }
 }
 function writePositions(list: PositionRecord[]) { const tmp = `${POSITIONS_FILE}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(list, null, 2) + '\n'); renameSync(tmp, POSITIONS_FILE) }
 export function savePosition(p: PositionRecord) { withPositionsLock(() => writePositions([...loadPositions(), p])) }

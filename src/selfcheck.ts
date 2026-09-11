@@ -49,6 +49,28 @@ assert.equal(labelRecords[0].at,'2026-01-01','classification preserves original 
 assert.equal(labelRecords[1].shape,'spot','same NFT id on a different chain is independent')
 assert.equal(labelRecords[2].shape,'spot','unselected positions remain unchanged')
 assert.equal(mergePositionRecords([labelRecord,labelRecord],[{...labelRecord,shape:'bidask'}]).length,1,'duplicate local records cannot override a corrected classification')
+// positions.json 的目录锁：写完必须真的把锁删掉，过期的锁要能清掉再写。放在名字带非 ASCII 字符的临时目录里做——
+// Node 24.12 的 rmSync 在 Windows 上对这种路径静默无效（nodejs/node#61067），曾把锁永远留在磁盘上，之后每次进场都在写记录这一步死循环
+const { savePosition, loadPositions } = await import('./common.ts')
+const { existsSync, mkdirSync, mkdtempSync, rmdirSync, unlinkSync, utimesSync } = await import('node:fs')
+const { tmpdir } = await import('node:os')
+const { join } = await import('node:path')
+const projectDir = process.cwd(), lockDir = mkdtempSync(join(tmpdir(), 'rh-锁-'))
+process.chdir(lockDir)
+try {
+  savePosition(labelRecord)
+  assert.ok(!existsSync('positions.json.lock'), 'the lock directory is removed after writing')
+  savePosition({ ...labelRecord, id: '2' })
+  assert.equal(loadPositions().length, 2, 'consecutive writes from one process both land')
+  mkdirSync('positions.json.lock'); const minuteAgo = Date.now() / 1000 - 60; utimesSync('positions.json.lock', minuteAgo, minuteAgo)
+  const lockWait = Date.now(); savePosition({ ...labelRecord, id: '3' })
+  assert.ok(Date.now() - lockWait < 1000 && !existsSync('positions.json.lock') && loadPositions().length === 3, 'a stale lock left by a dead process is removed and the write goes through')
+} finally {
+  process.chdir(projectDir)
+  if (existsSync(join(lockDir, 'positions.json'))) unlinkSync(join(lockDir, 'positions.json'))
+  if (existsSync(join(lockDir, 'positions.json.lock'))) rmdirSync(join(lockDir, 'positions.json.lock'))
+  rmdirSync(lockDir)
+}
 const { computePoolAddress, UNI_POOL_INIT_CODE_HASH, v3Tiers } = await import('./lp-v3.ts')
 const { CHAINS: chainConfigs, selectChain: chooseChain, protocolLabel: labelOf } = await import('./chains.ts')
 const ethConfig = chainConfigs.ethereum

@@ -362,11 +362,17 @@ const minted: bigint[] = []
 async function mint(label: string, kind: 'lp' | 'bridge', specs: MintSpec[], init?: bigint) {
   const tx = await lp.mintTx(kit, pool!, specs, wallet, init)
   const rc = await sendEstimated(label, tx)
+  log(`${label}: 链上已确认，正在解析仓位编号`)
   const ids = lp.mintIds(rc.logs)
+  log(`${label}: 仓位 ${ids.join(', ') || '未解析到编号'}，正在写入 positions.json`)
   const at = new Date().toISOString()
-  for (const positionId of ids) {
-    minted.push(positionId)
-    savePosition({ id: positionId.toString(), token, symbol, poolId: pool!.id, kind, at, chain: cfg.name, protocol: lp.protocol, ...(kind === 'lp' && shape !== 'spot' ? { shape, group: rc.transactionHash } : {}) })
+  try {
+    for (const positionId of ids) {
+      minted.push(positionId)
+      savePosition({ id: positionId.toString(), token, symbol, poolId: pool!.id, kind, at, chain: cfg.name, protocol: lp.protocol, ...(kind === 'lp' && shape !== 'spot' ? { shape, group: rc.transactionHash } : {}) })
+    }
+  } catch (e) {
+    throw new Error(`链上建仓已成功，但本地仓位记录写入失败。请勿重复进场；仓位 ${ids.join(', ')}，交易 ${rc.transactionHash}。原因: ${e instanceof Error ? e.message : String(e)}`)
   }
   return { rc, ids }
 }
