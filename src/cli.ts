@@ -10,6 +10,9 @@ import { abs, die, env, erc20Abi, failFast, feeText, log, makeClients, min, nati
 import type { MintSpec, Pool } from './lp.ts'
 import { watchToken } from './monitor.ts'
 import { discoverQuotePools } from './pools.ts'
+import { snapshot as gmgnSnapshot, type GmgnChain } from './gmgn.ts'
+import { attachPoolDepth } from './squeeze-scan.ts'
+import { HOUR_BARS, evaluateSqueeze, metricsText, squeezeParamsFromEnv, type Evaluation } from './strategy.ts'
 
 failFast()
 
@@ -39,7 +42,7 @@ const { values: opt } = parseArgs({
     json: { type: 'boolean', default: false },        // 计划确定后额外打印一行 "@@plan {json}" 给网页界面用
   },
 })
-if (!opt.token) die('用法: npm run launch -- [--chain robinhood|bsc|ethereum] [--protocol v4|infinity|v3] --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--pool <池id>] [--range="-50%,+100%" | --price-range="0.006,0.01"] [--shape spot|curve|bidask] [--layers 3] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
+if (!opt.token) die('用法: npm run launch -- [--chain robinhood|bsc|ethereum] [--protocol v4|infinity|v3] --token <地址> [--usdg 25] [--fee 5] [--spacing 1000] [--pool <池id>] [--range="-50%,+100%" | --price-range="0.006,0.01"] [--shape spot|curve|bidask|squeeze] [--layers 3] [--slippage 5] [--lp-slippage 5] [--max-deviation 10] [--watch] [--yes] [--dry-run]')
 const token = getAddress(opt.token)
 const poolId = opt.pool.trim()
 if (poolId && !/^0x[0-9a-fA-F]{40}$|^0x[0-9a-fA-F]{64}$/.test(poolId)) die(`--pool 必须是池 id（v4/Infinity 为 32 字节 hex，v3 为池地址），当前 "${opt.pool}"`)
@@ -47,10 +50,11 @@ let fee = Math.round(Number(opt.fee) * 10_000) // pips
 if (!poolId && !(fee > 0 && fee <= 1_000_000)) die(`POOL_FEE / --fee 必须是 (0, 100] 之间的百分比，当前 "${opt.fee}"`)
 if (!['auto', 'exact'].includes(opt['pool-select'])) die('POOL_SELECT / --pool-select 只能是 auto 或 exact')
 const shape = opt.shape.toLowerCase().replace('-', '') as shapeMath.Shape
-if (!['spot', 'curve', 'bidask'].includes(shape)) die(`LP_SHAPE / --shape 只能是 spot、curve 或 bidask，当前 "${opt.shape}"`)
+if (!['spot', 'curve', 'bidask', 'squeeze'].includes(shape)) die(`LP_SHAPE / --shape 只能是 spot、curve、bidask 或 squeeze，当前 "${opt.shape}"`)
 const layers = Number(opt.layers)
 if (!(Number.isInteger(layers) && layers >= 2 && layers <= 8)) die(`LP_LAYERS / --layers 必须是 [2, 8] 的整数，当前 "${opt.layers}"`)
-const shapeLabel = { spot: 'spot（单个仓位）', curve: `curve（${layers} 层同心嵌套，越靠现价越厚）`, bidask: `bidask（现价两侧各 ${layers} 段，越远越厚）` }[shape]
+let shapeLabel = { spot: 'spot（单个仓位）', curve: `curve（${layers} 层同心嵌套，越靠现价越厚）`, bidask: `bidask（现价两侧各 ${layers} 段，越远越厚）`, squeeze: 'squeeze（数据驱动：Curve 核心 + Bid-Ask 双翼，区间和份额由 GMGN 数据推导）' }[shape]
+let squeeze: Evaluation | null = null // --shape squeeze：GMGN 数据 + strategy.ts 公式给出的闸门与形状参数（市场价探测后填）
 // 区间写法：两个百分比 "-50%,+100%"（也接受空格 / ~ / " - " 分隔）；只写一个则是单边：负数 = 现价往下，正数 = 现价往上
 const rangePct = (opt.range.match(/[+-]?\d+(\.\d+)?/g) ?? []).map(Number)
 if (rangePct.length === 1) rangePct.push(0)
@@ -70,7 +74,7 @@ const clients = await makeClients({ from: opt.from, needKey: !dryRun })
 const { wallet, pub, cfg, lp, Q } = clients
 const QU = 10n ** BigInt(Q.decimals) // 1 个计价币的基础单位
 if (opt['tick-range'] && (cfg.name !== 'robinhood' || clients.protocol !== 'v4')) die('精确 tick 区间目前仅支持 Robinhood Uniswap v4')
-const rangeLabel = opt['tick-range'] ? `ticks ${opt['tick-range']}` : priceRange.length ? `${priceRange[0]} .. ${priceRange[1]} ${Q.symbol}` : `${pLo > 0 ? '+' : ''}${pLo}% .. ${pHi > 0 ? '+' : ''}${pHi}%`
+const rangeLabel = shape === 'squeeze' ? 'squeeze 自动区间' : opt['tick-range'] ? `ticks ${opt['tick-range']}` : priceRange.length ? `${priceRange[0]} .. ${priceRange[1]} ${Q.symbol}` : `${pLo > 0 ? '+' : ''}${pLo}% .. ${pHi > 0 ? '+' : ''}${pHi}%`
 const usdgBudget = parseUnits(opt.usdg, Q.decimals)
 if (usdgBudget <= 0n) die('USDG_AMOUNT / --usdg 必须大于 0')
 let spacing = opt.spacing ? Number(opt.spacing) : lp.spacingFor(fee) ?? 0
@@ -154,10 +158,25 @@ const [dLo, dHi] = tokenIs1 ? [-tickDelta(mHi), -tickDelta(mLo)] : [tickDelta(mL
 // 计价币/代币 的价格 -> 池子 tick（usdgPerTokenAtTick 的反函数）
 const tickAtUsdgPerToken = (p: number) => v4.tickFromPrice((tokenIs1 ? 1 / p : p) * 10 ** (dec1 - dec0))
 // 远端边界向外取整（保证覆盖要求的范围）；0% 那条边向内取整（单边仓位不包含现价，保持纯单边）
+// squeeze：代币价格倍数 -> 未取整的 tick（代币是 currency1 时方向相反）；核心 / 两翼的 tick 边界都由它算
+const tickOfMul = (t: number, m: number) => t + (tokenIs1 ? -tickDelta(m) : tickDelta(m))
+function squeezeTicks(t: number) {
+  if (!squeeze) die('squeeze 形状还没有数据（内部顺序错误）')
+  const { w, upHi, downLo, shares } = squeeze.plan
+  const [a, b] = [tickOfMul(t, 1 - w), tickOfMul(t, 1 + w)].sort((x, y) => x - y)
+  const core: [number, number] = [Math.min(v4.floorToSpacing(a, spacing), v4.floorToSpacing(t, spacing)), Math.max(v4.ceilToSpacing(b, spacing), v4.floorToSpacing(t, spacing) + spacing)] // 至少盖住含现价的那一格
+  const dn = tickOfMul(t, downLo), up = tickOfMul(t, upHi) // 价格下翼 / 上翼的远端 tick
+  const down: [number, number] | null = shares.down > 0 ? (tokenIs1 ? [core[1], v4.ceilToSpacing(dn, spacing)] : [v4.floorToSpacing(dn, spacing), core[0]]) : null
+  const upR: [number, number] | null = shares.up > 0 ? (tokenIs1 ? [v4.floorToSpacing(up, spacing), core[0]] : [core[1], v4.ceilToSpacing(up, spacing)]) : null
+  return { core, down, up: upR }
+}
 const rangeFor = (t: number) => {
   if (opt['tick-range']) return exactTickRange(opt['tick-range'], spacing)
   let lo: number, hi: number
-  if (priceRange.length) {
+  if (shape === 'squeeze') {
+    const { core, down, up } = squeezeTicks(t)
+    lo = Math.min(core[0], down?.[0] ?? core[0], up?.[0] ?? core[0]); hi = Math.max(core[1], down?.[1] ?? core[1], up?.[1] ?? core[1])
+  } else if (priceRange.length) {
     // 绝对价格：两端向外取整；若本来整体在现价一侧、取整后却跨过了现价，把靠近现价的那端收回一格，保持纯单边
     const ticks = priceRange.map(tickAtUsdgPerToken).sort((a, b) => a - b)
     ;[lo, hi] = [v4.floorToSpacing(ticks[0], spacing), v4.ceilToSpacing(ticks[1], spacing)]
@@ -179,7 +198,7 @@ const rangeText = ([lo, hi]: readonly [number, number]) => {
 type Leg = shapeMath.Leg
 function legsFor(t: number): Leg[] {
   const [lo, hi] = rangeFor(t)
-  const legs = shapeMath.shapeLegs({ lo, hi, t, spacing, shape, layers, tokenIs1 })
+  const legs = shape === 'squeeze' ? shapeMath.squeezeLegs({ t, spacing, tokenIs1, p: 1 / squeezeRate, ...squeezeTicks(t), shares: squeeze!.plan.shares }) : shapeMath.shapeLegs({ lo, hi, t, spacing, shape, layers, tokenIs1 })
   if (!legs.length) die(`区间 ${rangeLabel} 太窄，拆不出 ${shapeLabel} 的仓位`)
   return legs
 }
@@ -187,6 +206,7 @@ const legSide = (l: Leg, t: number) => shapeMath.legSide(l, t, tokenIs1)
 const legText = (l: Leg) => { const [a, b] = [usdgPerTokenAtTick(l.lo), usdgPerTokenAtTick(l.hi)].sort((x, y) => x - y); return `ticks [${l.lo}, ${l.hi}] = ${p6(a)} .. ${p6(b)}` }
 // 每 1 计价币基础单位的预算要配多少代币基础单位（p = 每个代币基础单位值多少计价币基础单位）：0 = 只要计价币，1/p = 只要代币
 const tokenPerUsdg = (t: number, p: number) => shapeMath.tokenPerUsdg(legsFor(t), t, p, tokenIs1)
+let squeezeRate = 1 // 市场汇率（代币基础单位 / 计价币基础单位），squeeze 的份额按价值分配要用；探测市场价后赋值
 // 预算拆分：已持有 held 个代币、按市场汇率 rate（代币基础单位 / 计价币基础单位）换币，换多少计价币能让各仓位 mint 后两边刚好用尽
 function swapShare(budget: bigint, held: bigint, refTick: number, rate: number) {
   const p = 1 / rate
@@ -270,6 +290,21 @@ let marketTick = tickFromProbe(probe.out)
 let marketPrice = usdgPerTokenAtTick(marketTick)
 const rate = Number(probe.out) / Number(QU)
 log(`市场价 ${p6(marketPrice)} ${Q.symbol}/${symbol}（${probe.via}）${initialized ? `，池价偏离 ${pct(deviation(tick, marketTick))}` : ''}`)
+squeezeRate = rate
+// squeeze：拉 GMGN 数据过闸门、推形状。闸门不过：真实进场直接拒绝（--yes 也不放行），演练只警告、照样把腿算出来给你看
+if (shape === 'squeeze') {
+  if (!['robinhood', 'bsc', 'ethereum'].includes(cfg.name)) die('squeeze 形状的数据源（GMGN）只支持 Robinhood / BSC / Ethereum')
+  const sqParams = squeezeParamsFromEnv()
+  const snap0 = await gmgnSnapshot(cfg.name as GmgnChain, token, HOUR_BARS).catch((e) => die(`GMGN 数据拉取失败: ${String(e?.message ?? e)}`))
+  const snap = initialized ? await attachPoolDepth(clients, snap0, pool, token) : { ...snap0, warnings: [...snap0.warnings, '新建池：池里还没有流动性，换手 / 深度按 GMGN 主池的计价币侧算'] } // 分母 = 我们要进的这个池里的计价币
+  squeeze = evaluateSqueeze(snap, Number(fmtU(usdgBudget)), sqParams)
+  for (const l of metricsText(squeeze.metrics)) log(`GMGN: ${l}`)
+  for (const w of squeeze.warnings) log(`GMGN 警告: ${w}`)
+  for (const g of squeeze.gates) log(`闸门 ${g.ok ? '✓' : '✗'} ${g.name}: ${g.text}`)
+  shapeLabel = squeeze.plan.label
+  // 闸门默认只提示：形状照样按数据算，照样开仓；开了 SQ_GATE_BLOCK 才拦真实进场（演练永远放行）
+  if (!squeeze.pass) { const why = squeeze.gates.filter((g) => !g.ok).map((g) => g.name).join(' / '); if (squeeze.block && !dryRun) die(`squeeze 闸门未通过（${why}），SQ_GATE_BLOCK=1 禁止进场`); log(`提示: squeeze 闸门未通过（${why}）${squeeze.block ? '，演练继续；真实进场会被拒绝' : '，闸门只提示不拦（SQ_GATE_BLOCK=0），照常按数据形状进场'}`) }
+}
 // 钱包原有代币按市场价折算，算作预算里已经换好的那部分；超过预算就只用预算能装下的那部分（其余留在钱包），计价币一侧按配比从钱包出
 let usdgSpend = usdgBudget // 本次可动用的计价币（换币 + LP）
 let tokenCap = false       // 持有代币超过预算：组 LP 时代币侧按预算截断
@@ -326,7 +361,8 @@ if (opt.json) {
     swap: planOffer ? { usdgIn: fmtU(estSwap), out: fmtT(planOffer.out), via: planOffer.via, text: planOffer.text } : null,
     lp: { usdg: fmtU(usdgSpend - estSwap), token: tokenCap ? '预算内的' : tokenStart > 0n ? '手里全部的' : '全部换到的', held: fmtT(tokenStart) },
     range: { tickLower: lo, tickUpper: hi, lo: p6(a), hi: p6(b), label: rangeLabel },
-    shape: { kind: shape, layers: shape === 'spot' ? 1 : layers, label: shapeLabel },
+    shape: { kind: shape, layers: shape === 'spot' ? 1 : shape === 'squeeze' ? planLegs.length : layers, label: shapeLabel },
+    squeeze: squeeze ? { pass: squeeze.pass, block: squeeze.block, gates: squeeze.gates, metrics: squeeze.metrics, plan: squeeze.plan, warnings: squeeze.warnings } : null,
     legs: planLegs.map((l, i) => { const [x, y] = [usdgPerTokenAtTick(l.lo), usdgPerTokenAtTick(l.hi)].sort((m, n) => m - n); return { tickLower: l.lo, tickUpper: l.hi, lo: p6(x), hi: p6(y), share: Math.round(legShares[i] * 100), side: legSide(l, refTick) } }),
     slippage: { swap: swapSlippage, lp: lpSlippage }, watch: opt.watch,
   }))
@@ -497,4 +533,5 @@ if (opt.watch) await watchToken({
   upperGrace: num('WATCH_UPPER_GRACE', env('WATCH_UPPER_GRACE', '600'), 0, 86400 * 30),
   stopLoss: num('--stop-loss', opt['stop-loss'], 0, 99), entry: Number(fmtU(usdgBudget)), // 刚建的仓位流水可能还没同步到，本金退回用本次预算
   via: env('EXIT_SWAP_VIA', 'best'), slippage: swapSlippage, lpSlippage, dryRun: false, json: opt.json,
+  squeeze: shape === 'squeeze' ? { chain: cfg.name as GmgnChain } : undefined,
 })

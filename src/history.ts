@@ -12,11 +12,12 @@ import { exitValuation, transferEvent } from './exit-valuation.ts'
 
 // in: 钱包 -> 池 的每种币数量（地址小写），out: 反向；direct: v3 由事件直接得到的每仓位数量
 type Direct = { action: 'add' | 'collect' | 'remove'; amount0: bigint; amount1: bigint; principal0: bigint; principal1: bigint }
-type ParsedTx = { block: bigint; time: number; mods: Mod[]; in: Map<string, bigint>; out: Map<string, bigint>; direct: Map<bigint, Direct> }
+type ParsedTx = { block: bigint; time: number; mods: Mod[]; in: Map<string, bigint>; out: Map<string, bigint>; direct: Map<bigint, Direct>; gas: bigint } // gas：钱包自己发的这笔交易花的原生币（wei）；别人发的算 0
 export type LedgerEvent = {
   tx: Hex; block: bigint; time: number; action: 'add' | 'collect' | 'remove'
   amount0: bigint; amount1: bigint; principal0: bigint; principal1: bigint // 本仓位在这笔交易里进/出的两种币；principal = 其中的本金部分（其余是手续费）
   tick: number // 当时池价
+  gas: bigint // 这笔交易的 gas 里分给本仓位的那份（wei）：同笔交易动了几个仓位就均分。只含建仓 / 撤仓 / 领取，换币和授权那几笔不在流水里
   valuationTx?: Hex // 极限池价时，改用紧随撤仓的实际卖币价格；tick 为成交价对应的小数 tick
 }
 
@@ -73,6 +74,7 @@ export async function refreshLedger(c: Clients, since: bigint) {
     if (i) await sleep(300)
     await Promise.all(list.slice(i, i + 15).map(async ([hash, meta]) => {
       const rc = await c.pub.getTransactionReceipt({ hash })
+      const gas = same(rc.from, c.wallet) ? rc.gasUsed * rc.effectiveGasPrice : 0n
       const mods = c.lp.ledger.parseMods(rc.logs)
       const inb = new Map<string, bigint>(), outb = new Map<string, bigint>()
       if (cp) for (const t of parseEventLogs({ abi: [transferEvent], logs: rc.logs })) {
@@ -82,8 +84,8 @@ export async function refreshLedger(c: Clients, since: bigint) {
       }
       const direct = new Map<bigint, Direct>()
       for (const e of c.lp.ledger.parseDirect?.(rc.logs) ?? []) direct.set(e.id, e)
-      if (mods.length || direct.size) S.txs.set(hash, { block: meta.block, time: meta.time, mods, in: inb, out: outb, direct })
-      else S.txs.set(hash, { block: meta.block, time: meta.time, mods: [], in: inb, out: outb, direct }) // 无关交易也记下，免得每次重拉回执
+      if (mods.length || direct.size) S.txs.set(hash, { block: meta.block, time: meta.time, mods, in: inb, out: outb, direct, gas })
+      else S.txs.set(hash, { block: meta.block, time: meta.time, mods: [], in: inb, out: outb, direct, gas }) // 无关交易也记下，免得每次重拉回执
     }))
   }
   S.scannedFrom = since
@@ -104,6 +106,7 @@ export async function positionLedger(c: Clients, p: Pick<RawPosition, 'id' | 'po
     const extreme = (tk: number) => tk <= v4.MIN_TICK + 1 || tk >= v4.MAX_TICK - 1
     if (extreme(poolTick) && c.lp.ledger.priceEventsAt && mine[0].logIndex !== undefined) [sqrtP, poolTick] = await operationSlot(c, p.pool, t.block, mine[0].logIndex)
     let tick = poolTick, valuationTx: Hex | undefined
+    const gas = t.gas / BigInt(new Set([...t.mods.map((m) => m.id), ...t.direct.keys()]).size || 1)
     // 操作时池价仍在极限（币被砸到归零 / 无穷）：撤出的代币按池价估会把本金记成 0，撤仓那笔改按紧随其后的实际卖币价。
     // 加仓 / 只领手续费 / 只撤出计价币的按池价估本来就对（崩盘币 ≈ 0、计价币按面值），别抛错把整份流水弄丢
     const quoteIs0 = same(p.pool.currency0, c.Q.address), quoteIs1 = same(p.pool.currency1, c.Q.address)
@@ -113,7 +116,7 @@ export async function positionLedger(c: Clients, p: Pick<RawPosition, 'id' | 'po
       tick = price.tick; valuationTx = price.tx
     }
     const d = t.direct.get(p.id)
-    if (d) { events.push({ tx, block: t.block, time: t.time, action: d.action, amount0: d.amount0, amount1: d.amount1, principal0: min(d.principal0, d.amount0), principal1: min(d.principal1, d.amount1), tick, valuationTx }); continue }
+    if (d) { events.push({ tx, block: t.block, time: t.time, action: d.action, amount0: d.amount0, amount1: d.amount1, principal0: min(d.principal0, d.amount0), principal1: min(d.principal1, d.amount1), tick, valuationTx, gas }); continue }
     const action = delta > 0n ? 'add' : delta < 0n ? 'remove' : 'collect'
     const flow = action === 'add' ? t.in : t.out
     const total: [bigint, bigint] = [flow.get(c0) ?? 0n, flow.get(c1) ?? 0n]
@@ -139,7 +142,7 @@ export async function positionLedger(c: Clients, p: Pick<RawPosition, 'id' | 'po
       }
     }
     // amountsForLiquidity 向上取整，没有手续费时本金可能比实际多 1 wei：本金不超过实际数量
-    events.push({ tx, block: t.block, time: t.time, action, amount0, amount1, principal0: min(principal0, amount0), principal1: min(principal1, amount1), tick, valuationTx })
+    events.push({ tx, block: t.block, time: t.time, action, amount0, amount1, principal0: min(principal0, amount0), principal1: min(principal1, amount1), tick, valuationTx, gas })
   }
   return events.sort((a, b) => (a.block < b.block ? -1 : a.block > b.block ? 1 : 0))
 }

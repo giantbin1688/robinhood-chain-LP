@@ -60,7 +60,11 @@ export async function positionLedger(c: SolClients, p: PosKey, full = false): Pr
     before = page[page.length - 1].signature
   }
   const events = [...(cur?.events ?? [])]
-  for (const tx of await fetchTxs(c, fresh)) { if (!tx) continue; const ev = await c.lp.parseLedger(tx, p).catch(() => null); if (ev) events.push(ev) }
+  for (const tx of await fetchTxs(c, fresh)) {
+    if (!tx) continue
+    const ev = await c.lp.parseLedger(tx, p).catch(() => null)
+    if (ev) { ev.fee = tx.transaction.message.accountKeys[0]?.pubkey.equals(c.wallet) ? tx.meta?.fee ?? 0 : 0; events.push(ev) } // 交易费（含优先费）记在付款人是自己钱包的交易上
+  }
   events.sort((a, b) => a.time - b.time || a.block - b.block)
   // 补价格：先 Gecko，再用邻近事件的价格
   const q = quoteSide(p.pool)

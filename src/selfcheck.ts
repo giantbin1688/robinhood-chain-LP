@@ -104,6 +104,53 @@ for (const [binId, binStep] of [[-5721, 4], [-823, 100], [0, 1], [1200, 25]] as 
 }
 assert.ok(Math.abs(binPrice(-5721, 4) * 1e3 - 101.475) < 0.01, 'SOL/USDC active bin -5721 ≈ 101.475 USDC/SOL')
 
+// squeeze 形状：strategy.ts 的闸门 / 形状公式用固定样本测；shape.ts 的 squeezeLegs 三块的资金份额要和公式给的一致
+{
+  const { evaluateSqueeze, DEFAULT_SQUEEZE, squeezeParamsFromEnv } = await import('./strategy.ts')
+  const { squeezeLegs, legShares } = await import('./shape.ts')
+  // 1 小时 K 线：前 50 分钟在 0.024~0.036 之间大幅摆动，最近 10 分钟在 0.03 附近 ±0.6% 横盘
+  const bars = Array.from({ length: 60 }, (_, i) => { const c = i < 50 ? 0.03 * (1 + 0.2 * Math.sin(i / 3)) : 0.03 * (1 + 0.006 * Math.sin(i)); return { time: i * 60_000, open: c, high: c * 1.002, low: c * 0.998, close: c, volume: 1000 } })
+  const info = { symbol: 'T', holderCount: 5000, liquidityUsd: 200_000, price: 0.03, price1m: 0.03, price5m: 0.0299, price1h: 0.03, price24h: 0.03, volume1m: 0, volume5m: 700_000, volume1h: 4_200_000, volume24h: 0, buyVolume5m: 500_000, sellVolume5m: 200_000, buyVolume1h: 0, sellVolume1h: 0, buys5m: 0, sells5m: 0, sells24h: 500, swaps5m: 0, swaps1h: 0, pool: { address: '0x', exchange: 'uniswap_v4', quoteSymbol: 'USDG', baseReserveUsd: 100_000, quoteReserveUsd: 120_000, liquidityUsd: 220_000, createdAt: 0 }, top10Rate: 0.2 }
+  const security = { honeypot: false, canNotSell: false, buyTax: 0, sellTax: 0, renounced: true, top10Rate: 0.2 }
+  const depth = { id: '0x1', label: 'v4 2.5% USDG 池', quoteSymbol: 'USDG', quoteUsd: 160_000, tokenUsd: 40_000, source: 'chain' as const, feePips: 25_000, spacing: 250 }
+  const cold5 = { ...info, buyVolume5m: 100_000, sellVolume5m: 50_000 }
+  const ok = evaluateSqueeze({ info, security, bars, at: 0, warnings: [], poolDepth: depth }, 500)
+  assert.ok(ok.pass, 'sample passes all gates: ' + ok.gates.filter((g) => !g.ok).map((g) => g.text).join('; '))
+  assert.ok(Math.abs(ok.metrics.heat - 700_000 / (4_200_000 / 12)) < 1e-9, 'heat = vol5 / (vol1h / 12)')
+  assert.ok(Math.abs(ok.metrics.turnover - 700_000 / 160_000) < 1e-9, 'turnover = vol5 / USDG inside the target pool')
+  assert.ok(ok.metrics.compression !== null && ok.metrics.compression < 0.1, 'a 10-minute flat window inside a wide hour compresses')
+  assert.ok(Math.abs(ok.plan.w - 0.05) < 1e-9, 'flat window narrower than 2 × 2.5% fee -> core floor = ±5%')
+  assert.ok(ok.plan.upHi - 1 > 0.15 && 1 - ok.plan.downLo > 0.15, 'wings reach the hour high / low, not a fixed multiple')
+  assert.ok(ok.plan.upHi - 1 > 1 - ok.plan.downLo, 'buy-heavy tape stretches the upper wing')
+  assert.ok(ok.plan.insideShare !== null && Math.abs(ok.plan.shares.core - Math.max(ok.plan.insideShare, 0.3)) < 1e-9, 'core share = time spent inside the core band')
+  assert.ok(Math.abs(ok.plan.shares.core + ok.plan.shares.up + ok.plan.shares.down - 1) < 1e-9)
+  assert.ok(Math.abs(evaluateSqueeze({ info, security, bars, at: 0, warnings: [], poolDepth: { ...depth, feePips: 100_000 } }, 500).plan.w - 0.2) < 1e-9, 'a 10% fee pool gets a ±20% core floor')
+  const trending = evaluateSqueeze({ info, security, bars: bars.slice(0, 50), at: 0, warnings: [], poolDepth: depth }, 500)
+  assert.ok(!trending.gates.find((g) => g.key === 'compress')!.ok && trending.plan.w > 0.05, 'a swinging window fails compression and widens the core to its real range')
+  const cold = evaluateSqueeze({ info: cold5, security, bars, at: 0, warnings: [], poolDepth: depth }, 500)
+  assert.ok(!cold.gates.find((g) => g.key === 'heat')!.ok && cold.gates.filter((g) => !g.ok).length === 1, 'only the heat gate fails when the tape cools below the hour average')
+  assert.equal(cold.block, false, 'gates only warn by default')
+  assert.equal(evaluateSqueeze({ info: cold5, security, bars, at: 0, warnings: [], poolDepth: depth }, 500, { ...DEFAULT_SQUEEZE, gateBlock: 1 }).block, true, 'SQ_GATE_BLOCK=1 blocks a failed gate')
+  assert.ok(!evaluateSqueeze({ info, security, bars: [], at: 0, warnings: [], poolDepth: depth }, 500).gates.find((g) => g.key === 'compress')!.ok, 'no kline -> compression gate fails instead of passing silently')
+  assert.equal(evaluateSqueeze({ info: { ...info, sellVolume5m: 0, buyVolume5m: 700_000 }, security, bars, at: 0, warnings: [], poolDepth: depth }, 500).plan.shares.down, 0, 'skew +1 drops the lower wing')
+  assert.ok(!evaluateSqueeze({ info, security, bars, at: 0, warnings: [], poolDepth: depth }, 20_000).gates.find((g) => g.key === 'depth')!.ok, 'a budget above 5% of pool USDG fails the depth gate')
+  assert.equal(squeezeParamsFromEnv({ SQ_HOT_MIN: '2', SQ_WINDOW_MIN: 'abc' }).hotMin, 2, 'env override')
+  assert.equal(squeezeParamsFromEnv({ SQ_WINDOW_MIN: 'abc' }).windowMin, DEFAULT_SQUEEZE.windowMin, 'garbage falls back to default')
+  // 腿：USDG 是 currency0（tokenIs1），tick 311511、间距 100；核心 ±1.5%、下翼到 −13%（上翼份额 0）。p = 每个代币基础单位值多少 USDG 基础单位
+  const t = 311511, spacing = 100, tokenIs1 = true, p = 0.03 * 10 ** (6 - 18)
+  const mul = (m: number) => t - Math.log(m) / Math.log(1.0001)
+  const core: [number, number] = [Math.floor(mul(1.015) / spacing) * spacing, Math.ceil(mul(0.985) / spacing) * spacing]
+  const legs = squeezeLegs({ t, spacing, tokenIs1, p, core, down: [core[1], Math.ceil(mul(0.87) / spacing) * spacing], up: null, shares: { core: 0.4, down: 0.6, up: 0 } })
+  assert.equal(legs.length, 4, '2 core layers + 2 lower-wing segments')
+  assert.ok(legs.every((l) => l.g >= 1), 'weights normalised so the thinnest leg is 1')
+  const shares = legShares(legs, t, p, tokenIs1)
+  const coreShare = legs.reduce((s, l, i) => s + (l.lo <= t && t < l.hi ? shares[i] : 0), 0)
+  assert.ok(Math.abs(coreShare - 0.4) < 1e-6, `core legs hold 40% of the budget, got ${coreShare}`)
+  const far = legs.findIndex((l) => l.hi === Math.max(...legs.map((x) => x.hi))), near = legs.findIndex((l) => !(l.lo <= t && t < l.hi) && l.hi !== Math.max(...legs.map((x) => x.hi)))
+  assert.ok(shares[far] > shares[near], 'outer wing segment is heavier than the inner one')
+  assert.equal(squeezeLegs({ t, spacing, tokenIs1, p, core, down: [core[1], core[1] + 50], up: null, shares: { core: 0.4, down: 0.6, up: 0 } }).length, 2, 'a wing thinner than one spacing is dropped')
+}
+
 // 网页内联脚本只做语法解析（不执行）：一个重复声明就会让整个页面不动，右上角停在"连接中…"
 for (const [, src] of readFileSync(new URL('./ui/index.html', import.meta.url), 'utf8').matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)) new Function(src)
 

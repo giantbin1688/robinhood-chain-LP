@@ -8,6 +8,7 @@
     "launch": "node --env-file=.env --env-file=params.env --import tsx src/run.ts launch",
     "exit": "node --env-file=.env --env-file=params.env --import tsx src/run.ts exit",
     "watch": "node --env-file=.env --env-file=params.env --import tsx src/run.ts watch",
+    "scan": "node --env-file=.env --env-file=params.env --import tsx src/run.ts scan",
     "ui": "node --env-file=.env --env-file=params.env --import tsx src/ui/server.ts",
     "selfcheck": "node --import tsx src/selfcheck.ts",
     "typecheck": "tsc --noEmit"

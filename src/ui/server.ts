@@ -20,7 +20,10 @@ import type { Pool } from '../lp.ts'
 import { readTickDetail } from '../tick-detail.ts'
 import { listTokenPools } from '../pools.ts'
 import * as sig from '../signals.ts'
-import { masked, rpcUrl as effectiveRpc, saveSettings, secretValues, settings, solanaCfg } from '../settings.ts'
+import { gmgnApiKey, masked, rpcUrl as effectiveRpc, saveSettings, secretValues, settings, solanaCfg } from '../settings.ts'
+import { snapshot as gmgnSnapshot } from '../gmgn.ts'
+import { SQUEEZE_FIELDS, squeezeParamSources } from '../strategy.ts'
+import { scanSqueeze } from '../squeeze-scan.ts'
 import { PROTOCOL_LABEL as SOL_PROTOCOL_LABEL, SOL_CHAIN, isSolAddress, type SolProtocol } from '../sol/common.ts'
 import * as solUi from '../sol/ui.ts'
 
@@ -180,13 +183,14 @@ async function ensureLedger(x: Ctx, full: boolean) {
 }
 const usdAt = (qd: number, tokenIs1: boolean, decimals: number, priceAt: (t: number) => number) => (a0: bigint, a1: bigint, tick: number) => { const [u, t] = tokenIs1 ? [a0, a1] : [a1, a0]; return Number(u) / 10 ** qd + (Number(t) / 10 ** decimals) * priceAt(tick) }
 function sumLedger(events: LedgerEvent[], usd: ReturnType<typeof usdAt>) {
-  let deposits = 0, fees = 0, withdrawn = 0, mintedAt = 0
+  let deposits = 0, fees = 0, withdrawn = 0, mintedAt = 0, gasWei = 0n
   for (const e of events) {
     const total = usd(e.amount0, e.amount1, e.tick), principal = usd(e.principal0, e.principal1, e.tick)
     if (e.action === 'add') { deposits += total; if (!mintedAt) mintedAt = e.time }
     else { withdrawn += principal; fees += total - principal }
+    gasWei += e.gas
   }
-  return { mintedAt, deposits, fees, withdrawn }
+  return { mintedAt, deposits, fees, withdrawn, gasWei }
 }
 async function ledgerSummary(x: Ctx, p: Position, decimals: number, priceAt: (t: number) => number) {
   if (!x.ledgerOk) return null
@@ -312,7 +316,8 @@ async function history(x: Ctx, idStr: string) {
 
 // ---- 盈亏日历：已平仓仓位各自整段的盈亏 = 拿回本金 + 手续费 − 存入（每笔按当时池价折算），按平仓日归类由网页做 ----
 // 第一次要从创世块起拉钱包全部 LP 交易的回执、逐笔读当时池价，几十秒；平仓后的数字不会再变，算过一次就缓存
-type ClosedRow = { id: string; token: Address; symbol: string; fee: number; feeText: string; openedAt: number; closedAt: number; closedTx: Hex; deposits: number; withdrawn: number; fees: number; pnl: number; valuationTx?: Hex }
+// gas：这个仓位的建仓 / 撤仓 / 领取交易的 gas（同笔多仓位均分），按当前原生币价折算成美元；pnl 已扣掉它。换币、授权的 gas 不在仓位流水里，不含
+type ClosedRow = { id: string; token: Address; symbol: string; fee: number; feeText: string; openedAt: number; closedAt: number; closedTx: Hex; deposits: number; withdrawn: number; fees: number; gas: number; pnl: number; valuationTx?: Hex }
 async function closedList(x: Ctx) {
   const { c } = x, { lp } = c
   if (!c.rpcIsAlchemy) throw new Error(`资金流水需要 Alchemy 节点（${c.cfg.rpcEnv}）`)
@@ -322,6 +327,7 @@ async function closedList(x: Ctx) {
   const keyOf = new Map<Hex, Pool | null>()
   for (const pid of poolIds) keyOf.set(pid, await lp.poolById(pid).catch(() => null))
   const cents = (v: number) => Math.round(v * 100) / 100
+  const nativeUsd = list.length ? await nativePriceUsd(c).catch(() => 0) : 0
   let nonUsdg = 0, failed = 0
   for (const q of list) { // 逐个算：每笔都要按当时的区块读池价（归档调用），并发会撞 Alchemy 的每秒额度
     const pool = keyOf.get(q.poolId)
@@ -332,7 +338,8 @@ async function closedList(x: Ctx) {
       const m = await metaOf(x, token)
       const events=await positionLedger(c,p)
       const s = sumLedger(events, usdAt(c.Q.decimals, tokenIs1, m.decimals, priceFn(x, tokenIs1, m.decimals)))
-      x.closedCache.set(q.id, { id: q.id.toString(), token, symbol: m.symbol, fee: pool.fee / 10000, feeText: feeText(pool), openedAt: s.mintedAt, closedAt: q.closed.time, closedTx: q.closed.tx, deposits: cents(s.deposits), withdrawn: cents(s.withdrawn), fees: cents(s.fees), pnl: cents(s.withdrawn + s.fees - s.deposits), valuationTx:events.find(e=>e.valuationTx)?.valuationTx })
+      const gas = (Number(s.gasWei) / 1e18) * nativeUsd
+      x.closedCache.set(q.id, { id: q.id.toString(), token, symbol: m.symbol, fee: pool.fee / 10000, feeText: feeText(pool), openedAt: s.mintedAt, closedAt: q.closed.time, closedTx: q.closed.tx, deposits: cents(s.deposits), withdrawn: cents(s.withdrawn), fees: cents(s.fees), gas: cents(gas), pnl: cents(s.withdrawn + s.fees - s.deposits - gas), valuationTx:events.find(e=>e.valuationTx)?.valuationTx })
     } catch (e: any) { failed++; log(`仓位 ${q.id} 平仓盈亏读取失败: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`) }
   }
   return { closed: [...x.closedCache.values()].sort((a, b) => a.closedAt - b.closedAt), nonUsdg, failed }
@@ -359,7 +366,7 @@ async function state(sel: Sel) {
     ...Object.values(CHAINS).map((ch) => ({ name: ch.name as string, label: ch.label, quote: ch.quote.symbol, quotes: [ch.quote.symbol], native: ch.native.symbol, protocols: ch.protocols.map((p) => ({ name: p as string, label: protocolLabel(ch.name, p) })), rpc: !!effectiveRpc(ch.name, ch.rpcEnv), rpcEnv: ch.rpcEnv })),
     { name: 'solana', label: SOL_CHAIN.label, quote: sel.quote, quotes: ['SOL', 'USDC'], native: 'SOL', protocols: SOL_CHAIN.protocols.map((p) => ({ name: p as string, label: SOL_PROTOCOL_LABEL[p] })), rpc: !!effectiveRpc('solana', SOL_CHAIN.rpcEnv), rpcEnv: SOL_CHAIN.rpcEnv },
   ]
-  const common = { params, chains, chain: sel.chain, protocol: sel.protocol, okx: !!process.env.OKX_API_KEY, uniswapKey: !!process.env.UNISWAP_API_KEY, jupiterKey: !!solanaCfg().jupiterApiKey, jobs: [...jobs.values()].map(summary), telegram: sig.telegramConfigured() }
+  const common = { params, chains, chain: sel.chain, protocol: sel.protocol, okx: !!process.env.OKX_API_KEY, uniswapKey: !!process.env.UNISWAP_API_KEY, jupiterKey: !!solanaCfg().jupiterApiKey, gmgn: !!gmgnApiKey(), jobs: [...jobs.values()].map(summary), telegram: sig.telegramConfigured() }
   if (sel.chain === 'solana') {
     const base = { ...common, wallet: solWallet, protocolLabel: SOL_PROTOCOL_LABEL[sel.protocol as SolProtocol], quote: sel.quote, native: 'SOL', explorer: SOL_CHAIN.explorer }
     if (!solWallet) return { ...base, usdg: null, eth: null, ethPrice: null, alchemy: false }
@@ -396,7 +403,8 @@ function launchArgs(b: any, sel: Sel) {
   }
   else if (b.rangeMode === 'price') args.push(`--price-range=${str(b.priceRange)}`)
   else args.push(`--range=${str(b.range)}`)
-  if (['curve', 'bidask'].includes(str(b.shape))) { args.push(`--shape=${str(b.shape)}`); if (str(b.layers)) args.push(`--layers=${str(b.layers)}`) }
+  if (str(b.shape) === 'squeeze') { if (sel.chain === 'solana') throw new Error('squeeze 形状暂不支持 Solana'); args.push('--shape=squeeze') } // 区间由数据推导，前面推的 --range 会被忽略
+  else if (['curve', 'bidask'].includes(str(b.shape))) { args.push(`--shape=${str(b.shape)}`); if (str(b.layers)) args.push(`--layers=${str(b.layers)}`) }
   else args.push('--shape=spot')
   args.push(b.dryRun ? '--dry-run' : '--yes')
   if (b.watch && !b.dryRun) { args.push('--watch'); const sl = stopLossArg(b, sel); if (sl) args.push(sl) }
@@ -504,7 +512,17 @@ const server = createServer(async (req, res) => {
       res.write(`data: ${JSON.stringify({ type: 'rht', status: sig.rhtStatus() })}\n\n`)
       return
     }
-    // ---- 设置页：Telegram / RPC 节点 / Solana 选项。GET 只回"配没配 + 末 4 位"，原值不出服务 ----
+    // ---- squeeze 扫描：GMGN 数据 + strategy.ts 公式，只读、不建仓；进场页选 squeeze 形状时点"扫描"调用 ----
+    if (req.method === 'GET' && url.pathname === '/api/squeeze') {
+      const sel = selOf(url.searchParams), token = str(url.searchParams.get('token')), budget = Number(url.searchParams.get('usdg') || '0')
+      if (sel.chain === 'solana') throw new Error('squeeze 的数据源（GMGN）暂不支持 Solana')
+      if (!isAddress(token)) throw new Error('代币地址不合法')
+      if (!(budget > 0)) throw new Error('预算必须大于 0')
+      const poolId = str(url.searchParams.get('pool')), feeQ = Number(url.searchParams.get('fee') || '0')
+      if (poolId && !/^0x[0-9a-fA-F]{64}$|^0x[0-9a-fA-F]{40}$/.test(poolId)) throw new Error('池 id 不合法')
+      return json(res, 200, await scanSqueeze((await ctxOf(sel)).c, token as Address, budget, { poolId: poolId || undefined, fee: feeQ > 0 ? Math.round(feeQ * 10_000) : undefined }))
+    }
+    // ---- 设置页：Telegram / RPC 节点 / Solana 选项 / GMGN key。GET 只回"配没配 + 末 4 位"，原值不出服务 ----
     if (req.method === 'GET' && url.pathname === '/api/settings') {
       const st = settings()
       return json(res, 200, {
@@ -517,6 +535,8 @@ const server = createServer(async (req, res) => {
           uniswapUrl: st.api.uniswapUrl,
         },
         solana: { jupiterApiKey: { set: masked(st.solana.jupiterApiKey), env: !!process.env.JUPITER_API_KEY }, priorityFee: st.solana.priorityFee, historyTxs: st.solana.historyTxs },
+        gmgn: { apiKey: { set: masked(st.gmgn.apiKey), env: !!process.env.GMGN_API_KEY } },
+        squeeze: squeezeParamSources(), // 每个 SQ_* 的生效值 + 来源（settings / env / default）
       })
     }
     if (req.method === 'POST' && url.pathname === '/api/settings') {
@@ -537,11 +557,30 @@ const server = createServer(async (req, res) => {
         saveSettings(); solCtxs.clear()
         return json(res, 200, { ok: true })
       }
+      if (b.section === 'gmgn') { // 免费 key 只有读权限；保存后下一次 squeeze 扫描 / 进场子进程直接读 settings.json
+        const v = keep(str(b.apiKey), st.gmgn.apiKey)
+        if (v && !/^[A-Za-z0-9_-]{8,128}$/.test(v)) throw new Error('GMGN API key 格式不对（gmgn.ai/ai 申请后复制整串）')
+        st.gmgn.apiKey = v; saveSettings()
+        return json(res, 200, { ok: true })
+      }
+      if (b.section === 'squeeze') { // 明文数字框：空 = 清除（回退 params.env / 默认）；越界拒绝
+        const next: Record<string, string> = {}
+        for (const f of SQUEEZE_FIELDS) {
+          const v = str(b[f.key]); if (!v) continue
+          const n = Number(v); if (!(Number.isFinite(n) && n >= f.min && n <= f.max)) throw new Error(`${f.label}（${f.key}）要是 ${f.min}~${f.max} 的数字`)
+          next[f.key] = String(n)
+        }
+        if (Number(next.SQ_CORE_MIN ?? process.env.SQ_CORE_MIN ?? 1.5) > Number(next.SQ_CORE_MAX ?? process.env.SQ_CORE_MAX ?? 6)) throw new Error('核心半宽下限不能大于上限')
+        if (Number(next.SQ_WING_MIN ?? process.env.SQ_WING_MIN ?? 10) > Number(next.SQ_WING_MAX ?? process.env.SQ_WING_MAX ?? 40)) throw new Error('翼外沿下限不能大于上限')
+        st.squeeze = next; saveSettings()
+        return json(res, 200, { ok: true })
+      }
       throw new Error('未知的设置项')
     }
     if (req.method === 'POST' && url.pathname === '/api/settings/test') {
       const b = await readBody(req)
       if (b.section === 'telegram') { await sig.telegram('rh-uni 测试消息：Telegram 推送已连通'); return json(res, 200, { ok: true }) }
+      if (b.section === 'gmgn') { const s = await gmgnSnapshot('robinhood', '0x5fc5360d0400a0fd4f2af552add042d716f1d168', 5); return json(res, 200, { ok: true, text: `GMGN 连通：USDG 持有人 ${s.info.holderCount.toLocaleString('en-US')}，K 线 ${s.bars.length} 根` }) } // 用 USDG 探一下 key 能不能用（它没有成交量，只看持有人和 K 线接口通不通）
       throw new Error('未知的设置项')
     }
     // ---- 信号：FOMO 交易者名单 + rhtrenches 推来的买卖 + 安全检查（signals.ts）----
@@ -569,7 +608,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/positions/classify') {
       const b=await readBody(req), sel=selOf(b), shape=str(b.shape)
       if(sel.chain==='solana') throw new Error('此分类入口目前支持 EVM 仓位')
-      if(!['spot','curve','bidask'].includes(shape)) throw new Error('分类必须是 Spot / Curve / Bid-Ask')
+      if(!['spot','curve','bidask','squeeze'].includes(shape)) throw new Error('分类必须是 Spot / Curve / Bid-Ask / Squeeze')
       const ids=str(b.positions).split(',')
       if(!ids.length||ids.length>64||ids.some(id=>!/^\d+$/.test(id))||new Set(ids).size!==ids.length) throw new Error('仓位 ID 无效')
       const x=await ctxOf(sel), ps=await findPositions(x.c,undefined,ids.map(id=>BigInt(id)))

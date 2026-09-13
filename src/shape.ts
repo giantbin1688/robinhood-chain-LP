@@ -2,15 +2,17 @@
 //   spot   一个仓位
 //   curve  layers 个同心嵌套仓位，每层宽度减半、权重相同 -> 现价附近被所有层覆盖，最厚；越往外越薄
 //   bidask 现价两侧各 layers 段互不重叠，第 k 段权重 k -> 离现价越远越厚；含现价的那一格空着（跌买涨卖，不做市）
+//   squeeze 数据驱动的组合（strategy.ts 给参数）：现价附近一个 2 层 curve 核心 + 两侧各 2 段 bidask 翼，三块的资金份额由公式定（squeezeLegs）
 // 单边区间（整体在现价一侧）以靠近现价的那条边为锚点。区间太窄时相邻层会取整到同一组 tick，合并；拆不出来返回 []
 import * as v4 from './v4.ts'
 
-export type Shape = 'spot' | 'curve' | 'bidask'
+export type Shape = 'spot' | 'curve' | 'bidask' | 'squeeze'
 export type Leg = { lo: number; hi: number; g: number } // g 是各仓位的流动性权重（同一份流动性 L 按 g 倍分配）
 
 export function shapeLegs(o: { lo: number; hi: number; t: number; spacing: number; shape: Shape; layers: number; tokenIs1: boolean }): Leg[] {
   const { lo, hi, t, spacing, shape, layers } = o
   if (shape === 'spot') return [{ lo, hi, g: 1 }]
+  if (shape === 'squeeze') throw new Error('squeeze 形状要用 squeezeLegs（需要 strategy 给的核心 / 翼参数）')
   const below = hi <= t, above = lo > t
   const [c0, c1] = [v4.floorToSpacing(t, spacing), v4.floorToSpacing(t, spacing) + spacing] // 含现价的那一格
   const raw: Leg[] = []
@@ -34,6 +36,25 @@ export function shapeLegs(o: { lo: number; hi: number; t: number; spacing: numbe
   for (const l of raw) { const p = legs[legs.length - 1]; if (p && p.lo === l.lo && p.hi === l.hi) p.g += l.g; else legs.push({ ...l }) }
   if (o.tokenIs1) legs.reverse() // 按代币价格从低到高排（代币是 currency1 时 tick 越大价格越低）
   return legs
+}
+
+// squeeze：核心 = 2 层 curve 覆盖 [core.lo, core.hi]（含现价），下翼 / 上翼 = 各 2 段 bidask（靠核心的一段薄、远端厚），tick 边界由调用方按价格倍数算好。
+// 三块按 shares 分预算（按现价折成计价币的价值份额）：先各自按内部权重生成腿，算出每块在 tick t 的单位价值，再把 g 缩放到目标份额；
+// share 为 0 或区间不足一格的翼直接省掉。p = 每个代币基础单位值多少计价币基础单位（价值换算用）。返回 [] = 核心都拆不出来
+export function squeezeLegs(o: { t: number; spacing: number; tokenIs1: boolean; p: number; core: [number, number]; down: [number, number] | null; up: [number, number] | null; shares: { core: number; down: number; up: number } }): Leg[] {
+  const { t, spacing, tokenIs1, p } = o
+  const sp = Math.sqrt(v4.priceAtTick(t))
+  const value = (l: Leg) => { const [a0, a1] = unitAmounts(sp, l.lo, l.hi); return l.g * ((tokenIs1 ? a1 : a0) * p + (tokenIs1 ? a0 : a1)) }
+  const block = (legs: Leg[], share: number) => { const v = legs.reduce((s, l) => s + value(l), 0); return v > 0 && share > 0 ? legs.map((l) => ({ ...l, g: (l.g * share) / v })) : [] }
+  const core = shapeLegs({ lo: o.core[0], hi: o.core[1], t, spacing, shape: 'curve', layers: 2, tokenIs1 })
+  if (!core.length) return []
+  const wing = (r: [number, number] | null, share: number) => (r && r[1] - r[0] >= spacing && share > 0 ? block(shapeLegs({ lo: r[0], hi: r[1], t, spacing, shape: 'bidask', layers: 2, tokenIs1 }), share) : [])
+  const legs = [...block(core, o.shares.core), ...wing(o.down, o.shares.down), ...wing(o.up, o.shares.up)]
+  const gMin = Math.min(...legs.map((l) => l.g))
+  const out = legs.map((l) => ({ ...l, g: l.g / gMin })) // 归一到最小权重 = 1，planMints 的 floor(L × g) 不会把小腿抹成 0
+  out.sort((x, y) => x.lo - y.lo || x.hi - y.hi)
+  if (tokenIs1) out.reverse()
+  return out
 }
 
 // 仓位相对现价的位置：tick 比现价低的一侧全是 currency1，高的一侧全是 currency0

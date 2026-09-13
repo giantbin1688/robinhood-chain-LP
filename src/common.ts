@@ -3,12 +3,13 @@ import { createHmac } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, statSync, writeFileSync } from 'node:fs'
 import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici'
 import {
-  createPublicClient, createWalletClient, defineChain, encodeFunctionData, fallback, formatUnits, getAddress, http, maxUint160, maxUint256, parseAbi,
+  createPublicClient, createWalletClient, defineChain, encodeFunctionData, fallback, formatUnits, getAddress, http, maxUint160, maxUint256, parseAbi, parseAbiItem, parseEventLogs,
   type Address, type Hex, type PublicClient, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { rpcUrl as settingsRpcUrl, uniswapApiUrl } from './settings.ts'
 import * as v4 from './v4.ts'
+const transferEvent = parseAbiItem('event Transfer(address indexed from,address indexed to,uint256 value)')
 import { CHAINS, selectChain, type ChainConfig, type ChainName, type ProtocolName } from './chains.ts'
 import { makeLp, type Lp, type Pool } from './lp.ts'
 
@@ -241,12 +242,17 @@ export function txKit(c: Clients, usd: (wei: bigint) => string, symOf: (t: Addre
 // 交易确认后读余额，要求节点至少已经到了那笔交易的区块（minBlock，一般传 kit.stats.lastBlock）。
 // 备用的公共节点常比 Alchemy 慢几秒；Alchemy 被限流时读请求会落到它那里，读回来的是交易之前的旧余额——
 // 撤仓后就发生过：按旧余额只卖了钱包里原有的 14 个币，撤出来的 43 万个原样留在钱包。余额和区块号放在同一批请求里问同一个节点，落后就等一秒再读
+// 余额钉在 minBlock（最后一笔已确认交易的区块）上读：Alchemy 后面是一组副本，"区块高度到了"和"余额是哪个副本答的"不是同一个请求，
+// 曾经高度已过卖币区块、balanceOf 却答了卖币前的旧值，把成功的卖币报成"没有收到代币"。钉了区块答案就唯一；副本还没这一块会报错，等一秒再问
 export async function balanceFresh(c: Pick<Clients, 'pub' | 'wallet'>, token: Address, minBlock: bigint) {
+  const read = (blockNumber?: bigint) => c.pub.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [c.wallet], ...(blockNumber ? { blockNumber } : {}) })
+  if (minBlock <= 0n) return read()
   for (let i = 1; ; i++) {
-    const [bal, head] = await Promise.all([c.pub.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [c.wallet] }), c.pub.getBlockNumber({ cacheTime: 0 })])
-    if (head >= minBlock || i >= 30) return bal
-    if (i === 1) log(`节点区块 ${head} 还没到交易区块 ${minBlock}，等它跟上再读余额…`)
-    await sleep(1000)
+    try { return await read(minBlock) } catch (e: any) {
+      if (i >= 30) return read()
+      if (i === 1) log(`节点还没到交易区块 ${minBlock}（${String(e?.shortMessage ?? e?.message).split('\n')[0].slice(0, 80)}），等它跟上再读余额…`)
+      await sleep(1000)
+    }
   }
 }
 
@@ -326,19 +332,23 @@ export async function prepareSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typ
   return { via: 'Uniswap', tx, refGas: tx.gasLimit }
 }
 // 执行一个报价：授权 -> 发交易。返回收到的 tokenOut 数量
+// 收到多少以回执里 tokenOut 转给钱包的 Transfer 为准（这是这笔交易自己的记录，不依赖节点状态新不新）；回执里没有才退回读余额差
 export async function executeSwap(o: SwapOffer, d: SwapDeps, kit: ReturnType<typeof txKit>, c: Clients, tokenIn: Address, tokenOut: Address, label: string) {
   const before = await balanceFresh(c, tokenOut, kit.stats.lastBlock)
   const p = await prepareSwap(o, d, kit, c, tokenIn)
-  await kit.sendEstimated(`${label} (${p.via})`, p.tx, p.refGas)
+  const rc = await kit.sendEstimated(`${label} (${p.via})`, p.tx, p.refGas)
+  const lc = (a: string) => a.toLowerCase()
+  const fromLogs = parseEventLogs({ abi: [transferEvent], logs: rc.logs }).filter((t) => lc(t.address) === lc(tokenOut) && lc(t.args.to) === lc(c.wallet)).reduce((s, t) => s + t.args.value, 0n)
+  if (fromLogs > 0n) return fromLogs
   const got = (await balanceFresh(c, tokenOut, kit.stats.lastBlock)) - before
-  if (got <= 0n) die(`${label}交易成功但没有收到代币?`)
+  if (got <= 0n) die(`${label}交易成功但没有收到代币? ${c.cfg.explorer}/tx/${rc.transactionHash}`)
   return got
 }
 
 // ---- 本地仓位记录 positions.json（进场时追加，撤退时读取）----
 // shape / group：本地分类和建仓交易分组。链上只能恢复分组，没有本地记录的仓位显示未分类，不猜成 Spot。
 // chain / protocol 没写的是早期记录 = robinhood / v4
-export type Shape = 'spot' | 'curve' | 'bidask'
+export type Shape = 'spot' | 'curve' | 'bidask' | 'squeeze'
 export type PositionRecord = { id: string; token: Address; symbol: string; poolId: Hex; kind: 'lp' | 'bridge'; at: string; shape?: Shape; group?: Hex; chain?: ChainName; protocol?: ProtocolName }
 const POSITIONS_FILE = 'positions.json'
 export const loadPositions = (): PositionRecord[] => (existsSync(POSITIONS_FILE) ? JSON.parse(readFileSync(POSITIONS_FILE, 'utf8')) : [])

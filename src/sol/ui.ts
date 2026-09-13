@@ -22,15 +22,16 @@ async function poolState(x: SolCtx, pool: SolPool, maxAge = 4000) {
 }
 const sumLedger = (events: LedgerEvent[], p: Pick<Position, 'tokenIsX' | 'quote'>, decimals: number, qUsd: number) => {
   const usdOf = (x: bigint, tok: bigint, price: number | null) => (Number(x) / 10 ** p.quote.decimals + (price === null ? 0 : (Number(tok) / 10 ** decimals) * price)) * qUsd
-  let deposits = 0, fees = 0, withdrawn = 0, mintedAt = 0
+  let deposits = 0, fees = 0, withdrawn = 0, mintedAt = 0, lamports = 0
   for (const e of events) {
+    lamports += e.fee ?? 0
     const [u, t] = p.tokenIsX ? [e.amountY, e.amountX] : [e.amountX, e.amountY]
     const [pu, pt] = p.tokenIsX ? [e.principalY, e.principalX] : [e.principalX, e.principalY]
     const total = usdOf(u, t, e.price), principal = usdOf(pu, pt, e.price)
     if (e.action === 'add') { deposits += total; if (!mintedAt) mintedAt = e.time }
     else { withdrawn += principal; fees += total - principal }
   }
-  return { mintedAt, deposits, fees, withdrawn }
+  return { mintedAt, deposits, fees, withdrawn, lamports }
 }
 
 export async function listPositions(x: SolCtx, full: boolean, watcherOf: (id: string, token: string) => number | null) {
@@ -125,7 +126,7 @@ export async function history(x: SolCtx, id: string) {
   return { id, symbol: m.symbol, quote: p.quote.symbol, events: rows, deposits: deposits.toFixed(2), fees: fees.toFixed(2), withdrawn: withdrawn.toFixed(2), value: value.toFixed(2), unclaimed: unclaimed.toFixed(2), pnl: (value + unclaimed + fees + withdrawn - deposits).toFixed(2) }
 }
 
-type ClosedRow = { id: string; token: string; symbol: string; fee: number; feeText: string; openedAt: number; closedAt: number; closedTx: string; deposits: number; withdrawn: number; fees: number; pnl: number; quote: string }
+type ClosedRow = { id: string; token: string; symbol: string; fee: number; feeText: string; openedAt: number; closedAt: number; closedTx: string; deposits: number; withdrawn: number; fees: number; gas: number; pnl: number; quote: string } // gas：仓位交易的 SOL 交易费按当前 SOL 价折算，pnl 已扣；租金退还和换币不含
 export async function closedList(x: SolCtx) {
   const { c } = x
   if (!x.known.length) x.known = await findPositions(c).catch(() => x.known)
@@ -143,7 +144,8 @@ export async function closedList(x: SolCtx) {
       const events = await positionLedger(c, { id: q.id, pool: q.pool })
       if (!events.some((e) => e.action === 'add')) continue
       const s = sumLedger(events, { tokenIsX: side.tokenIsX, quote: side.quote }, m.decimals, side.quote.symbol === 'USDC' ? 1 : sol)
-      x.closedCache.set(q.id, { id: q.id, token, symbol: m.symbol, fee: q.pool.fee / 10000, feeText: feeText(q.pool), openedAt: s.mintedAt, closedAt: q.closed.time, closedTx: q.closed.tx, deposits: cents(s.deposits), withdrawn: cents(s.withdrawn), fees: cents(s.fees), pnl: cents(s.withdrawn + s.fees - s.deposits), quote: side.quote.symbol })
+      const gas = (s.lamports / 1e9) * sol
+      x.closedCache.set(q.id, { id: q.id, token, symbol: m.symbol, fee: q.pool.fee / 10000, feeText: feeText(q.pool), openedAt: s.mintedAt, closedAt: q.closed.time, closedTx: q.closed.tx, deposits: cents(s.deposits), withdrawn: cents(s.withdrawn), fees: cents(s.fees), gas: cents(gas), pnl: cents(s.withdrawn + s.fees - s.deposits - gas), quote: side.quote.symbol })
     } catch (e: any) { failed++; log(`仓位 ${q.id.slice(0, 8)}… 平仓盈亏读取失败: ${String(e?.message).slice(0, 120)}`) }
   }
   return { closed: [...x.closedCache.values()].sort((a, b) => a.closedAt - b.closedAt), nonUsdg, failed }

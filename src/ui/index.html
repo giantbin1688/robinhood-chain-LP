@@ -424,7 +424,8 @@
         <div class="row" id="row-range"><label>区间（%）</label><input type="text" id="f-range" placeholder="-50%,+100%"><div class="hint">-50%,+100% 双边；只填 -50% = 只做下方（全 <span class="q">USDG</span>）；只填 +100% = 只做上方（全代币）</div></div>
         <div class="row" id="row-tickRange" style="display:none"><label>下界 tick,上界 tick</label><input type="text" id="f-tickRange" placeholder="例如 334000,349000"><div class="hint">按池子的 tick 间距对齐。右侧选择起止行可填入；计划与执行使用相同的精确边界。</div></div>
         <div class="row" id="row-priceRange" style="display:none"><label>最低价,最高价</label><input type="text" id="f-priceRange" placeholder="0.006,0.01"><div class="hint">整体在现价下方 = 纯 <span class="q">USDG</span> 等跌；整体在上方 = 全换成代币等涨</div></div>
-        <div class="row"><label>形状</label><select id="f-shape"><option value="spot">Spot：一个仓位，区间内均匀</option><option value="curve">Curve：同心嵌套，越靠现价越厚</option><option value="bidask">Bid-Ask：两侧分段，越远越厚</option></select><div class="hint" id="shape-hint"></div></div>
+        <div class="row"><label>形状</label><select id="f-shape"><option value="spot">Spot：一个仓位，区间内均匀</option><option value="curve">Curve：同心嵌套，越靠现价越厚</option><option value="bidask">Bid-Ask：两侧分段，越远越厚</option><option value="squeeze">Squeeze：数据驱动，Curve 核心 + Bid-Ask 双翼（GMGN）</option></select><div class="hint" id="shape-hint"></div></div>
+        <div class="row" id="row-squeeze" style="display:none"><label>数据闸门</label><div><button class="btn sm" id="btn-squeeze">扫描 GMGN 数据</button> <span class="small" id="sq-status"></span></div><div id="sq-result" class="hint" style="margin-top:6px"></div></div>
         <div class="row" id="row-layers" style="display:none"><label>层数</label><input type="text" id="f-layers" placeholder="3"><div class="hint">Curve 的层数 / Bid-Ask 每侧的段数（2~8）；每层一个仓位，全部在同一笔交易里创建</div></div>
         <div class="row"><label>示意图</label><div id="shape-viz" class="shapeviz"></div></div>
       </div>
@@ -577,6 +578,18 @@
     <div class="row"><label>Uniswap API 地址</label><input type="text" id="st-api-uni" placeholder="https://trade-api.gateway.uniswap.org/v1" spellcheck="false"><div class="hint">Uniswap Trading API 的网关地址，一般不用改</div></div>
     <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-rpc-save">保存</button></div>
     <div class="st" id="st-rpc-status">—</div>
+  </div>
+  <div class="card">
+    <h4>GMGN 数据源</h4>
+    <p class="lead">Squeeze 形状的数据面：5 分钟成交 / 买卖分开、主池两侧深度、1 分钟 K 线。免费 key 只有读权限，去 <b>gmgn.ai/ai</b> 用公钥申请。留空 = 保持不变，填 - = 清除。</p>
+    <div class="row"><label>API key</label><input type="password" id="st-gmgn-key" placeholder="gmgn_…" spellcheck="false"></div>
+    <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-gmgn-save">保存</button><button class="btn" id="st-gmgn-test">测试连通</button></div>
+    <div class="st" id="st-gmgn-status">—</div>
+    <h4 style="margin-top:16px">Squeeze 参数</h4>
+    <p class="lead">闸门与形状的阈值。这里填的优先于 params.env 的 SQ_*，留空 = 用 params.env / 默认值（灰字是当前生效值和来源）。保存后下一次扫描 / 进场 / 监控立即生效。</p>
+    <div id="st-sq-fields"></div>
+    <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-sq-save">保存参数</button><button class="btn" id="st-sq-reset">清空（全部回退 params.env）</button></div>
+    <div class="st" id="st-sq-status">—</div>
   </div>
   <div class="card">
     <h4>Solana 选项</h4>
@@ -816,7 +829,7 @@ async function loadState(fillForm) {
     $('#f-poolSelect').value = p.POOL_SELECT || 'auto'; $('#f-maxDeviation').value = p.MAX_DEVIATION || '10'
     $('#f-range').value = p.RANGE || '-50%,+100%'; $('#f-priceRange').value = p.PRICE_RANGE || ''
     $('#f-rangeMode').value = p.PRICE_RANGE ? 'price' : 'pct'; onRangeMode()
-    $('#f-shape').value = ['curve', 'bidask'].includes(p.LP_SHAPE) ? p.LP_SHAPE : 'spot'; $('#f-layers').value = p.LP_LAYERS || '3'; onShape()
+    $('#f-shape').value = ['curve', 'bidask', 'squeeze'].includes(p.LP_SHAPE) ? p.LP_SHAPE : 'spot'; $('#f-layers').value = p.LP_LAYERS || '3'; onShape()
     $('#f-slippage').value = p.SWAP_SLIPPAGE || '5'; $('#f-lpSlippage').value = p.LP_SLIPPAGE || '5'
     $('#p-via').value = p.EXIT_SWAP_VIA || 'best'; $('#f-stopLoss').value = p.WATCH_STOP_LOSS || ''; $('#p-stop').value = p.WATCH_STOP_LOSS && Number(p.WATCH_STOP_LOSS) > 0 ? p.WATCH_STOP_LOSS : ''
     $('#btn-plan').disabled = !w
@@ -832,8 +845,18 @@ const SHAPE_HINT = {
   spot: '',
   curve: '每层宽度减半、资金相同，全部跨着现价：中间被所有层覆盖最厚，适合震荡；内层跳出后只剩外层在吃手续费',
   bidask: '现价两侧各分几段、互不重叠，越远的段流动性越厚：跌得越深买得越多、涨得越高卖得越多；含现价的那一格空着，横盘时没有手续费',
+  squeeze: '区间和资金份额由数据推导（上面的区间设置不用；换手 = 代币 5 分钟成交 ÷ 目标 USDG 池里的 USDG，池按上面的费率 / 池选择或右侧"用这个池"决定）：核心 = 观察窗口实际振幅（下限 = 费率 × 倍数），翼 = 1 小时高低点再按买卖偏斜拉伸，核心份额 = 1 小时里价格待在核心带内的时间占比，全部从这个币自己的走势里取，没有写死的百分比。五条闸门（活跃 / 收敛 / 漂移 / 深度 / 安全）都是和自己比，默认只提示不拦；参数在设置页 GMGN 卡片或 params.env 的 SQ_*',
 }
-function onShape() { const s = $('#f-shape').value; $('#row-layers').style.display = s === 'spot' ? 'none' : ''; $('#shape-hint').textContent = SHAPE_HINT[s] || ''; drawShape() }
+let SQ = null // 最近一次 squeeze 扫描结果（/api/squeeze）
+function onShape() {
+  const s = $('#f-shape').value, sq = s === 'squeeze'
+  $('#row-layers').style.display = s === 'spot' || sq ? 'none' : ''; $('#shape-hint').textContent = SHAPE_HINT[s] || ''
+  $('#row-squeeze').style.display = sq ? '' : 'none'
+  $('#f-rangeMode').parentElement.style.display = sq ? 'none' : ''
+  if (sq) for (const id of ['row-range', 'row-tickRange', 'row-priceRange']) $('#' + id).style.display = 'none'
+  else onRangeMode()
+  drawShape()
+}
 $('#f-shape').onchange = onShape
 // ---- 形状示意图：按填写的区间 / 形状 / 层数画流动性厚度（横轴 = 对数价格，虚线 = 现价）。拆法和 cli.ts 一致，只是不做 tick 取整；
 //      绝对价格模式下现价来自最近一次计划（没有就先按区间几何中点画）----
@@ -843,11 +866,25 @@ const shapeLegs = (lo, hi, a, shape, layers) => {
   if (shape === 'bidask') { const out = []; for (let k = 1; k <= layers; k++) { if (a > lo) out.push([a - ((a - lo) * k) / layers, a - ((a - lo) * (k - 1)) / layers, k]); if (hi > a) out.push([a + ((hi - a) * (k - 1)) / layers, a + ((hi - a) * k) / layers, k]) } return out }
   return [[lo, hi, 1]]
 }
+// squeeze 的示意腿：核心 2 层 curve + 两翼各 2 段 bidask（远段权重 2、近段 1），每块的 g 按扫描给的份额缩放（对数价格轴，现价 = 0；价值按下方要 USDG、上方要代币的单位量近似）
+const squeezeVizLegs = (plan) => {
+  const val = (l, h, g) => { const pa = Math.exp(l), pb = Math.exp(h), ua = Math.min(pb, 1), ta = Math.max(pa, 1); let v = 0; if (ua > pa) v += Math.sqrt(ua) - Math.sqrt(pa); if (pb > ta) v += 1 / Math.sqrt(ta) - 1 / Math.sqrt(pb); return g * v }
+  const block = (legs, share) => { const v = legs.reduce((s, l) => s + val(...l), 0); return v > 0 && share > 0 ? legs.map(([a, b, g]) => [a, b, (g * share) / v]) : [] }
+  const w = plan.w, cl = Math.log(1 - w), ch = Math.log(1 + w)
+  const core = block([[cl, ch, 1], [cl / 2, ch / 2, 1]], plan.shares.core)
+  const wing = (a, b, share) => (a < b ? block(a < 0 ? [[(a + b) / 2, b, 1], [a, (a + b) / 2, 2]] : [[a, (a + b) / 2, 1], [(a + b) / 2, b, 2]], share) : [])
+  return [...core, ...wing(Math.log(plan.downLo), cl, plan.shares.down), ...wing(ch, Math.log(plan.upHi), plan.shares.up)]
+}
 function drawShape() {
   const el = $('#shape-viz'), shape = $('#f-shape').value, layers = Math.min(8, Math.max(2, Number($('#f-layers').value) || 3))
   const spct = (v) => (v > 0 ? '+' : '') + v + '%'
   let lo, hi, labels, spot = 0, approx = false
-  if ($('#f-rangeMode').value === 'ticks') { el.textContent = '精确 tick 区间：' + ($('#f-tickRange').value || '请在右侧选择区间'); return }
+  if (shape === 'squeeze') {
+    if (!SQ) { el.innerHTML = '<div class="note">点“扫描 GMGN 数据”后按推导出的核心 / 两翼画</div>'; return }
+    const p = SQ.plan
+    lo = Math.log(p.shares.down > 0 ? p.downLo : 1 - p.w); hi = Math.log(p.shares.up > 0 ? p.upHi : 1 + p.w)
+    labels = [spct(((Math.exp(lo) - 1) * 100).toFixed(1)), '现价', spct(((Math.exp(hi) - 1) * 100).toFixed(1))]
+  } else if ($('#f-rangeMode').value === 'ticks') { el.textContent = '精确 tick 区间：' + ($('#f-tickRange').value || '请在右侧选择区间'); return }
   if ($('#f-rangeMode').value === 'price') {
     const m = ($('#f-priceRange').value.match(/\d*\.?\d+(?:e-?\d+)?/gi) || []).map(Number).filter((x) => x > 0).sort((x, y) => x - y)
     if (m.length !== 2 || m[0] >= m[1]) { el.innerHTML = ''; return }
@@ -864,7 +901,7 @@ function drawShape() {
     labels = [spct(pLo), '现价', spct(pHi)]
   }
   const a = Math.max(lo, Math.min(hi, spot))
-  const legs = shapeLegs(lo, hi, a, shape, layers)
+  const legs = shape === 'squeeze' ? squeezeVizLegs(SQ.plan) : shapeLegs(lo, hi, a, shape, layers)
   const pts = [...new Set(legs.flatMap((l) => [l[0], l[1]]).concat(spot > lo && spot < hi ? [spot] : []))].sort((x, y) => x - y)
   const W = 340, H = 92, pad = 8, base = 70, maxH = 54, span = hi - lo
   const x0 = Math.min(lo, spot) - span * 0.06, x1 = Math.max(hi, spot) + span * 0.06
@@ -888,6 +925,18 @@ function drawShape() {
   <div class="note">柱高 = 流动性厚度；蓝 = 现价下方（${QS}，等跌买入），绿 = 上方（代币，等涨卖出）。${legs.length} 个仓位，预算约 ${100 - tokPct}% ${QS} + ${tokPct}% 换成代币${approx ? '；现价未知，先按区间中点画，点"计划"后按真实现价重画' : ''}</div>`
 }
 for (const id of ['f-range', 'f-priceRange', 'f-tickRange', 'f-layers']) $('#' + id).addEventListener('input', drawShape)
+// squeeze 扫描：GMGN 指标 + 五条闸门 + 推导出的形状（只读；真正进场时 cli 会再拉一次最新数据）
+const gateColor = (ok) => (ok ? 'var(--green)' : 'var(--red, #c33)')
+const gateHtml = (r) => `<div style="margin-bottom:4px">${esc(r.symbol || '')}${r.pool ? `（目标池 ${esc(r.pool.label)} <span class="mono">${esc(r.pool.id.slice(0, 10))}…</span>）` : r.gmgnPool ? `（没有可用的 ${QS} 池，按 GMGN 主池 ${esc(r.gmgnPool.exchange)} / ${esc(r.gmgnPool.quote)}）` : ''} · 现价 ${r.metrics.price} · ${esc(r.metrics.depthLabel)} ${fmtUsd(r.metrics.depthUsd)}（两侧合计 ${fmtUsd(r.metrics.liquidityUsd)}，费率 ${r.metrics.feePct}%）· 5 分钟成交 ${fmtUsd(r.metrics.vol5)}（买 ${fmtUsd(r.metrics.buy5)} / 卖 ${fmtUsd(r.metrics.sell5)}），1 小时 ${fmtUsd(r.metrics.vol1h)} · 1m σ ${r.metrics.sigma1m === null ? '—' : (r.metrics.sigma1m * 100).toFixed(2) + '%'}（窗口 ${r.metrics.bars} 根 / 1 小时 ${r.metrics.hourBars} 根）· 1 小时高低 ${r.metrics.hourHi === null ? '—' : '+' + ((r.metrics.hourHi - 1) * 100).toFixed(1) + '% / ' + ((r.metrics.hourLo - 1) * 100).toFixed(1) + '%'}${r.plan.insideShare === null ? '' : ' · 1 小时内 ' + Math.round(r.plan.insideShare * 100) + '% 的时间在核心带内'}</div>` + r.gates.map((g) => `<div style="color:${gateColor(g.ok)}">${g.ok ? '✓' : '✗'} ${esc(g.name)}：${esc(g.text)}</div>`).join('') + (r.warnings || []).map((w) => `<div>⚠ ${esc(w)}</div>`).join('') + `<div style="margin-top:4px"><b>${r.pass ? '闸门全部通过' : r.block ? '闸门未通过：真实进场会被拒绝（设置页 SQ_GATE_BLOCK=1）' : '闸门未通过：只提示不拦，可照常按此形状进场'}</b> · ${esc(r.plan.label)}</div>`
+$('#btn-squeeze').onclick = async (e) => {
+  const token = $('#f-token').value.trim(), usdg = $('#f-usdg').value.trim()
+  if (!isAddr(token)) return toast('请先填代币地址')
+  e.target.disabled = true; $('#sq-status').textContent = '拉取中…'
+  try { SQ = await api(`/api/squeeze?token=${token}&usdg=${encodeURIComponent(usdg)}&pool=${encodeURIComponent($('#f-pool').value)}&fee=${encodeURIComponent($('#f-fee').value.trim())}`); $('#sq-status').textContent = new Date(SQ.at).toLocaleTimeString(); $('#sq-result').innerHTML = gateHtml(SQ); drawShape() }
+  catch (err) { SQ = null; $('#sq-status').textContent = ''; $('#sq-result').textContent = err.message; drawShape() }
+  finally { e.target.disabled = false }
+}
+$('#f-token').addEventListener('input', () => { SQ = null; $('#sq-result').innerHTML = ''; $('#sq-status').textContent = '' })
 $('#f-token').addEventListener('input', () => { lastMarketPrice = null; drawShape() })
 
 // ---- 进场：计划（演练任务）-> 执行（真实任务）。执行按钮只在"当前参数的演练成功"后可用 ----
@@ -1074,6 +1123,7 @@ function renderLaunchPlan(p, id) {
   $('#card-pos').innerHTML = kv([
     ['区间', `${p.range.lo} .. ${p.range.hi} ${pq}/${sym}<br><span class="small">${esc(p.range.label)}，${unit} [${p.range.tickLower}, ${p.range.tickUpper}]</span>`],
     ['形状', p.shape && p.shape.kind !== 'spot' ? `${esc(p.shape.label)}<br><span class="small">${p.legs.map((l, i) => `#${i + 1} ${l.lo} .. ${l.hi}（${sideText[l.side] || ''}，≈${l.share}%）`).join('<br>')}</span>` : ''],
+    ['数据闸门', p.squeeze ? `<span class="small">${p.squeeze.gates.map((g) => `<span style="color:${gateColor(g.ok)}">${g.ok ? '✓' : '✗'} ${esc(g.name)}</span> ${esc(g.text)}`).join('<br>')}<br><b>${p.squeeze.pass ? '全部通过' : p.squeeze.block ? '未通过：真实进场会被拒绝' : '未通过：只提示不拦'}</b></span>` : ''],
     ['LP 投入', `≈${p.lp.usdg} ${pq} + ${p.lp.token} ${sym}${p.lp.held !== '0' ? `<br><span class="small">钱包已持有 ${p.lp.held} ${sym}</span>` : ''}`],
     ['滑点', `换币 ${p.slippage.swap}% / LP ${p.slippage.lp}%`],
   ])
@@ -1179,7 +1229,7 @@ async function loadPositions(full) {
         : `<span class="exp big" data-act="hist" data-id="${p.id}" style="color:${pnlCol(pnl)}" title="现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入（不含进场换币成本）。点击看明细">${histOpen.has(p.id) ? '▾' : '▸'} ${money(pnl)}</span><span class="sub" style="color:${pnlCol(pnl)}">${invested > 0 ? signed((pnl / invested) * 100) : ''}</span>`}</td>
       <td class="num">${dpr === null ? '<span class="small">—</span>' : `<span class="big" style="color:${pnlCol(dpr)}" title="每天 ${signed(dpr, 2)} = uPNL ÷ 投入 ÷ 持仓天数">${signed(dpr, 2)}</span>`}</td>
       <td><span class="btns">
-        ${SEL.chain !== 'solana' ? `<select data-classify="${p.id}" style="width:100px;min-height:26px;font-size:12px" title="修改本地分类；同池、同批建仓的仓位一起更新，不发链上交易"><option value="" ${!['spot','curve','bidask'].includes(p.shape)?'selected':''} disabled>设置分类</option>${[['spot','Spot'],['curve','Curve'],['bidask','Bid-Ask']].map(([v,n])=>`<option value="${v}" ${p.shape===v?'selected':''}>${n}</option>`).join('')}</select>` : ''}
+        ${SEL.chain !== 'solana' ? `<select data-classify="${p.id}" style="width:100px;min-height:26px;font-size:12px" title="修改本地分类；同池、同批建仓的仓位一起更新，不发链上交易"><option value="" ${!['spot','curve','bidask','squeeze'].includes(p.shape)?'selected':''} disabled>设置分类</option>${[['spot','Spot'],['curve','Curve'],['bidask','Bid-Ask'],['squeeze','Squeeze']].map(([v,n])=>`<option value="${v}" ${p.shape===v?'selected':''}>${n}</option>`).join('')}</select>` : ''}
         <button class="btn sm" data-act="collect" data-id="${p.id}" data-sym="${sym}" data-fees="${fmtUsd(unclaimed)}" data-feetoken="${fmtAmt(p.feesToken)}" ${unclaimed < 0.01 ? 'disabled' : ''} title="领取未领手续费 ≈${fmtUsd(unclaimed)}，本金不动；确认框里可勾选顺便把领到的币卖成 ${QS}">领取</button><button class="btn sm" data-act="exit-part" data-id="${p.id}" data-sym="${sym}" title="只撤一部分流动性（比例在确认框里填），手续费一并领走，NFT 保留、剩下的继续做 LP；撤出来的币卖成 ${QS}">撤 %</button><button class="btn sm danger" data-act="exit" data-id="${p.id}" data-sym="${sym}" title="撤掉这一个仓位，卖掉撤出来的币">撤退</button>
         ${p.watchJob !== null ? `<button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button><button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}" title="停止监控 #${p.watchJob}">停止</button>` : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${sym}" title="盯着池价，跳出区间自动撤退；工具栏填了止损就改为只按本金止损">监控</button>`}</span></td>`
     tb.appendChild(tr)
@@ -1197,10 +1247,10 @@ async function loadPositions(full) {
     }
   }
   // 按形状分区（Spot / Curve / Bid-Ask）；curve、bidask 里同一次进场建的仓位（同一 group = 同一笔 mint 交易）连在一起，组头一行汇总 + 整组操作
-  const shapeOf = (p) => (['spot','curve','bidask'].includes(p.shape) ? p.shape : 'unknown')
+  const shapeOf = (p) => (['spot','curve','bidask','squeeze'].includes(p.shape) ? p.shape : 'unknown')
   const sumUsd = (list, k) => list.reduce((s, p) => s + (p[k] === null ? 0 : Number(p[k])), 0)
   const summary = (list) => { const led = list.filter((p) => p.pnlUsd !== null); const pnl = sumUsd(led, 'pnlUsd'); return `价值 ${fmtUsd(sumUsd(list, 'value'))} · 手续费 ${fmtUsd(sumUsd(list, 'feesUsd') + sumUsd(led, 'collectedUsd'))}${led.length ? ` · uPNL <span style="color:${pnlCol(pnl)}">${money(pnl)}</span>` : ''}` }
-  for (const [key, name, desc] of [['spot', 'Spot', '单个仓位，区间内均匀'], ['curve', 'Curve', '同心嵌套，越靠现价越厚'], ['bidask', 'Bid-Ask', '两侧分段，越远越厚'], ['unknown', '未分类', '本机没有分类标签，可在仓位行指定；同池同批建仓一起更新']]) {
+  for (const [key, name, desc] of [['spot', 'Spot', '单个仓位，区间内均匀'], ['curve', 'Curve', '同心嵌套，越靠现价越厚'], ['bidask', 'Bid-Ask', '两侧分段，越远越厚'], ['squeeze', 'Squeeze', 'Curve 核心 + Bid-Ask 双翼，GMGN 数据驱动'], ['unknown', '未分类', '本机没有分类标签，可在仓位行指定；同池同批建仓一起更新']]) {
     const list = POS.filter((p) => shapeOf(p) === key)
     if (!list.length) continue
     const sk = 'shape:' + key, shut = collapsed.has(sk)
@@ -1231,7 +1281,7 @@ document.addEventListener('change', async e => {
   const ps=p.group?POS.filter(q=>q.group===p.group&&q.poolId===p.poolId):[p]
   select.disabled=true
   try { await api('/api/positions/classify',{positions:ps.map(p=>p.id).join(','),shape:select.value}); toast(`已更新 ${ps.length} 个仓位的本地分类`); await loadPositions(true) }
-  catch(err) {toast(err.message);select.value=['spot','curve','bidask'].includes(p.shape)?p.shape:'';select.disabled=false}
+  catch(err) {toast(err.message);select.value=['spot','curve','bidask','squeeze'].includes(p.shape)?p.shape:'';select.disabled=false}
 })
 // 资金明细：每笔交易（加流动性 / 领手续费 / 撤流动性）的两种币数量和按当时池价折算的价值，最新在前
 async function loadHistory(p) {
@@ -1350,7 +1400,7 @@ $('#btn-collect-all').onclick = async () => {
 function setAuto() { clearInterval(posTimer); const s = Number($('#p-auto').value); if (s > 0) posTimer = setInterval(() => { if ($('#page-positions').classList.contains('on')) loadPositions(false) }, s * 1000) }
 $('#p-auto').onchange = setAuto
 
-// ---- 盈亏日历：已平仓仓位按平仓日归类，每格 = 当天平仓的仓位各自整段盈亏（拿回本金 + 手续费 − 存入）之和；点格子看当天明细 ----
+// ---- 盈亏日历：已平仓仓位按平仓日归类，每格 = 当天平仓的仓位各自整段盈亏（拿回本金 + 手续费 − 存入 − 仓位交易的 gas）之和；点格子看当天明细 ----
 let CAL = null, calMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1), calSel = null
 async function loadCalendar() {
   $('#cal-note').textContent = CAL ? '刷新中…' : '首次要读取钱包全部 LP 历史，约半分钟…'
@@ -1367,10 +1417,10 @@ function renderCalendar() {
   const byDay = new Map()
   for (const c of CAL.closed) { const d = new Date(c.closedAt); if (d.getFullYear() === y && d.getMonth() === mo) byDay.set(d.getDate(), [...(byDay.get(d.getDate()) ?? []), c]) }
   const days = [...byDay].map(([d, list]) => ({ d, list, pnl: list.reduce((s, c) => s + c.pnl, 0) }))
-  const all = days.flatMap((x) => x.list), month = all.reduce((s, c) => s + c.pnl, 0), { w, l } = wlc(all)
+  const all = days.flatMap((x) => x.list), month = all.reduce((s, c) => s + c.pnl, 0), gas = all.reduce((s, c) => s + (c.gas || 0), 0), { w, l } = wlc(all)
   const best = days.reduce((a, b) => (b.pnl > a.pnl ? b : a), days[0]), worst = days.reduce((a, b) => (b.pnl < a.pnl ? b : a), days[0])
   $('#cal-stats').innerHTML = [
-    tile('本月盈亏', all.length ? money(month) : '—', all.length ? `${days.length} 天有平仓` : '本月没有平仓', all.length ? pnlCol(month) : ''),
+    tile('本月盈亏', all.length ? money(month) : '—', all.length ? `${days.length} 天有平仓 · 已扣 gas ${fmtUsd(gas)}` : '本月没有平仓', all.length ? pnlCol(month) : ''),
     tile('平仓', `${all.length}`, `${mo + 1} 月平掉的仓位数`),
     tile('胜率', w + l ? `${Math.round((w / (w + l)) * 100)}%` : '—', all.length ? `${wl(all)}（平不计入）` : '盈亏 > 0 算胜'),
     tile('最好一天', best ? money(best.pnl) : '—', best ? `${mo + 1} 月 ${best.d} 日，${best.list.length} 个平仓` : '', best ? pnlCol(best.pnl) : ''),
@@ -1388,10 +1438,10 @@ function renderCalendar() {
   const sel = byDay.get(calSel), box = $('#cal-day')
   box.style.display = sel ? '' : 'none'
   if (sel) box.innerHTML = `<h4 style="margin:0 0 10px">${mo + 1} 月 ${calSel} 日平仓 ${sel.length} 个，合计 <b style="color:${pnlCol(sel.reduce((s, c) => s + c.pnl, 0))}">${money(sel.reduce((s, c) => s + c.pnl, 0))}</b></h4>
-    <p class="small">LP 口径：统计仓位存入、撤出本金与手续费的估值，不等同于整次交易的现金收支；钱包闲置代币和 gas 未计入。</p>
-    <table><thead><tr><th>平仓时间</th><th>仓位</th><th>交易对</th><th>存入</th><th>撤出本金估值</th><th>手续费</th><th>LP 盈亏</th><th>持仓时间</th><th>交易</th></tr></thead><tbody>${[...sel].sort((a, b) => b.closedAt - a.closedAt).map((c) => `<tr>
+    <p class="small">LP 口径：仓位存入、撤出本金与手续费的估值，减去建仓 / 撤仓 / 领取交易的 gas（同一笔交易里的几个仓位均分，按当前 ${NS} 价折算）；换币和授权的 gas、钱包闲置代币不计入，不等同于整次交易的现金收支。</p>
+    <table><thead><tr><th>平仓时间</th><th>仓位</th><th>交易对</th><th>存入</th><th>撤出本金估值</th><th>手续费</th><th>gas</th><th>LP 盈亏</th><th>持仓时间</th><th>交易</th></tr></thead><tbody>${[...sel].sort((a, b) => b.closedAt - a.closedAt).map((c) => `<tr>
       <td>${new Date(c.closedAt).toLocaleTimeString()}</td><td class="mono" title="${c.id}">#${sid(c.id)}</td><td>${esc(c.symbol)}/${c.quote || QS} ${c.feeText || c.fee + '%'}</td>
-      <td>${fmtUsd(c.deposits)}</td><td>${fmtUsd(c.withdrawn)}${c.valuationTx?`<br><a class="tx small" href="${STATE.explorer}/tx/${c.valuationTx}" target="_blank" title="原池价格处于极限，撤出代币按后续实际卖币成交价估值；仅计算 LP 部分，不含钱包原有代币和 gas">按卖币成交价估值</a>`:''}</td><td>${fmtUsd(c.fees)}</td>
+      <td>${fmtUsd(c.deposits)}</td><td>${fmtUsd(c.withdrawn)}${c.valuationTx?`<br><a class="tx small" href="${STATE.explorer}/tx/${c.valuationTx}" target="_blank" title="原池价格处于极限，撤出代币按后续实际卖币成交价估值；仅计算 LP 部分，不含钱包原有代币和换币 gas">按卖币成交价估值</a>`:''}</td><td>${fmtUsd(c.fees)}</td><td>${c.gas ? '−' + fmtUsd(c.gas) : '—'}</td>
       <td style="color:${pnlCol(c.pnl)};font-weight:600">${money(c.pnl)}<br><span class="small" style="color:${pnlCol(c.pnl)}">${c.deposits > 0 ? signed((c.pnl / c.deposits) * 100) : ''}</span></td>
       <td>${c.openedAt ? fmtHold(c.closedAt - c.openedAt) : '—'}</td>
       <td class="mono"><a class="tx" href="${STATE.explorer}/tx/${c.closedTx}" target="_blank">${c.closedTx.slice(0, 8)}…${c.closedTx.slice(-4)}</a></td></tr>`).join('')}</tbody></table>`
@@ -1565,7 +1615,17 @@ async function loadSettings() {
   ph($('#st-sol-jup'), r.solana.jupiterApiKey, '.env 里已配（JUPITER_API_KEY）', '可选：不填用免 key 的 lite-api.jup.ag')
   $('#st-sol-fee').value = r.solana.priorityFee || ''; $('#st-sol-hist').value = r.solana.historyTxs || ''
   $('#st-sol-status').textContent = r.solana.jupiterApiKey.set || r.solana.jupiterApiKey.env ? 'Jupiter key 已配置' : 'Jupiter 用免 key 接口'
+  ph($('#st-gmgn-key'), r.gmgn.apiKey, '.env 里已配（GMGN_API_KEY）', 'gmgn_…')
+  const srcName = { settings: '设置页', env: 'params.env', default: '默认' }
+  $('#st-sq-fields').innerHTML = r.squeeze.map((f) => `<div class="row"><label title="${esc(f.key)}">${esc(f.label)}</label><input type="text" data-sq="${esc(f.key)}" value="${f.source === 'settings' ? esc(f.value) : ''}" placeholder="${esc(f.value)}（${srcName[f.source]}）" spellcheck="false">${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ''}</div>`).join('')
+  const n = r.squeeze.filter((f) => f.source === 'settings').length
+  $('#st-sq-status').textContent = n ? `${n} 项来自设置页，其余用 params.env / 默认` : '全部用 params.env / 默认'
+  $('#st-gmgn-status').textContent = r.gmgn.apiKey.set || r.gmgn.apiKey.env ? `已配置${r.gmgn.apiKey.env && !r.gmgn.apiKey.set ? '（来自 .env）' : ''}` : '未配置：进场页的 Squeeze 形状用不了'
 }
+$('#st-gmgn-save').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings', { section: 'gmgn', apiKey: $('#st-gmgn-key').value.trim() }); $('#st-gmgn-key').value = ''; toast('已保存'); loadSettings(); loadState(false) })
+$('#st-gmgn-test').onclick = (e) => stBusy(e.target, async () => { const r = await api('/api/settings/test', { section: 'gmgn' }); toast(r.text || '连通') })
+$('#st-sq-save').onclick = (e) => stBusy(e.target, async () => { const b = { section: 'squeeze' }; for (const el of document.querySelectorAll('#st-sq-fields input[data-sq]')) b[el.dataset.sq] = el.value.trim(); await api('/api/settings', b); toast('已保存，下一次扫描 / 进场 / 监控生效'); loadSettings() })
+$('#st-sq-reset').onclick = (e) => stBusy(e.target, async () => { if (!confirm('清空设置页的全部 Squeeze 参数，回退到 params.env？')) return; await api('/api/settings', { section: 'squeeze' }); toast('已清空'); loadSettings() })
 const stBusy = async (btn, fn) => { btn.disabled = true; try { await fn() } catch (e) { toast(e.message) } finally { btn.disabled = false } }
 $('#st-tg-save').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings', { section: 'telegram', botToken: $('#st-tg-token').value, chatId: $('#st-tg-chat').value }); $('#st-tg-token').value = ''; toast('已保存'); loadSettings(); loadState(false) })
 $('#st-tg-test').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings/test', { section: 'telegram' }); toast('测试消息已发出，看 Telegram') })

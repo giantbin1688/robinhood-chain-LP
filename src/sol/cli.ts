@@ -68,7 +68,7 @@ const QU = 10n ** BigInt(Q.decimals)
 const rangeLabel = priceRange.length ? `${priceRange[0]} .. ${priceRange[1]} ${Q.symbol}` : `${pLo > 0 ? '+' : ''}${pLo}% .. ${pHi > 0 ? '+' : ''}${pHi}%`
 const usdgBudget = parseUnits(opt.usdg, Q.decimals)
 if (usdgBudget <= 0n) die('USDG_AMOUNT / --usdg 必须大于 0')
-const shapeLabel = { spot: 'spot（单个仓位）', curve: lp.protocol === 'dlmm' ? 'curve（Meteora 原生 Curve 策略，越靠现价越厚）' : `curve（${layers} 层同心嵌套，越靠现价越厚）`, bidask: lp.protocol === 'dlmm' ? 'bidask（Meteora 原生 Bid-Ask 策略，越远越厚）' : `bidask（现价两侧各 ${layers} 段，越远越厚）` }[shape]
+const shapeLabel = { spot: 'spot（单个仓位）', curve: lp.protocol === 'dlmm' ? 'curve（Meteora 原生 Curve 策略，越靠现价越厚）' : `curve（${layers} 层同心嵌套，越靠现价越厚）`, bidask: lp.protocol === 'dlmm' ? 'bidask（Meteora 原生 Bid-Ask 策略，越远越厚）' : `bidask（现价两侧各 ${layers} 段，越远越厚）`, squeeze: 'squeeze（Solana 暂不支持）' }[shape]
 
 // ---- 费率档 / 池子 ----
 let tier: Tier | null = null

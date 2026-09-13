@@ -15,7 +15,7 @@ export type MintPlan = {
   cost(): Promise<{ text: string; solNeeded: number }>           // 要几笔交易、租金多少（DLMM 的仓位 / bin 数组租金，CLMM 的 NFT / tick 数组租金）；solNeeded = 预算之外还要留多少 SOL
   build(amountX: bigint, amountY: bigint, state: PoolState): Promise<{ bundles: TxBundle[]; ids: string[]; useX: bigint; useY: bigint; note: string }>
 }
-export type LedgerEvent = { sig: string; time: number; action: 'add' | 'remove' | 'collect'; amountX: bigint; amountY: bigint; principalX: bigint; principalY: bigint; price: number | null; block: number }
+export type LedgerEvent = { sig: string; time: number; action: 'add' | 'remove' | 'collect'; amountX: bigint; amountY: bigint; principalX: bigint; principalY: bigint; price: number | null; block: number; fee?: number } // fee：钱包自己付的这笔交易费（lamport），由 history.ts 补上
 export type DepthBar = { lo: number; hi: number; amountX: bigint; amountY: bigint } // [lo, hi) 单位区间里的两种币数量
 
 export interface SolLp {

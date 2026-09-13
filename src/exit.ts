@@ -214,10 +214,10 @@ export async function withdraw(o: WithdrawOptions) {
   if (positions.length === 0) die(`按 ${pct}% 截下来的流动性为 0，仓位太小，直接全撤吧`)
   const sellHeld = o.positions && !o.sellAll ? 0n : tokenStart // 钱包里原有的币要不要一起卖
   // 进场金额：全撤时在最后一行和"共收回"对照着看。后台并行读流水（Alchemy），撤仓 / 卖币不等它；演练不读。
-  // 读失败（和撤仓、卖币同时打节点容易被限流；刚建的仓位索引可能没跟上）就记下原因，卖完币再重试一次，还是不行就把原因打出来，别静默少半句
+  // 卖完币最多再等它 3 秒：到了就拼进"完成"那行，没到（扫日志 + 逐笔拉回执常要几十秒，和撤仓、卖币抢节点还会被限流）就直接结束、把原因打出来，
+  // 盈亏留给网页历史算。曾经在这里等流水等了 30 秒，用户明确不要
   const since = found.every((p) => p.mint) ? found.reduce((m, p) => (p.mint!.block < m ? p.mint!.block : m), found[0].mint!.block) : 0n
-  const readDeposits = () => ledgerTotals(o.clients, found, decimals, since).then((t) => ({ dep: t.deposits, why: '' }), (e: any) => ({ dep: null, why: String(e?.message ?? e) }))
-  const deposits = partial || o.dryRun ? null : readDeposits()
+  const deposits = partial || o.dryRun ? null : ledgerTotals(o.clients, found, decimals, since).then((t) => ({ dep: t.deposits, why: '' }), (e: any) => ({ dep: null, why: String(e?.message ?? e) }))
 
   // ---- 计划 ----
   let expectUsdg = 0n, expectToken = 0n
@@ -298,8 +298,7 @@ export async function withdraw(o: WithdrawOptions) {
   }
   const [usdgEnd, tokenEnd] = await Promise.all([fresh(Q.address), fresh(token)])
   const gained = Number(usdgEnd - usdgStart) / 10 ** Q.decimals
-  let d = deposits ? await deposits : null
-  if (d && d.dep === null) { await sleep(3000); d = await readDeposits() } // 交易都发完了，节点空下来再读一次
+  const d = deposits ? await Promise.race([deposits, sleep(3000).then(() => ({ dep: null, why: '读流水超过 3 秒还没回，不等了' }))]) : null
   const dep = d?.dep ?? null
   const vs = dep && dep > 0 ? `，进场 ${dep.toFixed(Q.decimals > 6 ? 6 : Q.decimals)} ${Q.symbol}，盈亏 ${gained - dep >= 0 ? '+' : ''}${(gained - dep).toFixed(2)} (${gained - dep >= 0 ? '+' : ''}${(((gained - dep) / dep) * 100).toFixed(1)}%)` : ''
   log(`完成: 共收回 ${fmtU(usdgEnd - usdgStart)} ${Q.symbol}${vs}${tokenEnd > 0n ? `，钱包还剩 ${fmtT(tokenEnd)} ${symbol}` : ''}`)

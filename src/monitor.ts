@@ -1,4 +1,6 @@
 // 监控：盯着某个代币的 LP 仓位，池价跳出区间就自动撤退并卖币；开了止损的改按整组本金算盈亏，亏到线才撤、不再看区间；你手动撤掉仓位则自动停止
+// squeeze 形状的仓位组（进场时传入，或 positions.json 里标了 squeeze）多两条数据面规则：区间按整组的并集算（核心那一小段进出不算跳出），
+// 以及每分钟问一次 GMGN 的活跃度（当前 5 分钟成交 / 过去 1 小时平均每 5 分钟成交），连续 SQ_EXIT_CONFIRM 分钟低于 SQ_EXIT_HEAT 就整组撤退（设置页的值优先于 params.env）（手续费来源没了，翼上的单也没人打）
 // 既是命令行入口（npm run watch），也导出 watchToken() 给进场命令的 --watch 用
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -7,11 +9,13 @@ import * as v4 from './v4.ts'
 import { die, env, failFast, log, makeClients, num, p6, pct, sleep, tokenMeta, type Clients } from './common.ts'
 import { findPositions, positionFees, same, withdraw, type Position } from './exit.ts'
 import { ledgerTotals } from './history.ts'
+import { tokenInfo as gmgnTokenInfo, type GmgnChain } from './gmgn.ts'
+import { squeezeParamsFromEnv } from './strategy.ts'
 
 // positions 给了就只盯这些仓位、触发时也只撤这些（同一代币可以开多个进程各管各的）；否则盯钱包里该代币的全部仓位。
 // stopLoss > 0 = 止损：盯的这些仓位当成一组，(现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入本金) / 存入本金 跌到 −stopLoss% 就整组撤退并卖币。
 // 开了止损就只看这一个条件，"跳出区间"整个不看：bidask / curve 贴着现价的那一段价格稍动就进出区间，按区间规则会在亏 1% 时就把整组撤了，止损形同虚设。存入本金优先用 entry（启动时手填 / 进场时的预算），没给才从链上流水读（要 Alchemy），两个都没有则拒绝启动，不能默默变成没止损
-export type WatchOptions = { token: Address; positions?: bigint[]; clients: Clients; interval: number; confirm: number; upperGrace: number; stopLoss?: number; entry?: number; via: string; slippage: number; lpSlippage: number; dryRun: boolean; json?: boolean }
+export type WatchOptions = { token: Address; positions?: bigint[]; clients: Clients; interval: number; confirm: number; upperGrace: number; stopLoss?: number; entry?: number; via: string; slippage: number; lpSlippage: number; dryRun: boolean; json?: boolean; squeeze?: { chain: GmgnChain } }
 export async function watchToken(o: WatchOptions) {
   const { pub, lp, Q } = o.clients
   const { symbol, decimals } = await tokenMeta(pub, o.token)
@@ -27,6 +31,10 @@ export async function watchToken(o: WatchOptions) {
   let main = all.filter((p) => p.kind !== 'bridge' && value(p) >= total * 0.02)
   if (main.length === 0) { log('没有可监控的主要仓位'); return }
   const edges = (p: Position) => [usdgPerTokenAtTick(p.tickLower), usdgPerTokenAtTick(p.tickUpper)].sort((a, b) => a - b)
+  // squeeze 组：区间规则看整组并集；换手规则问 GMGN。进场没传就看本地记录的形状
+  const squeeze = o.squeeze ?? (main.some((p) => p.shape === 'squeeze') && ['robinhood', 'bsc', 'ethereum'].includes(o.clients.cfg.name) ? { chain: o.clients.cfg.name as GmgnChain } : undefined)
+  const sqp = squeezeParamsFromEnv(), sqExitHeat = sqp.exitHeat, sqExitConfirm = Math.max(1, Math.round(sqp.exitConfirm))
+  const union = () => ({ tickLower: Math.min(...main.map((p) => p.tickLower)), tickUpper: Math.max(...main.map((p) => p.tickUpper)) })
   // 止损的基准：整组的本金和历史上已经拿回来的部分。bidask / curve 是几个仓位合成一组，只看其中一段会把组打散，所以全部合起来算
   const stopLoss = o.stopLoss ?? 0
   let base: { deposits: number; withdrawn: number; fees: number } | null = null, baseManual = false
@@ -39,11 +47,12 @@ export async function watchToken(o: WatchOptions) {
   }
   const fmtQ = (x: number) => x.toFixed(2)
   const stopText = base ? `止损 ${stopLoss}%：整组本金 ${fmtQ(base.deposits)} ${Q.symbol}${baseManual ? '（手填）' : ''}${base.fees + base.withdrawn > 0 ? `，已领手续费 ${fmtQ(base.fees)}，已撤本金 ${fmtQ(base.withdrawn)}` : ''}，价值（含手续费）跌到 ${fmtQ(base.deposits * (1 - stopLoss / 100))} 以下即撤退` : ''
-  log(`监控 ${symbol}/${Q.symbol}: ${main.map((p) => `仓位 ${p.id} 区间 ${edges(p).map(p6).join(' .. ')}`).join('；')}，每 ${o.interval}s 检查，${base ? `只按止损撤退（不看区间）：连续 ${o.confirm} 次${stopText}` : `连续 ${o.confirm} 次跳出区间即撤退${o.upperGrace > 0 ? `（涨破上沿时仓位已全是 ${Q.symbol}，多等 ${Math.round(o.upperGrace / 60)} 分钟没回来才撤）` : ''}`}（Ctrl+C 停止）`)
+  log(`监控 ${symbol}/${Q.symbol}: ${main.map((p) => `仓位 ${p.id} 区间 ${edges(p).map(p6).join(' .. ')}`).join('；')}，每 ${o.interval}s 检查，${base ? `只按止损撤退（不看区间）：连续 ${o.confirm} 次${stopText}` : `连续 ${o.confirm} 次跳出${squeeze ? '整组区间' : '区间'}即撤退${o.upperGrace > 0 ? `（涨破上沿时仓位已全是 ${Q.symbol}，多等 ${Math.round(o.upperGrace / 60)} 分钟没回来才撤）` : ''}`}${squeeze ? `；squeeze 活跃规则：每分钟查 GMGN，当前 5 分钟成交连续 ${sqExitConfirm} 分钟低于 1 小时均值的 ${Math.round(sqExitHeat * 100)}% 即撤退` : ''}（Ctrl+C 停止）`)
 
   // 只有"进入过区间后又离开"才算跳出：一开始就在区间外的是等待型仓位（挂在现价一侧等价格来），不触发
   const armed = new Set<bigint>()
   let outStreak = 0, lossStreak = 0, aboveSince: number | null = null, lastStatus = '', lastBeat = 0, errors = 0, polls = 0
+  let turnStreak = 0, lastTurn: { t: number; at: number; text: string } | null = null, gmgnErr = 0
   for (;;) {
     try {
       const slots = new Map<Hex, { sqrtP: bigint; tick: number }>()
@@ -62,8 +71,22 @@ export async function watchToken(o: WatchOptions) {
         loss = { value, pnl: value / base.deposits - 1 }
         lossStreak = loss.pnl <= -stopLoss / 100 ? lossStreak + 1 : 0
       }
-      const inRange = (p: Position) => tickOf(p) >= p.tickLower && tickOf(p) < p.tickUpper
-      const above = (p: Position) => usdgPerTokenAtTick(tickOf(p)) > edges(p)[1]
+      // squeeze 组按并集判断进出：任一仓位用整组的边界（组内各腿同池）
+      const bounds = (p: Position) => (squeeze ? union() : p)
+      const inRange = (p: Position) => tickOf(p) >= bounds(p).tickLower && tickOf(p) < bounds(p).tickUpper
+      const above = (p: Position) => usdgPerTokenAtTick(tickOf(p)) > usdgPerTokenAtTick(tokenIs1 ? bounds(p).tickLower : bounds(p).tickUpper)
+      // squeeze 换手：每 60 秒问一次 GMGN（限频 20/s，远够）；拉不到只记日志不计数
+      if (squeeze && Date.now() - (lastTurn?.at ?? 0) >= 60_000) {
+        try {
+          const info = await gmgnTokenInfo(squeeze.chain, o.token)
+          // 活跃度 = 当前 5 分钟成交 / 过去 1 小时平均每 5 分钟成交（和进场闸门同一口径，自己和自己比）
+          const vol5 = info.buyVolume5m + info.sellVolume5m || info.volume5m, avg5 = Math.max(info.volume1h, vol5) / 12
+          const t = avg5 > 0 ? vol5 / avg5 : 0
+          turnStreak = t < sqExitHeat ? turnStreak + 1 : 0
+          lastTurn = { t, at: Date.now(), text: `活跃 ${t.toFixed(2)}×（5 分钟成交 $${Math.round(vol5).toLocaleString('en-US')} / 1 小时均值 $${Math.round(avg5).toLocaleString('en-US')}）${turnStreak ? `，低于 ${Math.round(sqExitHeat * 100)}% 已连续 ${turnStreak}/${sqExitConfirm} 分钟` : ''}` }
+          gmgnErr = 0
+        } catch (e: any) { if (++gmgnErr <= 3 || gmgnErr % 10 === 0) log(`GMGN 活跃度查询失败（第 ${gmgnErr} 次，不计入撤退条件）: ${String(e?.message ?? e).slice(0, 120)}`); lastTurn = { t: lastTurn?.t ?? 0, at: Date.now(), text: lastTurn?.text ?? '活跃度未知' } }
+      }
       for (const p of main) if (inRange(p)) armed.add(p.id)
       const out = main.filter((p) => !inRange(p) && armed.has(p.id))
       const outBelow = out.filter((p) => !above(p))
@@ -81,12 +104,12 @@ export async function watchToken(o: WatchOptions) {
           : '已跳出区间'
         return `仓位 ${p.id} 区间 ${p6(lo)} .. ${p6(hi)}（距下沿 ${pct(lo / cur - 1)}，距上沿 ${pct(hi / cur - 1)}）${state}`
       }
-      const status = `价格 ${p6(usdgPerTokenAtTick(tickOf(main[0])))} ${Q.symbol}/${symbol}；${main.map(one).join('；')}${loss && base ? `；整组价值 ${fmtQ(loss.value)} / 本金 ${fmtQ(base.deposits)} ${Q.symbol}（${pct(loss.pnl)}，止损线 ${pct(-stopLoss / 100)}）` : ''}`
+      const status = `价格 ${p6(usdgPerTokenAtTick(tickOf(main[0])))} ${Q.symbol}/${symbol}；${main.map(one).join('；')}${loss && base ? `；整组价值 ${fmtQ(loss.value)} / 本金 ${fmtQ(base.deposits)} ${Q.symbol}（${pct(loss.pnl)}，止损线 ${pct(-stopLoss / 100)}）` : ''}${lastTurn ? `；${lastTurn.text}` : ''}`
       if (status !== lastStatus || Date.now() - lastBeat > 5 * 60_000) { log(status); lastStatus = status; lastBeat = Date.now() }
       // 开了止损只看亏损（连续 confirm 次，防单次坏报价）；没开才看跳出区间（按确认次数 / 上沿宽限）
-      const byLoss = lossStreak >= o.confirm, byRange = !base && outStreak >= o.confirm && (outBelow.length > 0 || graceLeft <= 0)
-      if (byLoss || byRange) {
-        log(byLoss ? `触发止损: 连续 ${lossStreak} 次检查整组亏损 ${pct(loss!.pnl)}（价值 ${fmtQ(loss!.value)} / 本金 ${fmtQ(base!.deposits)} ${Q.symbol}），超过止损线 ${stopLoss}%` : `触发撤退: 连续 ${outStreak} 次检查跳出区间${outBelow.length ? '' : `，涨破上沿已超过 ${Math.round(o.upperGrace / 60)} 分钟`}`)
+      const byLoss = lossStreak >= o.confirm, byRange = !base && outStreak >= o.confirm && (outBelow.length > 0 || graceLeft <= 0), byTurn = !!squeeze && turnStreak >= sqExitConfirm
+      if (byLoss || byRange || byTurn) {
+        log(byLoss ? `触发止损: 连续 ${lossStreak} 次检查整组亏损 ${pct(loss!.pnl)}（价值 ${fmtQ(loss!.value)} / 本金 ${fmtQ(base!.deposits)} ${Q.symbol}），超过止损线 ${stopLoss}%` : byRange ? `触发撤退: 连续 ${outStreak} 次检查跳出区间${outBelow.length ? '' : `，涨破上沿已超过 ${Math.round(o.upperGrace / 60)} 分钟`}` : `触发撤退: squeeze 活跃度枯竭，连续 ${turnStreak} 分钟低于 1 小时均值的 ${Math.round(sqExitHeat * 100)}%（${lastTurn?.text}）`)
         await withdraw({ token: o.token, positions: o.positions, via: o.via, slippage: o.slippage, lpSlippage: o.lpSlippage, keepTokens: false, yes: true, dryRun: o.dryRun, clients: o.clients, json: o.json })
         return
       }
