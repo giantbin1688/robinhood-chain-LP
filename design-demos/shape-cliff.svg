@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 660" width="960" height="660" font-family="-apple-system,'PingFang SC','Microsoft YaHei',system-ui,sans-serif">
+<rect width="960" height="660" fill="#fbf9f5"/>
+<text x="56" y="40" font-size="20" font-weight="600" fill="#191918">单边断崖：Cliff / Waterfall</text>
+<text x="56" y="64" font-size="13.5" fill="#77756f">全部资金压在现价的一侧、越靠现价越厚，到某个价位突然归零</text>
+<text x="56" y="86" font-size="13" fill="#98958e">柱高 = 流动性厚度 · 蓝 = 现价下方（USDG，等跌买入）· 绿 = 上方（代币，等涨卖出）· 横轴为对数价格 · 现价落在崖顶</text>
+<rect x="237.2" y="285.0" width="210.3" height="55.0" fill="#3565a8" opacity=".6"/><rect x="447.5" y="230.0" width="104.4" height="110.0" fill="#3565a8" opacity=".6"/><rect x="552.0" y="175.0" width="52.5" height="165.0" fill="#3565a8" opacity=".6"/><rect x="604.4" y="120.0" width="52.6" height="220.0" fill="#3565a8" opacity=".6"/>
+<path d="M87.4 340.0 L237.2 340.0 M237.2 285.0 L447.5 285.0 M447.5 230.0 L552.0 230.0 M552.0 175.0 L604.4 175.0 M604.4 120.0 L657.0 120.0 M657.0 340.0 L872.6 340.0" fill="none" stroke="#d8d0c2" stroke-width="1"/>
+<line x1="48" y1="340" x2="912" y2="340" stroke="#d8d0c2"/>
+<line x1="657.0" y1="112" x2="657.0" y2="346" stroke="#191918" stroke-width="1.3" stroke-dasharray="4 3"/>
+
+<line x1="237.2" y1="118" x2="237.2" y2="340" stroke="#9a6a2c" stroke-width="1.6"/><text x="246.2" y="130" font-size="13" fill="#9a6a2c">断崖边缘：往下什么都没有</text>
+<text x="764.8" y="190" text-anchor="middle" font-size="13" fill="#98958e">上方空着：涨上去收不到手续费</text>
+<line x1="87.4" y1="340" x2="87.4" y2="346" stroke="#d8d0c2"/><text x="87.4" y="362" text-anchor="middle" font-size="13" fill="#191918">−50%</text>
+<line x1="237.2" y1="340" x2="237.2" y2="346" stroke="#deddd7"/><text x="237.2" y="362" text-anchor="middle" font-size="13" fill="#77756f">−40%</text>
+<line x1="657.0" y1="340" x2="657.0" y2="346" stroke="#d8d0c2"/><text x="657.0" y="362" text-anchor="middle" font-size="13" fill="#191918">现价</text>
+<line x1="872.6" y1="340" x2="872.6" y2="346" stroke="#d8d0c2"/><text x="872.6" y="362" text-anchor="middle" font-size="13" fill="#191918">+30%</text>
+<path d="M237.2 376 v6 H657.0 v-6" fill="none" stroke="#3565a8" stroke-width="1.2" opacity=".55"/><text x="447.1" y="402" text-anchor="middle" font-size="13.5" fill="#3565a8">全部资金压在 −40% ~ 现价，越靠现价越厚</text>
+<line x1="56" y1="428" x2="904" y2="428" stroke="#deddd7"/>
+<text x="56" y="450" font-size="13.5" fill="#191918">拆成 4 个仓位</text>
+<text x="56" y="476" font-size="13.5" fill="#191918">怎么用：这张是下方版：−40% 以内层层接盘，跌破 −40% 之后一滴流动性都没有，价格直接自由落体；而你的钱在崖底已经全换成了代币</text>
+<text x="56" y="512" font-size="13" fill="#77756f">第 1 层（最外）</text><rect x="314.7" y="501.0" width="242.6" height="11" rx="2" fill="#3565a8" opacity=".5"/><text x="904" y="512" text-anchor="end" font-size="12.5" fill="#98958e">−40.0% → 现价 · 占 51%</text><text x="56" y="540" font-size="13" fill="#77756f">第 2 层</text><rect x="436.2" y="529.0" width="121.0" height="11" rx="2" fill="#3565a8" opacity=".5"/><text x="904" y="540" text-anchor="end" font-size="12.5" fill="#98958e">−22.5% → 现价 · 占 27%</text><text x="56" y="568" font-size="13" fill="#77756f">第 3 层</text><rect x="496.6" y="557.0" width="60.7" height="11" rx="2" fill="#3565a8" opacity=".5"/><text x="904" y="568" text-anchor="end" font-size="12.5" fill="#98958e">−12.0% → 现价 · 占 14%</text><text x="56" y="596" font-size="13" fill="#77756f">第 4 层（贴现价）</text><rect x="526.9" y="585.0" width="30.4" height="11" rx="2" fill="#3565a8" opacity=".5"/><text x="904" y="596" text-anchor="end" font-size="12.5" fill="#98958e">−6.2% → 现价 · 占 7%</text>
+<text x="56" y="646" font-size="12.5" fill="#9a6a2c">现在就能做：区间选成只在现价一侧 + Curve，层层嵌套的锚点正好落在靠近现价的那条边（shape.ts:22）</text>
+</svg>
