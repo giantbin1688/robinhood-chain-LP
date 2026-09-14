@@ -1400,7 +1400,7 @@ $('#btn-collect-all').onclick = async () => {
 function setAuto() { clearInterval(posTimer); const s = Number($('#p-auto').value); if (s > 0) posTimer = setInterval(() => { if ($('#page-positions').classList.contains('on')) loadPositions(false) }, s * 1000) }
 $('#p-auto').onchange = setAuto
 
-// ---- 盈亏日历：已平仓仓位按平仓日归类，每格 = 当天平仓的仓位各自整段盈亏（拿回本金 + 手续费 − 存入 − 仓位交易的 gas）之和；点格子看当天明细 ----
+// ---- 盈亏日历：每格 = 当天结束的各代币买卖段里钱包 USDG 的实际净变化（现金口径，和余额对得上）；LP 口径（按池价估的存入 / 撤出 / 手续费）作为参照；点格子看当天明细 ----
 let CAL = null, calMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1), calSel = null
 async function loadCalendar() {
   $('#cal-note').textContent = CAL ? '刷新中…' : '首次要读取钱包全部 LP 历史，约半分钟…'
@@ -1414,37 +1414,62 @@ function renderCalendar() {
   if (!CAL) return
   const y = calMonth.getFullYear(), mo = calMonth.getMonth(), today = new Date()
   $('#cal-title').textContent = `${y} 年 ${mo + 1} 月`
-  const byDay = new Map()
-  for (const c of CAL.closed) { const d = new Date(c.closedAt); if (d.getFullYear() === y && d.getMonth() === mo) byDay.set(d.getDate(), [...(byDay.get(d.getDate()) ?? []), c]) }
-  const days = [...byDay].map(([d, list]) => ({ d, list, pnl: list.reduce((s, c) => s + c.pnl, 0) }))
-  const all = days.flatMap((x) => x.list), month = all.reduce((s, c) => s + c.pnl, 0), gas = all.reduce((s, c) => s + (c.gas || 0), 0), { w, l } = wlc(all)
-  const best = days.reduce((a, b) => (b.pnl > a.pnl ? b : a), days[0]), worst = days.reduce((a, b) => (b.pnl < a.pnl ? b : a), days[0])
+  const inMonth = (t) => { const d = new Date(t); return d.getFullYear() === y && d.getMonth() === mo }
+  // 每天两个数：现金 = 该日结束的各代币段（买币 → 建仓 → 撤仓 → 卖币）钱包 USDG 的净变化，和余额同口径；LP = 当天平仓仓位按池价估的盈亏
+  const byDay = new Map(), epByDay = new Map()
+  for (const c of CAL.closed) if (inMonth(c.closedAt)) { const k = new Date(c.closedAt).getDate(); byDay.set(k, [...(byDay.get(k) ?? []), c]) }
+  for (const e of CAL.episodes || []) if (inMonth(e.closedAt)) { const k = new Date(e.closedAt).getDate(); epByDay.set(k, [...(epByDay.get(k) ?? []), e]) }
+  // 不归任何代币的 USDG 变动（换 ETH、和外部地址的转账）：不进格子，对账时列出来，格子 + 这些 = 钱包余额变化
+  const otherByDay = new Map()
+  for (const o of CAL.other || []) if (inMonth(o.time)) { const k = new Date(o.time).getDate(); otherByDay.set(k, [...(otherByDay.get(k) ?? []), o]) }
+  const OTHER = { native: `换 ${NS}`, transfer: `转账或换 ${NS}`, multi: '一笔两种币' }
+  const otherText = (list) => { const by = {}; for (const o of list) by[o.kind] = (by[o.kind] || 0) + o.quote; return Object.entries(by).map(([k, v]) => `${OTHER[k]} ${money(v)}`).join('、') }
+  const sum = (list, f) => list.reduce((s, c) => s + (f(c) || 0), 0)
+  const dayOf = (d) => { const list = byDay.get(d) ?? [], eps = epByDay.get(d) ?? [], other = otherByDay.get(d) ?? []; return { d, list, eps, other, lp: sum(list, (c) => c.pnl), cash: eps.length ? sum(eps, (e) => e.cash) : null, gas: sum(eps, (e) => e.gas) } }
+  const days = [...new Set([...byDay.keys(), ...epByDay.keys()])].sort((a, b) => a - b).map(dayOf)
+  const otherMonth = [...otherByDay.values()].flat()
+  const main = (x) => (x.cash === null ? x.lp : x.cash) // 有现金账就显示现金，没有（代币还没卖光 / 仓位没撤完）先显示 LP 口径
+  const all = days.flatMap((x) => x.list), allEps = days.flatMap((x) => x.eps)
+  const month = sum(days, main), lpMonth = sum(all, (c) => c.pnl), cashMonth = sum(allEps, (e) => e.cash), lpInEps = sum(allEps, (e) => e.lpPnl), gas = sum(allEps, (e) => e.gas)
+  const { w, l } = wlc(allEps.length ? allEps.map((e) => ({ pnl: e.cash })) : all)
+  const best = days.reduce((a, b) => (main(b) > main(a) ? b : a), days[0]), worst = days.reduce((a, b) => (main(b) < main(a) ? b : a), days[0])
   $('#cal-stats').innerHTML = [
-    tile('本月盈亏', all.length ? money(month) : '—', all.length ? `${days.length} 天有平仓 · 已扣 gas ${fmtUsd(gas)}` : '本月没有平仓', all.length ? pnlCol(month) : ''),
-    tile('平仓', `${all.length}`, `${mo + 1} 月平掉的仓位数`),
-    tile('胜率', w + l ? `${Math.round((w / (w + l)) * 100)}%` : '—', all.length ? `${wl(all)}（平不计入）` : '盈亏 > 0 算胜'),
-    tile('最好一天', best ? money(best.pnl) : '—', best ? `${mo + 1} 月 ${best.d} 日，${best.list.length} 个平仓` : '', best ? pnlCol(best.pnl) : ''),
-    tile('最差一天', worst ? money(worst.pnl) : '—', worst ? `${mo + 1} 月 ${worst.d} 日，${worst.list.length} 个平仓` : '', worst ? pnlCol(worst.pnl) : ''),
+    tile(`本月钱包 ${QS} 变化`, days.length ? money(month) : '—', days.length ? `做 LP ${lpMonth >= 0 ? '赚' : '亏'} ${fmtUsd(lpMonth)}，买币卖币吃掉 ${fmtUsd(lpInEps - cashMonth)}；gas 另花 ${fmtUsd(gas)}${otherMonth.length ? `<br>转账、换 ${NS} 不算在内：${otherText(otherMonth)}` : ''}` : '本月没有平仓', days.length ? pnlCol(month) : ''),
+    tile('平仓', `${all.length}`, `${mo + 1} 月平掉的仓位数 · ${allEps.length} 段买卖`),
+    tile('胜率', w + l ? `${Math.round((w / (w + l)) * 100)}%` : '—', allEps.length ? `按每段买卖的现金结果，${w} 胜 ${l} 负（平不计入）` : all.length ? `${wl(all)}（平不计入）` : '盈亏 > 0 算胜'),
+    tile('最好一天', best ? money(main(best)) : '—', best ? `${mo + 1} 月 ${best.d} 日，${best.list.length} 个平仓` : '', best ? pnlCol(main(best)) : ''),
+    tile('最差一天', worst ? money(main(worst)) : '—', worst ? `${mo + 1} 月 ${worst.d} 日，${worst.list.length} 个平仓` : '', worst ? pnlCol(main(worst)) : ''),
   ].join('')
   let h = ['一', '二', '三', '四', '五', '六', '日'].map((d) => `<div class="dow">周${d}</div>`).join('')
   h += '<div class="day blank"></div>'.repeat((new Date(y, mo, 1).getDay() + 6) % 7)
   for (let d = 1, n = new Date(y, mo + 1, 0).getDate(); d <= n; d++) {
-    const x = byDay.get(d), pnl = x ? x.reduce((s, c) => s + c.pnl, 0) : 0
-    const cls = ['day', x ? (pnl >= 0 ? 'up has' : 'down has') : '', today.getFullYear() === y && today.getMonth() === mo && today.getDate() === d ? 'today' : '', calSel === d ? 'sel' : '']
-    h += `<div class="${cls.filter(Boolean).join(' ')}" data-day="${d}"><div class="n">${d}</div>${x ? `<div class="v" style="color:${pnlCol(pnl)}">${money(pnl)}</div><div class="small">${x.length} 个平仓 · ${wl(x)}</div>` : ''}</div>`
+    const x = days.find((q) => q.d === d), v = x ? main(x) : 0
+    const cls = ['day', x ? (v >= 0 ? 'up has' : 'down has') : '', today.getFullYear() === y && today.getMonth() === mo && today.getDate() === d ? 'today' : '', calSel === d ? 'sel' : '']
+    h += `<div class="${cls.filter(Boolean).join(' ')}" data-day="${d}"><div class="n">${d}</div>${x ? `<div class="v" style="color:${pnlCol(v)}">${money(v)}</div><div class="small">${x.cash === null ? `${x.list.length} 个平仓 · ${wl(x.list)}` : `${x.list.length} 个平仓 · 换币吃掉 ${fmtUsd(x.lp - x.cash)}`}</div>` : ''}</div>`
   }
   $('#cal-grid').innerHTML = h
-  $('#cal-note').textContent = `共 ${CAL.closed.length} 个已平仓仓位（本地时间归日）${CAL.nonUsdg ? `，${CAL.nonUsdg} 个非 ${QS} 池的未计入` : ''}${CAL.failed ? `，${CAL.failed} 个读取失败` : ''}`
-  const sel = byDay.get(calSel), box = $('#cal-day')
+  $('#cal-note').textContent = `共 ${CAL.closed.length} 个已平仓仓位、${(CAL.episodes || []).length} 段买卖（本地时间归日）${CAL.nonUsdg ? `，${CAL.nonUsdg} 个非 ${QS} 池的未计入` : ''}${CAL.failed ? `，${CAL.failed} 个读取失败` : ''}`
+  const sel = days.find((q) => q.d === calSel), box = $('#cal-day')
   box.style.display = sel ? '' : 'none'
-  if (sel) box.innerHTML = `<h4 style="margin:0 0 10px">${mo + 1} 月 ${calSel} 日平仓 ${sel.length} 个，合计 <b style="color:${pnlCol(sel.reduce((s, c) => s + c.pnl, 0))}">${money(sel.reduce((s, c) => s + c.pnl, 0))}</b></h4>
-    <p class="small">LP 口径：仓位存入、撤出本金与手续费的估值，减去建仓 / 撤仓 / 领取交易的 gas（同一笔交易里的几个仓位均分，按当前 ${NS} 价折算）；换币和授权的 gas、钱包闲置代币不计入，不等同于整次交易的现金收支。</p>
-    <table><thead><tr><th>平仓时间</th><th>仓位</th><th>交易对</th><th>存入</th><th>撤出本金估值</th><th>手续费</th><th>gas</th><th>LP 盈亏</th><th>持仓时间</th><th>交易</th></tr></thead><tbody>${[...sel].sort((a, b) => b.closedAt - a.closedAt).map((c) => `<tr>
+  if (!sel) return
+  const cashTd = (v) => `<td style="color:${pnlCol(v)};font-weight:600">${money(v)}</td>`
+  // 一段 = 一个代币从买入到卖光。投入 = 买币 + 存进池子的 USDG；收回 = 池子退的 + 卖币得到的 USDG；赚亏 = 收回 − 投入，就是钱包余额的变化
+  const rowOf = (e) => `<tr>
+      <td>${esc(e.symbol)}${e.leftover >= 1 ? `<br><span class="small" title="结束时钱包里还剩的代币，没算钱">还剩 ${sigAmt(e.leftover)} 个没卖</span>` : ''}</td>
+      <td>${fmtUsd(e.buys + e.lpIn)}</td><td>${fmtUsd(e.lpOut + e.sells)}</td>${cashTd(e.cash)}
+      <td class="small" title="旧算法（只算池子那段，代币按池价估）算出 ${money(e.lpPnl)}，比实际多算了这么多：就是买币、卖币两次被手续费和滑点吃掉的">${fmtUsd(e.lpPnl - e.cash)}</td>
+      <td class="small">${e.ids.length ? `${e.ids.length} 个仓位 · ` : ''}${new Date(e.start).toLocaleTimeString()} → ${new Date(e.end).toLocaleTimeString()}</td></tr>`
+  box.innerHTML = `<h4 style="margin:0 0 10px">${mo + 1} 月 ${calSel} 日：钱包 ${QS} ${main(sel) >= 0 ? '多了' : '少了'} <b style="color:${pnlCol(main(sel))}">${fmtUsd(main(sel))}</b>${sel.cash === null ? '（代币还没卖光，先按池子里那段估）' : `。其中做 LP ${sel.lp >= 0 ? '赚' : '亏'} ${fmtUsd(sel.lp)}，买币卖币的手续费和滑点吃掉 ${fmtUsd(sum(sel.eps, (e) => e.lpPnl) - sel.cash)}；gas 另花了 ${fmtUsd(sel.gas)} 的 ${NS}`}</h4>
+    ${sel.other.length ? `<p class="small">当天另有和买卖无关的 ${QS} 进出（${otherText(sel.other)}），加上才等于余额变化。</p>` : ''}
+    ${sel.eps.length ? `<table><thead><tr><th>代币</th><th>投入（买币 + 存池子）</th><th>收回（池子退的 + 卖币）</th><th>赚亏</th><th>其中换币吃掉</th><th>时间</th></tr></thead><tbody>${[...sel.eps].sort((a, b) => b.closedAt - a.closedAt).map(rowOf).join('')}</tbody></table>
+    <p class="small">同一个币出现两行 = 卖光后又买了一次。"还剩 N 个没卖"的那行，剩下的币没算钱，卖掉那天再算。</p>` : ''}
+    <details style="margin-top:14px"><summary class="small" style="cursor:pointer">细账：每个仓位按池价估的存入 / 撤出 / 手续费（旧算法，${sel.list.length} 个平仓）</summary>
+    <table><thead><tr><th>平仓时间</th><th>仓位</th><th>交易对</th><th>存入</th><th>撤出本金估值</th><th>手续费</th><th>gas</th><th>LP 盈亏</th><th>持仓时间</th><th>交易</th></tr></thead><tbody>${[...sel.list].sort((a, b) => b.closedAt - a.closedAt).map((c) => `<tr>
       <td>${new Date(c.closedAt).toLocaleTimeString()}</td><td class="mono" title="${c.id}">#${sid(c.id)}</td><td>${esc(c.symbol)}/${c.quote || QS} ${c.feeText || c.fee + '%'}</td>
       <td>${fmtUsd(c.deposits)}</td><td>${fmtUsd(c.withdrawn)}${c.valuationTx?`<br><a class="tx small" href="${STATE.explorer}/tx/${c.valuationTx}" target="_blank" title="原池价格处于极限，撤出代币按后续实际卖币成交价估值；仅计算 LP 部分，不含钱包原有代币和换币 gas">按卖币成交价估值</a>`:''}</td><td>${fmtUsd(c.fees)}</td><td>${c.gas ? '−' + fmtUsd(c.gas) : '—'}</td>
       <td style="color:${pnlCol(c.pnl)};font-weight:600">${money(c.pnl)}<br><span class="small" style="color:${pnlCol(c.pnl)}">${c.deposits > 0 ? signed((c.pnl / c.deposits) * 100) : ''}</span></td>
       <td>${c.openedAt ? fmtHold(c.closedAt - c.openedAt) : '—'}</td>
-      <td class="mono"><a class="tx" href="${STATE.explorer}/tx/${c.closedTx}" target="_blank">${c.closedTx.slice(0, 8)}…${c.closedTx.slice(-4)}</a></td></tr>`).join('')}</tbody></table>`
+      <td class="mono"><a class="tx" href="${STATE.explorer}/tx/${c.closedTx}" target="_blank">${c.closedTx.slice(0, 8)}…${c.closedTx.slice(-4)}</a></td></tr>`).join('')}</tbody></table></details>`
 }
 $('#cal-prev').onclick = () => { calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1); calSel = null; renderCalendar() }
 $('#cal-next').onclick = () => { calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1); calSel = null; renderCalendar() }

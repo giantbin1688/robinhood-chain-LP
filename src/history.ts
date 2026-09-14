@@ -12,7 +12,7 @@ import { exitValuation, transferEvent } from './exit-valuation.ts'
 
 // in: 钱包 -> 池 的每种币数量（地址小写），out: 反向；direct: v3 由事件直接得到的每仓位数量
 type Direct = { action: 'add' | 'collect' | 'remove'; amount0: bigint; amount1: bigint; principal0: bigint; principal1: bigint }
-type ParsedTx = { block: bigint; time: number; mods: Mod[]; in: Map<string, bigint>; out: Map<string, bigint>; direct: Map<bigint, Direct>; gas: bigint } // gas：钱包自己发的这笔交易花的原生币（wei）；别人发的算 0
+type ParsedTx = { block: bigint; time: number; mods: Mod[]; in: Map<string, bigint>; out: Map<string, bigint>; direct: Map<bigint, Direct>; gas: bigint; wallet: Map<string, bigint> } // gas：钱包自己发的这笔交易花的原生币（wei）；别人发的算 0。wallet：这笔交易里钱包每种币的净变化（地址小写，正 = 收到），换币、转账也算——现金账用
 export type LedgerEvent = {
   tx: Hex; block: bigint; time: number; action: 'add' | 'collect' | 'remove'
   amount0: bigint; amount1: bigint; principal0: bigint; principal1: bigint // 本仓位在这笔交易里进/出的两种币；principal = 其中的本金部分（其余是手续费）
@@ -48,13 +48,11 @@ async function operationSlot(c:Clients,pool:Pool,block:bigint,logIndex:number) {
 // 交易前一个区块时该仓位的流动性（多仓位同笔交易分手续费用）
 const preLiquidity = (c: Clients, id: bigint, block: bigint) => cached(storeOf(c).preLiqCache, `${id}:${block}`, () => c.lp.liquidityAt(id, block - 1n))
 
-// 从 since 区块起钱包和池之间的转账 -> 交易哈希（两个方向）；同时拿到区块时间。
-// v4/Infinity 对手方固定是 PoolManager/Vault；v3 是各个池合约，改为查钱包与 NPM 相关的全部 ERC20 转账再按回执过滤
+// 从 since 区块起钱包的全部 ERC20 转账 -> 交易哈希（两个方向）；同时拿到区块时间。
+// 不只看和 PoolManager 之间的：进出场的换币（UniversalRouter / 聚合器）、转账也要进现金账（tokenEpisodes），回执里再按事件区分
 async function transferTxs(c: Clients, since: bigint) {
   const out = new Map<Hex, { block: bigint; time: number }>()
-  const cp = c.lp.ledger.counterparty
-  const dirs = cp ? [{ fromAddress: c.wallet, toAddress: cp }, { fromAddress: cp, toAddress: c.wallet }] : [{ fromAddress: c.wallet }, { toAddress: c.wallet }]
-  for (const dir of dirs) {
+  for (const dir of [{ fromAddress: c.wallet }, { toAddress: c.wallet }]) {
     for (let pageKey: string | undefined; ; ) {
       const r: any = await c.pub.request({ method: 'alchemy_getAssetTransfers', params: [{ fromBlock: `0x${since.toString(16)}`, toBlock: 'latest', ...dir, category: ['erc20'], withMetadata: true, maxCount: '0x3e8', ...(pageKey ? { pageKey } : {}) }] } as any)
       for (const t of r.transfers) out.set(t.hash, { block: BigInt(t.blockNum), time: Date.parse(t.metadata?.blockTimestamp ?? '') || 0 })
@@ -76,16 +74,18 @@ export async function refreshLedger(c: Clients, since: bigint) {
       const rc = await c.pub.getTransactionReceipt({ hash })
       const gas = same(rc.from, c.wallet) ? rc.gasUsed * rc.effectiveGasPrice : 0n
       const mods = c.lp.ledger.parseMods(rc.logs)
-      const inb = new Map<string, bigint>(), outb = new Map<string, bigint>()
-      if (cp) for (const t of parseEventLogs({ abi: [transferEvent], logs: rc.logs })) {
+      const inb = new Map<string, bigint>(), outb = new Map<string, bigint>(), wallet = new Map<string, bigint>()
+      for (const t of parseEventLogs({ abi: [transferEvent], logs: rc.logs })) {
         const k = t.address.toLowerCase()
+        if (same(t.args.from, c.wallet)) wallet.set(k, (wallet.get(k) ?? 0n) - t.args.value)
+        if (same(t.args.to, c.wallet)) wallet.set(k, (wallet.get(k) ?? 0n) + t.args.value)
+        if (!cp) continue
         if (same(t.args.from, c.wallet) && same(t.args.to, cp)) inb.set(k, (inb.get(k) ?? 0n) + t.args.value)
         if (same(t.args.from, cp) && same(t.args.to, c.wallet)) outb.set(k, (outb.get(k) ?? 0n) + t.args.value)
       }
       const direct = new Map<bigint, Direct>()
       for (const e of c.lp.ledger.parseDirect?.(rc.logs) ?? []) direct.set(e.id, e)
-      if (mods.length || direct.size) S.txs.set(hash, { block: meta.block, time: meta.time, mods, in: inb, out: outb, direct, gas })
-      else S.txs.set(hash, { block: meta.block, time: meta.time, mods: [], in: inb, out: outb, direct, gas }) // 无关交易也记下，免得每次重拉回执
+      S.txs.set(hash, { block: meta.block, time: meta.time, mods, in: inb, out: outb, direct, gas, wallet }) // 换币、转账也记下：现金账要用，也免得每次重拉回执
     }))
   }
   S.scannedFrom = since
@@ -184,4 +184,64 @@ export function closedPositions(c: Clients) {
     acc.set(m.id, a)
   }
   return [...acc].filter(([, a]) => a.delta === 0n && a.closed.block > 0n).map(([id, { poolId, tickLower, tickUpper, closed }]) => ({ id, poolId, tickLower, tickUpper, closed }))
+}
+
+// ---- 现金账：按代币把 买币 -> 建仓 -> 撤仓 -> 卖币 串成一段（episode），这一段里钱包计价币的净变化就是这次操作真正赚 / 亏的钱 ----
+// 盈亏日历原来只算 LP 那段（存入 / 撤出 / 手续费按池价折算），进出场把计价币换成代币、再换回来的手续费和滑点不在里面，
+// 于是日历和钱包余额对不上（曾有一天余额 −774、日历 −357）。这里不估值：只数钱包里计价币进出了多少，和余额变化同一口径。
+// 一段的划分：同一代币的交易按区块排；仓位全部撤完且代币只剩粉尘（≤ 最大持有量的 0.5%，紧接着就卖粉尘的等它卖完）就结束；
+// 做过 LP 的代币撤完仓没卖光、下一笔又是买入，也算结束（剩的币记 0，卖掉时算进下一段）。
+// 不属于任何代币的计价币变动（换原生币 / 包装币、和外部地址的转账、一笔里动了两种代币）不进段，另外按类返回，网页对账时列出来
+export type Episode = {
+  token: string; start: number; end: number; closedAt: number // closedAt：最后一笔撤仓的时间（没有仓位就是最后一笔）；日历按它归日
+  ids: bigint[]; txs: number; open: boolean // open：仓位还没撤完，日历不显示
+  quote: bigint; buys: bigint; sells: bigint; lpIn: bigint; lpOut: bigint; gasWei: bigint // 计价币原始单位：quote 净变化 = sells + lpOut − buys − lpIn
+  leftover: bigint // 结束时钱包里还剩的代币（原始单位），按 0 计
+}
+export type OtherFlow = { time: number; quote: bigint; kind: 'native' | 'transfer' | 'multi' }
+const max = (a: bigint, b: bigint) => (a > b ? a : b)
+export async function tokenEpisodes(c: Clients, poolToken: (poolId: Hex) => Promise<string | null>, skip: string[]): Promise<{ episodes: Episode[]; other: OtherFlow[] }> {
+  const S = storeOf(c)
+  const q = c.Q.address.toLowerCase(), ignore = new Set([q, ...skip.map((a) => a.toLowerCase())])
+  type Ev = ParsedTx & { hash: Hex; token: bigint; mine: Mod[] }
+  const byToken = new Map<string, Ev[]>()
+  const other: OtherFlow[] = []
+  for (const [hash, t] of S.txs) {
+    const tokens = new Set([...t.wallet].filter(([a, v]) => v !== 0n && !ignore.has(a)).map(([a]) => a))
+    const modToken = new Map<Mod, string>()
+    for (const m of t.mods) { const tk = await poolToken(m.poolId); if (tk) { modToken.set(m, tk.toLowerCase()); tokens.add(tk.toLowerCase()) } }
+    if (tokens.size !== 1) {
+      const dq = t.wallet.get(q) ?? 0n
+      if (dq !== 0n) other.push({ time: t.time, quote: dq, kind: [...t.wallet].some(([a, v]) => v !== 0n && a !== q && ignore.has(a)) ? 'native' : tokens.size ? 'multi' : 'transfer' })
+      continue
+    }
+    const [tk] = tokens
+    byToken.set(tk, [...(byToken.get(tk) ?? []), { ...t, hash, token: t.wallet.get(tk) ?? 0n, mine: t.mods.filter((m) => modToken.get(m) === tk) }])
+  }
+  const out: Episode[] = []
+  for (const [token, list] of byToken) {
+    list.sort((a, b) => (a.block < b.block ? -1 : a.block > b.block ? 1 : 0))
+    let ep: Episode | null = null, bal = 0n, maxBal = 0n
+    const liq = new Map<bigint, bigint>()
+    const openCount = () => [...liq.values()].filter((v) => v !== 0n).length
+    const finish = (open: boolean) => { if (!ep) return; ep.open = open; ep.leftover = bal; if (!ep.closedAt) ep.closedAt = ep.end; out.push(ep); ep = null; bal = 0n; maxBal = 0n }
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i], dq = t.wallet.get(q) ?? 0n
+      if (!ep) ep = { token, start: t.time, end: t.time, closedAt: 0, ids: [], txs: 0, open: false, quote: 0n, buys: 0n, sells: 0n, lpIn: 0n, lpOut: 0n, gasWei: 0n, leftover: 0n }
+      ep.end = t.time; ep.txs++; ep.gasWei += t.gas; ep.quote += dq
+      bal += t.token; maxBal = max(maxBal, bal)
+      if (t.mine.length) {
+        for (const m of t.mine) { liq.set(m.id, (liq.get(m.id) ?? 0n) + m.delta); if (!ep.ids.includes(m.id)) ep.ids.push(m.id) }
+        if (dq < 0n) ep.lpIn += -dq; else ep.lpOut += dq
+        if (t.mine.some((m) => m.delta < 0n) && !openCount()) ep.closedAt = t.time
+      } else if (dq < 0n) ep.buys += -dq
+      else ep.sells += dq
+      if (openCount()) continue
+      const next = list[i + 1]
+      const dust = bal <= (maxBal * 5n) / 1000n && !(next && next.token < 0n && !next.mine.length && bal > 0n) // 粉尘马上要卖的，等卖完一起算
+      if (dust || !next || (ep.ids.length && next.token > 0n && !next.mine.length)) finish(false)
+    }
+    finish(true)
+  }
+  return { episodes: out.filter((e) => e.ids.length || e.quote !== 0n).sort((a, b) => a.closedAt - b.closedAt), other } // 只收到币没动过钱的（空投、别人塞的）不算一段
 }

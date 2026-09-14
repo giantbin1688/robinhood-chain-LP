@@ -57,6 +57,17 @@ function routedFetch(primary: string, fallback: string, quiet: boolean) {
     return r
   }
 }
+// 等交易确认：轮询 getSignatureStatuses，不用 SDK 的 confirmTransaction——它先开 WebSocket 订阅 signatureSubscribe，
+// 很多节点（Alchemy 等）不支持这个方法，每次重连都往控制台打一段 JSON 错误，刷屏十几遍后才退回轮询。
+// 区块高度超过 lastValidBlockHeight 还没上链就算过期（和 SDK 的判定一致）
+async function waitConfirmed(conn: Connection, sig: string, lastValidBlockHeight: number) {
+  for (;;) {
+    const st = (await conn.getSignatureStatuses([sig])).value[0]
+    if (st && (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized')) return { value: { err: st.err } }
+    if ((await conn.getBlockHeight('confirmed')) > lastValidBlockHeight) throw new Error(`交易 ${sig} 在区块过期前没有确认（blockhash 已失效），请查浏览器确认是否上链后再重试`)
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+}
 export function makeConnection(rpc: string, quiet = false) {
   const own = rpc !== SOL_CHAIN.publicRpc
   return new Connection(rpc, { commitment: 'confirmed', disableRetryOnRateLimit: true, fetch: own ? (routedFetch(rpc, SOL_CHAIN.publicRpc, quiet) as any) : undefined })
@@ -185,7 +196,7 @@ export function solTxKit(c: SolClients, usd: (lamports: bigint) => string) {
     const raw = b.tx.serialize()
     const sig = await conn.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 5 })
     process.stdout.write(`${new Date().toTimeString().slice(0, 8)} ${b.label} ${sig} ...`)
-    const conf = await conn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
+    const conf = await waitConfirmed(conn, sig, lastValidBlockHeight)
     let fee = 0n, cu = 0
     const t = await conn.getTransaction(sig, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 }).catch(() => null)
     if (t?.meta) { fee = BigInt(t.meta.fee); cu = t.meta.computeUnitsConsumed ?? 0 }

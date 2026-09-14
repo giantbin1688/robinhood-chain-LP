@@ -15,7 +15,7 @@ import { CHAINS, protocolLabel, type ChainName, type ProtocolName } from '../cha
 import { v3Tiers } from '../lp-v3.ts'
 import { env, erc20Abi, feeText, log, makeClients, nativePriceUsd, p6, tokenMeta, trim, updatePositionRecords, type Clients, type Shape } from '../common.ts'
 import { findPositions, positionFees, same, type Position } from '../exit.ts'
-import { closedPositions, positionLedger, refreshLedger, type LedgerEvent } from '../history.ts'
+import { closedPositions, positionLedger, refreshLedger, tokenEpisodes, type LedgerEvent } from '../history.ts'
 import type { Pool } from '../lp.ts'
 import { readTickDetail } from '../tick-detail.ts'
 import { listTokenPools } from '../pools.ts'
@@ -150,14 +150,14 @@ type Ctx = {
   sel: EvmSel; c: Clients
   meta: Map<string, { symbol: string; decimals: number }>; known: Position[]
   ledgerAt: number; ledgerOk: boolean; ledgerError: string
-  depthCache: Map<string, { at: number; data: unknown }>; closedCache: Map<bigint, ClosedRow>; blockTime: Map<bigint, Promise<number>>
+  depthCache: Map<string, { at: number; data: unknown }>; closedCache: Map<bigint, ClosedRow>; blockTime: Map<bigint, Promise<number>>; pools: Map<Hex, Promise<Pool | null>>
 }
 const ctxs = new Map<string, Promise<Ctx>>()
 function ctxOf(sel0: Sel): Promise<Ctx> {
   const sel = evm(sel0)
   if (!hasKey) throw new Error('.env 里没有 PRIVATE_KEY')
   const k = `${sel.chain}:${sel.protocol}`
-  if (!ctxs.has(k)) ctxs.set(k, makeClients({ needKey: false, chain: sel.chain, protocol: sel.protocol }).then((c) => ({ sel, c, meta: new Map(), known: [], ledgerAt: 0, ledgerOk: false, ledgerError: '', depthCache: new Map(), closedCache: new Map(), blockTime: new Map() })))
+  if (!ctxs.has(k)) ctxs.set(k, makeClients({ needKey: false, chain: sel.chain, protocol: sel.protocol }).then((c) => ({ sel, c, meta: new Map(), known: [], ledgerAt: 0, ledgerOk: false, ledgerError: '', depthCache: new Map(), closedCache: new Map(), blockTime: new Map(), pools: new Map() })))
   return ctxs.get(k)!
 }
 
@@ -323,11 +323,11 @@ async function closedList(x: Ctx) {
   if (!c.rpcIsAlchemy) throw new Error(`资金流水需要 Alchemy 节点（${c.cfg.rpcEnv}）`)
   await refresh(x, 0n)
   const list = closedPositions(c).filter((q) => !x.closedCache.has(q.id))
-  const poolIds = [...new Set(list.map((q) => q.poolId))]
+  const poolOf = (pid: Hex) => { if (!x.pools.has(pid)) x.pools.set(pid, lp.poolById(pid).catch(() => null)); return x.pools.get(pid)! }
   const keyOf = new Map<Hex, Pool | null>()
-  for (const pid of poolIds) keyOf.set(pid, await lp.poolById(pid).catch(() => null))
+  for (const pid of new Set(list.map((q) => q.poolId))) keyOf.set(pid, await poolOf(pid))
   const cents = (v: number) => Math.round(v * 100) / 100
-  const nativeUsd = list.length ? await nativePriceUsd(c).catch(() => 0) : 0
+  const nativeUsd = await nativePriceUsd(c).catch(() => 0)
   let nonUsdg = 0, failed = 0
   for (const q of list) { // 逐个算：每笔都要按当时的区块读池价（归档调用），并发会撞 Alchemy 的每秒额度
     const pool = keyOf.get(q.poolId)
@@ -342,7 +342,19 @@ async function closedList(x: Ctx) {
       x.closedCache.set(q.id, { id: q.id.toString(), token, symbol: m.symbol, fee: pool.fee / 10000, feeText: feeText(pool), openedAt: s.mintedAt, closedAt: q.closed.time, closedTx: q.closed.tx, deposits: cents(s.deposits), withdrawn: cents(s.withdrawn), fees: cents(s.fees), gas: cents(gas), pnl: cents(s.withdrawn + s.fees - s.deposits - gas), valuationTx:events.find(e=>e.valuationTx)?.valuationTx })
     } catch (e: any) { failed++; log(`仓位 ${q.id} 平仓盈亏读取失败: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`) }
   }
-  return { closed: [...x.closedCache.values()].sort((a, b) => a.closedAt - b.closedAt), nonUsdg, failed }
+  // 现金账（history.ts tokenEpisodes）：每段 = 一个代币从买入到卖光，钱包计价币的净变化；和 LP 口径的差就是进出场换币的手续费 + 滑点
+  const poolToken = async (pid: Hex) => { const pool = await poolOf(pid); if (!pool || ![pool.currency0, pool.currency1].some((a) => same(a, c.Q.address))) return null; return same(pool.currency0, c.Q.address) ? pool.currency1 : pool.currency0 }
+  const u = (v: bigint) => cents(Number(v) / 10 ** c.Q.decimals)
+  const episodes = []
+  const eps = await tokenEpisodes(c, poolToken, [c.cfg.wnative])
+  for (const e of eps.episodes) {
+    if (e.open) continue
+    const m = await metaOf(x, e.token as Address).catch(() => ({ symbol: e.token.slice(0, 8), decimals: 18 }))
+    const lpPnl = e.ids.reduce((s, id) => s + (x.closedCache.get(id)?.pnl ?? 0), 0)
+    episodes.push({ token: e.token, symbol: m.symbol, start: e.start, end: e.end, closedAt: e.closedAt, ids: e.ids.map(String), txs: e.txs, buys: u(e.buys), sells: u(e.sells), lpIn: u(e.lpIn), lpOut: u(e.lpOut), cash: u(e.quote), gas: cents((Number(e.gasWei) / 1e18) * nativeUsd), lpPnl: cents(lpPnl), leftover: Number(e.leftover) / 10 ** m.decimals })
+  }
+  const other = eps.other.map((o) => ({ time: o.time, quote: u(o.quote), kind: o.kind })).filter((o) => o.quote !== 0) // 不归任何代币的计价币变动：换 ETH / 转账 / 一笔两种币
+  return { closed: [...x.closedCache.values()].sort((a, b) => a.closedAt - b.closedAt), episodes, other, nonUsdg, failed }
 }
 
 // ---- 该代币的全部池子（GeckoTerminal 列表，可复用的计价币池再读链上池价）----
