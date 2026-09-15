@@ -1,5 +1,6 @@
 // Solana 换币：Jupiter 聚合器（lite-api.jup.ag 免费、免 key；配了 JUPITER_API_KEY 走 api.jup.ag）和「要做 LP 的那个池」同时报价，产出多的排前面。
 // 和 EVM 的 swapOffers 一个思路：聚合器报价虚高时池内直换兜底；探测市场价（external）只问聚合器，别拿池子自己当市场
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { VersionedTransaction } from '@solana/web3.js'
 import { solanaCfg } from '../settings.ts'
 import { die, log, sleep, type SolClients, type TxBundle, balanceOf } from './common.ts'
@@ -49,19 +50,42 @@ export async function solSwapOffers(d: SolSwapDeps, tokenIn: string, tokenOut: s
   if (!ok.length && o.external) ok = (await poolOffers()).filter((x): x is SolSwapOffer => !!x)
   return ok.sort((a, b) => (a.out > b.out ? -1 : 1))
 }
-// 报价 -> 可发送的交易（Jupiter 报价超过 20 秒就重新报一次）
-export async function solPrepareSwap(o: SolSwapOffer, d: SolSwapDeps, tokenIn: string, tokenOut: string): Promise<TxBundle> {
+// 报价 -> 可发送的交易（Jupiter 报价超过 20 秒就重新报一次）；jupQuote 带回实际用于成交的那份报价，入账时对比报价 vs 实收
+export async function solPrepareSwap(o: SolSwapOffer, d: SolSwapDeps, tokenIn: string, tokenOut: string): Promise<TxBundle & { jupUsed?: any }> {
   if (o.via === 'pool') return d.c.lp.swapTx(o.pool!.pool, o.pool!.xToY, o.amountIn, o.pool!.minOut)
   let q = o.jup
   if (Date.now() - o.at > 20_000) q = (await jupQuote(tokenIn, tokenOut, o.amountIn, d.slippage)).quote
-  return jupSwapTx(q, d.c.wallet.toBase58())
+  return { ...(await jupSwapTx(q, d.c.wallet.toBase58())), jupUsed: q }
 }
+
+// ---- 换币入账：每笔真实换币按签名记进 sol-swaps.json（gitignore），盈亏日历用它算 报价差（滑点）和路由手续费 ----
+export type SwapRecord = { sig: string; time: number; wallet: string; via: 'jupiter' | 'pool'; inMint: string; outMint: string; amountIn: string; quotedOut: string; minOut: string; actualOut: string; impactPct: number; route: string; fees: { mint: string; amount: string }[] }
+const SWAPS_FILE = 'sol-swaps.json'
+export const loadSwapRecords = (): SwapRecord[] => { try { return existsSync(SWAPS_FILE) ? JSON.parse(readFileSync(SWAPS_FILE, 'utf8')) : [] } catch { return [] } }
+function recordSwap(d: SolSwapDeps, o: SolSwapOffer, q: any, tokenIn: string, tokenOut: string, got: bigint, sig: string) {
+  const quoted = q ? BigInt(q.outAmount ?? o.out) : o.out
+  const diff = quoted > 0n ? (Number(quoted - got) / Number(quoted)) * 100 : 0
+  log(`换币入账: 报价 ${d.fmtOut(quoted)} 实收 ${d.fmtOut(got)} ${d.outSym}（报价差 ${diff.toFixed(2)}%）`)
+  if (!sig) return
+  try {
+    const all = loadSwapRecords()
+    all.push({
+      sig, time: Date.now(), wallet: d.c.wallet.toBase58(), via: o.via, inMint: tokenIn, outMint: tokenOut,
+      amountIn: o.amountIn.toString(), quotedOut: quoted.toString(), minOut: q ? String(q.otherAmountThreshold ?? q.outAmount) : (o.pool?.minOut ?? 0n).toString(), actualOut: got.toString(),
+      impactPct: q ? Number(q.priceImpactPct ?? 0) : 0, route: q ? (q.routePlan ?? []).map((r: any) => r.swapInfo?.label ?? '?').join('+') : '池内直换',
+      fees: q ? (q.routePlan ?? []).map((r: any) => ({ mint: String(r.swapInfo?.feeMint ?? ''), amount: String(r.swapInfo?.feeAmount ?? '0') })).filter((f: any) => f.mint && f.amount !== '0') : [],
+    })
+    writeFileSync(SWAPS_FILE, JSON.stringify(all.slice(-2000)) + '\n')
+  } catch (e: any) { log(`换币记录写入失败（不影响交易）: ${String(e?.message).slice(0, 80)}`) }
+}
+
 // 执行一个报价，返回收到的 tokenOut 数量
 export async function solExecuteSwap(o: SolSwapOffer, d: SolSwapDeps, kit: { send(b: TxBundle): Promise<unknown> }, tokenIn: string, tokenOut: string, label: string) {
   const before = await balanceOf(d.c.conn, d.c.wallet, tokenOut)
   const b = await solPrepareSwap(o, d, tokenIn, tokenOut)
-  await kit.send({ ...b, label: `${label} (${o.via === 'jupiter' ? 'Jupiter' : '池内'})` })
+  const sent: any = await kit.send({ ...b, label: `${label} (${o.via === 'jupiter' ? 'Jupiter' : '池内'})` })
   const got = (await balanceOf(d.c.conn, d.c.wallet, tokenOut)) - before
   if (got <= 0n) die(`${label}交易成功但没有收到代币?`)
+  recordSwap(d, o, b.jupUsed, tokenIn, tokenOut, got, typeof sent?.sig === 'string' ? sent.sig : '')
   return got
 }

@@ -1232,6 +1232,9 @@ async function loadPositions(full) {
         ${SEL.chain !== 'solana' ? `<select data-classify="${p.id}" style="width:100px;min-height:26px;font-size:12px" title="修改本地分类；同池、同批建仓的仓位一起更新，不发链上交易"><option value="" ${!['spot','curve','bidask','squeeze'].includes(p.shape)?'selected':''} disabled>设置分类</option>${[['spot','Spot'],['curve','Curve'],['bidask','Bid-Ask'],['squeeze','Squeeze']].map(([v,n])=>`<option value="${v}" ${p.shape===v?'selected':''}>${n}</option>`).join('')}</select>` : ''}
         <button class="btn sm" data-act="collect" data-id="${p.id}" data-sym="${sym}" data-fees="${fmtUsd(unclaimed)}" data-feetoken="${fmtAmt(p.feesToken)}" ${unclaimed < 0.01 ? 'disabled' : ''} title="领取未领手续费 ≈${fmtUsd(unclaimed)}，本金不动；确认框里可勾选顺便把领到的币卖成 ${QS}">领取</button><button class="btn sm" data-act="exit-part" data-id="${p.id}" data-sym="${sym}" title="只撤一部分流动性（比例在确认框里填），手续费一并领走，NFT 保留、剩下的继续做 LP；撤出来的币卖成 ${QS}">撤 %</button><button class="btn sm danger" data-act="exit" data-id="${p.id}" data-sym="${sym}" title="撤掉这一个仓位，卖掉撤出来的币">撤退</button>
         ${p.watchJob !== null ? `<button class="btn sm" data-act="watch-log" data-job="${p.watchJob}">日志</button><button class="btn sm" data-act="watch-stop" data-job="${p.watchJob}" title="停止监控 #${p.watchJob}">停止</button>` : `<button class="btn sm" data-act="watch" data-id="${p.id}" data-token="${p.token}" data-sym="${sym}" title="盯着池价，跳出区间自动撤退；工具栏填了止损就改为只按本金止损">监控</button>`}</span></td>`
+    if (SEL.chain === 'solana') {
+      const rent = document.createElement('button'); rent.className = 'btn sm'; rent.dataset.act = 'rent'; rent.dataset.id = p.id; rent.dataset.sym = sym; rent.title = '关闭仓位并回收账户租金，代币保留在钱包'; rent.textContent = '回收租金'; tr.querySelector('.btns')?.appendChild(rent)
+    }
     tb.appendChild(tr)
     if (open) {
       const dr = document.createElement('tr'); dr.className = 'depthrow'
@@ -1353,7 +1356,8 @@ $('#pos-table').onclick = async (e) => {
   const d = b.dataset, via = $('#p-via').value, keepTokens = $('#p-keep').checked
   const QS = (POS.find((p) => p.id === d.id) || POS.find((p) => d.ids && d.ids.split(',').includes(p.id)) || {}).quote || window.QS
   try {
-    if (d.act === 'watch-log') { showPage('tasks'); selectTask(Number(d.job)); return }
+    if (d.act === 'rent') { if (!confirm(`关闭仓位并回收租金？代币将保留在钱包。`)) return; $('#card-exit').innerHTML = ''; r = await api('/api/rent', { positions: d.id, dryRun: false }) }
+    else if (d.act === 'watch-log') { showPage('tasks'); selectTask(Number(d.job)); return }
     if (d.act === 'watch-stop') { await stopJob(Number(d.job)); return }
     let r
     if (d.act === 'watch') r = await api('/api/watch', { token: d.token, positions: d.id, symbol: d.sym, stopLoss: $('#p-stop').value, entry: $('#p-entry').value })
@@ -1457,12 +1461,27 @@ function renderCalendar() {
   const rowOf = (e) => `<tr>
       <td>${esc(e.symbol)}${e.leftover >= 1 ? `<br><span class="small" title="结束时钱包里还剩的代币，没算钱">还剩 ${sigAmt(e.leftover)} 个没卖</span>` : ''}</td>
       <td>${fmtUsd(e.buys + e.lpIn)}</td><td>${fmtUsd(e.lpOut + e.sells)}</td>${cashTd(e.cash)}
-      <td class="small" title="旧算法（只算池子那段，代币按池价估）算出 ${money(e.lpPnl)}，比实际多算了这么多：就是买币、卖币两次被手续费和滑点吃掉的">${fmtUsd(e.lpPnl - e.cash)}</td>
+      <td class="small" title="旧算法（只算池子那段，代币按池价估）算出 ${money(e.lpPnl)}，比实际多算了这么多：就是买币、卖币两次被手续费和滑点吃掉的">${fmtUsd(e.lpPnl - e.cash)}${(e.swaps || []).length ? `<br><span class="small" title="按每笔换币当分钟的池价折算：进场 = 买币付出 − 买到的币的市值；退出 = 卖出的币的市值 − 实际收到">进场 ${e.entryLoss === null ? '—' : fmtUsd(e.entryLoss)} · 退出 ${e.exitLoss === null ? '—' : fmtUsd(e.exitLoss)}${e.slip !== null ? ` · 报价差 ${fmtUsd(e.slip)}` : ''}${e.routeFee ? ` · 路由费 ${fmtUsd(e.routeFee)}` : ''}</span>` : ''}</td>
       <td class="small">${e.ids.length ? `${e.ids.length} 个仓位 · ` : ''}${new Date(e.start).toLocaleTimeString()} → ${new Date(e.end).toLocaleTimeString()}</td></tr>`
-  box.innerHTML = `<h4 style="margin:0 0 10px">${mo + 1} 月 ${calSel} 日：钱包 ${QS} ${main(sel) >= 0 ? '多了' : '少了'} <b style="color:${pnlCol(main(sel))}">${fmtUsd(main(sel))}</b>${sel.cash === null ? '（代币还没卖光，先按池子里那段估）' : `。其中做 LP ${sel.lp >= 0 ? '赚' : '亏'} ${fmtUsd(sel.lp)}，买币卖币的手续费和滑点吃掉 ${fmtUsd(sum(sel.eps, (e) => e.lpPnl) - sel.cash)}；gas 另花了 ${fmtUsd(sel.gas)} 的 ${NS}`}</h4>
+  const daySwaps = sel.eps.flatMap((e) => (e.swaps || []).map((s) => ({ ...s, symbol: e.symbol, quote: e.quote || QS }))).sort((a, b) => b.time - a.time)
+  const lossBreak = sel.eps.some((e) => e.entryLoss !== null && e.entryLoss !== undefined || e.exitLoss !== null && e.exitLoss !== undefined) ? `（能按当分钟池价折算的部分：进场换币吃掉 ${fmtUsd(sum(sel.eps, (e) => e.entryLoss))}、退出卖币吃掉 ${fmtUsd(sum(sel.eps, (e) => e.exitLoss))}${daySwaps.some((s) => s.slipUsd !== null) ? `，其中报价差 ${fmtUsd(sum(sel.eps, (e) => e.slip))}、路由费 ${fmtUsd(sum(sel.eps, (e) => e.routeFee))}` : ''}）` : ''
+  const swapRow = (s) => `<tr>
+      <td>${new Date(s.time).toLocaleTimeString()}</td><td>${s.side === 'buy' ? '买入' : '卖出'} ${esc(s.symbol)}</td>
+      <td>${sigAmt(s.tokenAmt)} ${esc(s.symbol)} ↔ ${fmtUsd(s.usd)}</td>
+      <td class="small">${s.quotedOut !== null ? `${sigAmt(s.quotedOut)} → ${sigAmt(s.actualOut)} ${esc(s.outSym)}` : '—'}</td>
+      <td class="small" title="执行时 Jupiter 报价的输出 − 实际到账，正数 = 少收了">${s.slipUsd !== null ? fmtUsd(s.slipUsd) : '—'}</td>
+      <td class="small" title="路由各腿的池子手续费（只折算计价币 / 本代币计的腿）">${s.routeFeeUsd !== null ? fmtUsd(s.routeFeeUsd) : '—'}</td>
+      <td class="small">${s.impactPct !== null ? (s.impactPct * 100).toFixed(2) + '%' : '—'}</td>
+      <td class="small" title="按这笔换币当分钟的池价：付出的价值 − 拿到的价值">${s.lossUsd !== null ? fmtUsd(s.lossUsd) : '—'}</td>
+      <td class="small">${s.route ? esc(s.route) : s.via === 'pool' ? '池内' : '—'}</td>
+      <td class="mono"><a class="tx" href="${STATE.explorer}/tx/${s.sig}" target="_blank">${s.sig.slice(0, 8)}…</a></td></tr>`
+  box.innerHTML = `<h4 style="margin:0 0 10px">${mo + 1} 月 ${calSel} 日：钱包 ${QS} ${main(sel) >= 0 ? '多了' : '少了'} <b style="color:${pnlCol(main(sel))}">${fmtUsd(main(sel))}</b>${sel.cash === null ? '（代币还没卖光，先按池子里那段估）' : `。其中做 LP ${sel.lp >= 0 ? '赚' : '亏'} ${fmtUsd(sel.lp)}，买币卖币的手续费和滑点吃掉 ${fmtUsd(sum(sel.eps, (e) => e.lpPnl) - sel.cash)}${lossBreak}；gas 另花了 ${fmtUsd(sel.gas)} 的 ${NS}`}</h4>
     ${sel.other.length ? `<p class="small">当天另有和买卖无关的 ${QS} 进出（${otherText(sel.other)}），加上才等于余额变化。</p>` : ''}
     ${sel.eps.length ? `<table><thead><tr><th>代币</th><th>投入（买币 + 存池子）</th><th>收回（池子退的 + 卖币）</th><th>赚亏</th><th>其中换币吃掉</th><th>时间</th></tr></thead><tbody>${[...sel.eps].sort((a, b) => b.closedAt - a.closedAt).map(rowOf).join('')}</tbody></table>
     <p class="small">同一个币出现两行 = 卖光后又买了一次。"还剩 N 个没卖"的那行，剩下的币没算钱，卖掉那天再算。</p>` : ''}
+    ${daySwaps.length ? `<details style="margin-top:14px"><summary class="small" style="cursor:pointer">换币细账：每笔的实际输入 / 输出、报价差、路由手续费（${daySwaps.length} 笔）</summary>
+    <table><thead><tr><th>时间</th><th>方向</th><th>实际成交</th><th>报价 → 实收</th><th>报价差</th><th>路由费</th><th>冲击</th><th>总损耗</th><th>路由</th><th>交易</th></tr></thead><tbody>${daySwaps.map(swapRow).join('')}</tbody></table>
+    <p class="small">报价差 / 路由费 / 冲击来自执行那一刻存下的 Jupiter 报价（sol-swaps.json），只有本工具发出的换币才有；总损耗按当分钟池价折算，进场 + 退出损耗已包含在上面"换币吃掉"里、从 LP 净收益中扣除。</p></details>` : ''}
     <details style="margin-top:14px"><summary class="small" style="cursor:pointer">细账：每个仓位按池价估的存入 / 撤出 / 手续费（旧算法，${sel.list.length} 个平仓）</summary>
     <table><thead><tr><th>平仓时间</th><th>仓位</th><th>交易对</th><th>存入</th><th>撤出本金估值</th><th>手续费</th><th>gas</th><th>LP 盈亏</th><th>持仓时间</th><th>交易</th></tr></thead><tbody>${[...sel.list].sort((a, b) => b.closedAt - a.closedAt).map((c) => `<tr>
       <td>${new Date(c.closedAt).toLocaleTimeString()}</td><td class="mono" title="${c.id}">#${sid(c.id)}</td><td>${esc(c.symbol)}/${c.quote || QS} ${c.feeText || c.fee + '%'}</td>

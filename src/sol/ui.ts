@@ -2,7 +2,8 @@
 // 美元一律按 计价币 × 计价币美元价（USDC = 1，SOL = 现价）折算；每行带 quote 字段，页面按行显示计价币符号
 import { balanceOf, feeText, lamportsToSol, log, makeSolClients, p6, quoteSide, quoteUsd, solUsd, tokenMeta, trim, type SolClients } from './common.ts'
 import { findPositions, quotePerToken, split, type Position } from './exit.ts'
-import { closedPositions, positionLedger } from './history.ts'
+import { closedPositions, geckoPriceAt, positionLedger, solTokenEpisodes } from './history.ts'
+import { loadSwapRecords } from './swap.ts'
 import type { LedgerEvent, SolPool } from './lp.ts'
 import { listTokenPools } from './pools.ts'
 
@@ -148,7 +149,48 @@ export async function closedList(x: SolCtx) {
       x.closedCache.set(q.id, { id: q.id, token, symbol: m.symbol, fee: q.pool.fee / 10000, feeText: feeText(q.pool), openedAt: s.mintedAt, closedAt: q.closed.time, closedTx: q.closed.tx, deposits: cents(s.deposits), withdrawn: cents(s.withdrawn), fees: cents(s.fees), gas: cents(gas), pnl: cents(s.withdrawn + s.fees - s.deposits - gas), quote: side.quote.symbol })
     } catch (e: any) { failed++; log(`仓位 ${q.id.slice(0, 8)}… 平仓盈亏读取失败: ${String(e?.message).slice(0, 120)}`) }
   }
-  return { closed: [...x.closedCache.values()].sort((a, b) => a.closedAt - b.closedAt), nonUsdg, failed }
+  // 现金账（history.ts solTokenEpisodes）：每段 = 一个代币从买入到卖光，钱包计价币的实际净变化；和 LP 口径的差就是进出场换币的手续费 + 滑点。
+  // 每笔换币再 join 执行时存的报价（sol-swaps.json）：报价 vs 实收 = 滑点/报价差，路由各腿手续费按能折算的折算；损耗按当分钟池价（Gecko）估
+  const recs = new Map(loadSwapRecords().map((r) => [r.sig, r]))
+  const { episodes: eps, other: rawOther } = await solTokenEpisodes(c, new Set(x.known.map((p) => p.id)))
+  const episodes = []
+  for (const e of eps) {
+    if (e.open) continue
+    const m = await metaOf(x, e.token)
+    const qUsd = e.quote.symbol === 'USDC' ? 1 : sol
+    const u = (v: bigint) => cents((Number(v) / 10 ** e.quote.decimals) * qUsd)
+    const lpPnl = e.ids.reduce((s, id) => s + (x.closedCache.get(id)?.pnl ?? 0), 0)
+    const side = e.pool ? quoteSide(e.pool) : null
+    let entryLoss = 0, exitLoss = 0, slip = 0, routeFee = 0, hasRec = false, pricedBuy = 0, pricedSell = 0
+    const swaps = []
+    for (const s of e.swaps) {
+      const g = e.pool ? await geckoPriceAt(c, e.pool, s.time) : null
+      const mid = g !== null && side ? (side.tokenIsX ? g : 1 / g) : null // 当分钟池价：计价币 每 代币
+      const tokenAmt = Number(s.tokenAmt) / 10 ** m.decimals
+      const quoteAmt = Number(s.quoteAmt) / 10 ** e.quote.decimals
+      const execPrice = tokenAmt > 0 ? quoteAmt / tokenAmt : 0 // 成交均价
+      const lossUsd = mid === null ? null : cents((s.side === 'buy' ? quoteAmt - tokenAmt * mid : tokenAmt * mid - quoteAmt) * qUsd)
+      if (lossUsd !== null) { if (s.side === 'buy') { entryLoss += lossUsd; pricedBuy++ } else { exitLoss += lossUsd; pricedSell++ } }
+      const r = recs.get(s.sig)
+      let slipUsd = null, feeUsd = null, quotedOut = null, actualOut = null
+      if (r) {
+        hasRec = true
+        const outDec = s.side === 'buy' ? m.decimals : e.quote.decimals
+        quotedOut = Number(r.quotedOut) / 10 ** outDec; actualOut = Number(r.actualOut) / 10 ** outDec
+        slipUsd = cents((quotedOut - actualOut) * (s.side === 'buy' ? execPrice : 1) * qUsd)
+        feeUsd = cents(r.fees.reduce((sum, f) => sum + (f.mint === e.quote.mint ? Number(f.amount) / 10 ** e.quote.decimals : f.mint === e.token ? (Number(f.amount) / 10 ** m.decimals) * execPrice : 0), 0) * qUsd)
+        slip += slipUsd; routeFee += feeUsd
+      }
+      swaps.push({ sig: s.sig, time: s.time, side: s.side, tokenAmt, usd: cents(quoteAmt * qUsd), quotedOut, actualOut, outSym: s.side === 'buy' ? m.symbol : e.quote.symbol, slipUsd, routeFeeUsd: feeUsd, impactPct: r?.impactPct ?? null, route: r?.route ?? null, via: r?.via ?? null, lossUsd })
+    }
+    episodes.push({
+      token: e.token, symbol: m.symbol, quote: e.quote.symbol, start: e.start, end: e.end, closedAt: e.closedAt, ids: e.ids, txs: e.txs,
+      buys: u(e.buys), sells: u(e.sells), lpIn: u(e.lpIn), lpOut: u(e.lpOut), cash: u(e.net), gas: cents((Number(e.feeLamports) / 1e9) * sol), lpPnl: cents(lpPnl), leftover: Number(e.leftover) / 10 ** m.decimals,
+      entryLoss: pricedBuy ? cents(entryLoss) : null, exitLoss: pricedSell ? cents(exitLoss) : null, slip: hasRec ? cents(slip) : null, routeFee: hasRec ? cents(routeFee) : null, swaps,
+    })
+  }
+  const other = rawOther.map((o) => ({ time: o.time, quote: cents((Number(o.sol) / 1e9) * sol + Number(o.usdc) / 1e6), kind: o.kind })).filter((o) => Math.abs(o.quote) >= 0.01)
+  return { closed: [...x.closedCache.values()].sort((a, b) => a.closedAt - b.closedAt), episodes, other, nonUsdg, failed }
 }
 
 export async function poolsFor(x: SolCtx, token: string) {
