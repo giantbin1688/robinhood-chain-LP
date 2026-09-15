@@ -144,6 +144,8 @@ export async function closedList(x: SolCtx) {
       const m = await metaOf(x, token)
       const events = await positionLedger(c, { id: q.id, pool: q.pool })
       if (!events.some((e) => e.action === 'add')) continue
+      // 已平仓却读不到撤仓事件 = 节点索引还没跟上那笔交易：先不入缓存（缓存住会把本金记成亏光），下次刷新重试
+      if (!events.some((e) => e.action === 'remove')) { failed++; log(`仓位 ${q.id.slice(0, 8)}… 的撤仓交易还没读到（节点滞后），下次刷新重试`); continue }
       const s = sumLedger(events, { tokenIsX: side.tokenIsX, quote: side.quote }, m.decimals, side.quote.symbol === 'USDC' ? 1 : sol)
       const gas = (s.lamports / 1e9) * sol
       x.closedCache.set(q.id, { id: q.id, token, symbol: m.symbol, fee: q.pool.fee / 10000, feeText: feeText(q.pool), openedAt: s.mintedAt, closedAt: q.closed.time, closedTx: q.closed.tx, deposits: cents(s.deposits), withdrawn: cents(s.withdrawn), fees: cents(s.fees), gas: cents(gas), pnl: cents(s.withdrawn + s.fees - s.deposits - gas), quote: side.quote.symbol })

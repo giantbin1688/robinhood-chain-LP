@@ -11,7 +11,9 @@ type Store = { ledgers: Map<string, { at: number; events: LedgerEvent[]; sigs: S
 const stores = new Map<string, Store>()
 const storeOf = (c: SolClients) => { const k = `solana:${c.protocol}`; let s = stores.get(k); if (!s) { s = { ledgers: new Map(), txCache: new Map(), ohlcv: new Map() }; stores.set(k, s) }; return s }
 
-// 一批签名一次 JSON-RPC batch 拿回（getParsedTransactions），比逐笔快几倍；已拿过的不再拉
+// 一批签名一次 JSON-RPC batch 拿回（getParsedTransactions），比逐笔快几倍；已拿过的不再拉。
+// 返回 null 的（节点索引还没跟上刚确认的交易）不进缓存：缓存住一个 null 会让那笔交易永远丢失——
+// 曾有仓位平仓后马上刷新日历，撤仓交易被缓存成 null，旧算法把整个本金记成亏光
 async function fetchTxs(c: SolClients, sigs: string[]) {
   const S = storeOf(c)
   const need = sigs.filter((s) => !S.txCache.has(s))
@@ -21,7 +23,7 @@ async function fetchTxs(c: SolClients, sigs: string[]) {
       try { got = await c.conn.getParsedTransactions(chunk, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }) }
       catch (e: any) { if (attempt >= 6) throw e; await sleep(1500 * attempt) } // 两个节点都在限流：多等一会儿再来
     }
-    chunk.forEach((s, j) => S.txCache.set(s, got![j]))
+    chunk.forEach((s, j) => { if (got![j]) S.txCache.set(s, got![j]) })
   }
   // 25 笔一批、串行：Alchemy 免费档对 getTransaction 限流很紧（一批约 3 秒），并发只会把公共节点也打到 429
   for (let i = 0; i < need.length; i += 25) await one(need.slice(i, i + 25))
@@ -60,8 +62,10 @@ export async function positionLedger(c: SolClients, p: PosKey, full = false): Pr
     before = page[page.length - 1].signature
   }
   const events = [...(cur?.events ?? [])]
-  for (const tx of await fetchTxs(c, fresh)) {
-    if (!tx) continue
+  const txs = await fetchTxs(c, fresh)
+  const missing = new Set<string>() // 节点还没跟上的交易：不记入已读签名，下次刷新重拉
+  for (const [i, tx] of txs.entries()) {
+    if (!tx) { missing.add(fresh[i]); continue }
     const ev = await c.lp.parseLedger(tx, p).catch(() => null)
     if (ev) { ev.fee = tx.transaction.message.accountKeys[0]?.pubkey.equals(c.wallet) ? tx.meta?.fee ?? 0 : 0; events.push(ev) } // 交易费（含优先费）记在付款人是自己钱包的交易上
   }
@@ -70,7 +74,7 @@ export async function positionLedger(c: SolClients, p: PosKey, full = false): Pr
   const q = quoteSide(p.pool)
   for (const e of events) if (e.price === null) { const g = await geckoPriceAt(c, p.pool, e.time); if (g !== null && q) e.price = q.tokenIsX ? g : 1 / g }
   for (let i = 0; i < events.length; i++) if (events[i].price === null) { const near = events.slice(0, i).reverse().find((x) => x.price !== null) ?? events.slice(i + 1).find((x) => x.price !== null); if (near) events[i].price = near.price }
-  S.ledgers.set(p.id, { at: Date.now(), events, sigs: new Set([...known, ...fresh]) })
+  S.ledgers.set(p.id, { at: Date.now(), events, sigs: new Set([...known, ...fresh.filter((s) => !missing.has(s))]) })
   return events
 }
 
@@ -79,12 +83,12 @@ export type ClosedCandidate = { id: string; pool: SolPool; closed: { time: numbe
 type Found = { id: string; poolId: string | null; closed: { time: number; tx: string } }
 // flows：钱包每笔交易的净变化（现金账用）。sol 是原生 SOL（含交易费和租金），tokens 按 mint 汇总（含 wSOL 代币账户），lp 是这笔动了的本协议仓位
 export type SolFlowTx = { sig: string; time: number; sol: bigint; fee: bigint; tokens: Map<string, bigint>; lp: { id: string; poolId: string | null; action: 'add' | 'remove' | 'collect' }[]; lpLike: boolean }
-const wallets = new Map<string, { scanned: Set<string>; found: Map<string, Found>; pools: Map<string, SolPool | null>; flows: Map<string, SolFlowTx> }>()
+const wallets = new Map<string, { scanned: Set<string>; nullTxs: Set<string>; found: Map<string, Found>; pools: Map<string, SolPool | null>; flows: Map<string, SolFlowTx> }>()
 const LP_RE = /Instruction: (AddLiquidity|RemoveLiquidity|ClaimFee|ClosePosition|Rebalance|InitializePosition|OpenPosition|IncreaseLiquidity|DecreaseLiquidity|CollectFee)/
 export async function closedPositions(c: SolClients, live: Set<string>, maxSigs = Number(solanaCfg().historyTxs || 800)): Promise<ClosedCandidate[]> {
   const k = `${c.protocol}:${c.wallet.toBase58()}`
   let W = wallets.get(k)
-  if (!W) { W = { scanned: new Set(), found: new Map(), pools: new Map(), flows: new Map() }; wallets.set(k, W) }
+  if (!W) { W = { scanned: new Set(), nullTxs: new Set(), found: new Map(), pools: new Map(), flows: new Map() }; wallets.set(k, W) }
   const fresh: string[] = []
   for (let before: string | undefined; fresh.length < maxSigs; ) {
     const page = await c.conn.getSignaturesForAddress(c.wallet, { limit: 100, before }, 'confirmed')
@@ -94,12 +98,14 @@ export async function closedPositions(c: SolClients, live: Set<string>, maxSigs 
     before = page[page.length - 1].signature
   }
   let n = 0
-  for (let i = 0; i < fresh.length; i += 100) {
-    const sigs = fresh.slice(i, i + 100)
+  const queue = [...new Set([...fresh, ...W.nullTxs])] // 上次拉成 null 的（节点没跟上）这次一并重试
+  for (let i = 0; i < queue.length; i += 100) {
+    const sigs = queue.slice(i, i + 100)
     const txs = await fetchTxs(c, sigs)
     for (const [j, tx] of txs.entries()) {
-      W.scanned.add(sigs[j])
-      if (!tx?.meta) continue
+      W.scanned.add(sigs[j]) // 分页靠它停下，null 的也要标；重试走 nullTxs
+      if (!tx?.meta) { W.nullTxs.add(sigs[j]); continue }
+      W.nullTxs.delete(sigs[j])
       const lpLike = !!tx.meta.logMessages?.some((l) => LP_RE.test(l))
       const hits = lpLike ? await c.lp.positionsInTx(tx).catch(() => []) : []
       // 现金账要每笔交易的钱包净变化：原生 SOL 直接读 pre/post（含交易费和租金），SPL 按 owner 是自己的代币账户汇总
