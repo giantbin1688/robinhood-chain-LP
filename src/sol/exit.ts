@@ -167,6 +167,7 @@ export async function withdraw(o: WithdrawOptions) {
     offers: sellOffers.map((x) => ({ via: x.via, out: fmtU(x.out), text: x.text })), lpSlippage: o.lpSlippage,
   }))
   const kit = solTxKit(o.clients, usd)
+  const solStartLamports = BigInt(await conn.getBalance(wallet, 'confirmed'))
   if (o.dryRun) { await run(kit, bundles, true); log('演练模式，到此为止'); return { usdgGained: 0n, tokenLeft: tokenStart } }
   if (!o.yes) await confirm(partial ? `确认撤出 ${pct}%? (y/N) ` : '确认撤退? (y/N) ')
   // 1) 撤仓位：发送前按最新状态重建交易（等确认期间池价可能变了）；失败就等几秒重读重试，最多 5 次
@@ -188,6 +189,8 @@ export async function withdraw(o: WithdrawOptions) {
   if (s && toSell > 0n) await s.sell(toSell, kit)
   const [usdgEnd, tokenEnd] = await Promise.all([balanceOf(conn, wallet, quote.mint), balanceOf(conn, wallet, token)])
   log(`完成: 共收回 ${fmtU(usdgEnd - usdgStart)} ${quote.symbol}${tokenEnd > 0n ? `，钱包还剩 ${fmtT(tokenEnd)} ${symbol}` : ''}`)
+  const solEndLamports = BigInt(await conn.getBalance(wallet, 'confirmed'))
+  log(`SOL 余额净变化: ${lamportsToSol(solEndLamports - solStartLamports)} SOL（包含手续费；完整平仓时包含已关闭账户的租金返还）`)
   log(`手续费合计: ${kit.stats.txCount} 笔，${lamportsToSol(kit.stats.feeTotal)} SOL ($${usd(kit.stats.feeTotal)})`)
   return { usdgGained: usdgEnd - usdgStart, tokenLeft: tokenEnd }
 }

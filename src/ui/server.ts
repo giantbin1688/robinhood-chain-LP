@@ -653,6 +653,13 @@ const server = createServer(async (req, res) => {
       const job = startJob(sel, 'exit', `${b.dryRun ? '领手续费演练' : '领手续费'}${b.sell ? '+卖币' : ''} ${ids(b.positions).length > 3 ? `${ids(b.positions).length} 个仓位` : '#' + ids(b.positions).map(shortId).join(',#')}`, 'src/exit.ts', args, { dryRun: !!b.dryRun, positions: ids(b.positions) })
       return json(res, 200, { job: summary(job) })
     }
+    if (req.method === 'POST' && url.pathname === '/api/rent') {
+      const b = await readBody(req); const sel = selOf(b); needKey(sel)
+      if (sel.chain !== 'solana' || !ids(b.positions).length) throw new Error('回收租金仅支持 Solana 仓位')
+      const args = [`--position=${ids(b.positions).join(',')}`, '--yes', '--keep-tokens']
+      const job = startJob(sel, 'exit', `回收租金 ${ids(b.positions).map(shortId).join(',')}`, 'src/exit.ts', args, { dryRun: !!b.dryRun, positions: ids(b.positions) })
+      return json(res, 200, { job: summary(job) })
+    }
     if (req.method === 'POST' && url.pathname === '/api/watch') {
       const b = await readBody(req); const sel = selOf(b); needKey(sel)
       // 同一个仓位不许两个监控同时盯：触发时会各自撤退、互相撞 nonce
