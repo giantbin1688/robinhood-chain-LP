@@ -17,9 +17,10 @@
 | `ethereum` | `v4` Uniswap v4（默认）· `v3` Uniswap v3 | USDC | v3 费率 0.01 / 0.05 / 0.3 / 1% |
 | `robinhood`（默认） | `v4` Uniswap v4 | USDG | 费率间距任意，gas 极便宜 |
 | `bsc` | `infinity` PancakeSwap Infinity（默认）· `v3` PancakeSwap v3 · `v4` Uniswap v4 | USDT | v3 是成交主战场（费率 0.01 / 0.05 / 0.25 / 1%）；Infinity 活跃池多带 hook：能复用不能新建 |
+| `arc` | `v4` Uniswap v4（默认）· `v3` Uniswap v3 | USDC | Circle 的链（chainId 5042，2026-09-16 开放）。**USDC 就是 gas**：LP 用它的 ERC-20 接口 `0x3600…0000`（6 位），gas 从同一份余额扣。节点必须自己填（设置页），聚合器暂不支持，换币只能池内直换 |
 | `solana` | `dlmm` Meteora DLMM（默认）· `clmm` Raydium CLMM | SOL 或 USDC | DLMM 按 bin、动态费率、仓位是账户；CLMM 按 tick、固定费率、仓位是 NFT |
 
-下文 `USDG` 按链读作 USDT / USDC / SOL。一条链一个钱包：计价币 + 少量原生币付 gas。换币路由 Robinhood / Ethereum 用 Uniswap API，**BSC 必须配 OKX 密钥**（Uniswap 路由不到 PancakeSwap 的深度），Solana 用 Jupiter（免 key）。
+下文 `USDG` 按链读作 USDT / USDC / SOL。一条链一个钱包：计价币 + 少量原生币付 gas（Arc 两者是同一份 USDC）。换币路由 Robinhood / Ethereum 用 Uniswap API，**BSC 必须配 OKX 密钥**（Uniswap 路由不到 PancakeSwap 的深度），Solana 用 Jupiter（免 key），Arc 上 Uniswap API / OKX 都还没支持、只走池内直换。
 
 EVM 三种协议的差异收在 `src/lp.ts` 适配器后面；Solana 账户模型不同，`src/sol/` 是平行实现，命令、参数、网页一致。
 
@@ -51,7 +52,7 @@ EVM 仓位的 Spot / Curve / Bid-Ask 是 `positions.json` 中的本地标签，�
 Robinhood Uniswap v4 的进场页还提供 **池子 tick 明细**：选池后自动读取，或按左侧费率 / 间距点“读取 / 刷新”，不要求先持仓。显示同一区块的当前 tick、价格、每段 USDG / 代币数量和流动性 L；每行可合并 1 / 4 / 16 / 64 个 tick 间距，并可向两侧翻页。点击起止两行把精确边界填到左侧，也可手输 `下界,上界`；边界必须对齐池间距，之后仍先计划、再执行。命令行对应 `--tick-range=334000,349000`，优先于价格 / 百分比区间。显示数量是池内资产，不是本次投入；本次投入看演练计划。
 
 - **进场**：左侧表单（默认值来自 `params.env`），右侧自动列出该代币在 GeckoTerminal 上的全部池子——费率/间距、池价、流动性、24h 成交和手续费、你的预算占池比例和预估日收；不能复用的灰掉（悬停看原因），现价处链上流动性为 0 的标"空池"。点"用这个池"按 pool id 指定（带 hook 的池只能这样用）。先"计划"出四张卡片，再"执行这个计划"。
-- **仓位**：页顶五格汇总（投入 / 现金价值 / 手续费 / 总盈亏 / DPR 日收益率）。按 Spot / Curve / Bid-Ask 分区，同一次进场的几段成组、可整组撤退或监控、可折叠。每行给区间标尺、投入、价值、手续费、uPNL、DPR；点 uPNL 展开每笔资金明细（按当时池价折算），点 id 展开池子流动性分布图。每行可领手续费 / 监控 / 撤 % / 撤退，工具栏能把所有池的手续费合成 1 笔领完再卖币。资金流水从链上重建，**需要 Alchemy 节点**，否则 uPNL 显示"—"。
+- **仓位**：页顶五格汇总（投入 / 现金价值 / 手续费 / 总盈亏 / DPR 日收益率）。按 Spot / Curve / Bid-Ask 分区，同一次进场的几段成组、可整组撤退或监控、可折叠。每行给区间标尺、投入、价值、手续费、uPNL、DPR；点 uPNL 展开每笔资金明细（按当时池价折算），点 id 展开池子流动性分布图。每行可领手续费 / 监控 / 撤 % / 撤退，工具栏能把所有池的手续费合成 1 笔领完再卖币。自动刷新默认 60 秒（档位记在浏览器里），标签页在后台时暂停、切回来立刻刷一次。资金流水从链上重建，**需要 Alchemy 节点**，否则 uPNL 显示"—"；平时 10 分钟重拉一次，本机任务刚建仓 / 结束后的 3 分钟里每分钟拉。
 - **信号**：盯 [fomo.family](https://fomo.family) 头部交易者的买卖（Robinhood 用 rhtrenches.com、BSC 用 bsctrenches.com，Ethereum / Solana 暂无），来一笔记一条并提醒，能识别"别人买了塞进钱包"的假买入。买入的币自动做一遍安全检查（流动性、池龄、涨幅、买卖人数、可升级代理、owner、`mint`/`pause`/黑名单、貔貅模拟、$100 往返损耗），给出通过 / 注意 / 风险，悬停看理由。提醒走页面 toast + 桌面通知 + 可选 Telegram。只能盯数据源名单里的人。
 - **盈亏日历**：已平仓仓位按平仓日排成月历，每格是当天整段盈亏和胜负平，页顶是本月盈亏 / 胜率 / 最好最差的一天，点某天看明细。第一次打开要读全部历史（EVM 约半分钟，Solana 1~3 分钟），之后秒开；同样需要 Alchemy。
 - **设置**：Telegram、各链节点 RPC + Uniswap API 网关、Solana 选项（Jupiter key / 优先费 / 日历扫描笔数）。存 `settings.json`，**优先于 `.env`**，保存立即生效；密码框留空 = 不变，填 `-` = 清除。
@@ -67,7 +68,7 @@ Robinhood Uniswap v4 的进场页还提供 **池子 tick 明细**：选池后自
 | `SOL_PRIVATE_KEY` | Solana 钱包私钥：base58 或 JSON 字节数组 |
 | `UNISWAP_API_KEY` | 只用于问路由，和钱包无关：https://developers.uniswap.org/dashboard |
 | `OKX_API_KEY` `OKX_SECRET_KEY` `OKX_API_PASSPHRASE` | 换币时和 Uniswap 比价（常多换回 1~2%），**BSC 必填**：https://web3.okx.com/onchainos |
-| `RPC_URL` `BSC_RPC_URL` `ETH_RPC_URL` `SOL_RPC_URL` | 各链节点，可选，也能在设置页填。**建议用自己的 Alchemy**：快 5 倍，且资金流水 / 盈亏 / 日历依赖它的转账记录和历史状态。配了之后公共节点自动作备用 |
+| `RPC_URL` `BSC_RPC_URL` `ETH_RPC_URL` `ARC_RPC_URL` `SOL_RPC_URL` | 各链节点，可选（Arc 必填），也能在设置页填；EVM 链可逗号分隔多个，第一个为主、其余备用。**建议用自己的 Alchemy**：快 5 倍，且资金流水 / 盈亏 / 日历依赖它的转账记录和历史状态。配了之后公共节点自动作备用。免费档每月 3000 万计算单元（一次 `eth_call` 26），本工具的省法：同一时刻的合约读取合成一次 Multicall3 调用（仓位页一次刷新固定 3 次调用，不随仓位数增长）、监控的轮询走公共节点（自己的节点只做备用）、资金流水平时 10 分钟才重拉一次、标签页切到后台不刷新 |
 | `SOL_QUOTE` `JUPITER_API_KEY` `SOL_PRIORITY_FEE` `SOL_HISTORY_TXS` | Solana 选项，见下文 |
 | `TG_BOT_TOKEN` `TG_CHAT_ID` | 可选，信号推 Telegram |
 | `HTTPS_PROXY` | 可选，直连不了 alchemy / uniswap / okx 时填本地代理 |
@@ -85,7 +86,7 @@ Robinhood Uniswap v4 的进场页还提供 **池子 tick 明细**：选池后自
 | `SWAP_SLIPPAGE` `LP_SLIPPAGE` | `5` `5` | 换币滑点 % / 组 LP 和撤 LP 的数量余量 % |
 | `SWAP_VIA` `EXIT_SWAP_VIA` | `best` | 换币 / 卖币走哪家：`best` 三方报价取优 / `okx` / `uniswap` / `pool`（Solana 上是 `jupiter` / `pool`） |
 | `MAX_DEVIATION` | `10` | 池价与市场价的最大偏离 %，超过先校正 |
-| `WATCH_INTERVAL` `WATCH_CONFIRM` | `10` `2` | 监控：几秒查一次 / 连续几次跳出才撤退（防插针） |
+| `WATCH_INTERVAL` `WATCH_CONFIRM` | `10` `2` | 监控：几秒查一次 / 连续几次跳出才撤退（防插针）。轮询读的是公共节点（0.3~3 秒一次，超时 / 限流才用自己的节点），不占 Alchemy 额度 |
 | `WATCH_UPPER_GRACE` | `600` | 涨破上沿后再等几秒（此时全是计价币，等着没风险）；跌破下沿不受影响 |
 | `WATCH_STOP_LOSS` | `0` | 止损 %：填了就只按止损撤退、不看跳出区间。盯的仓位当成一组，现值 + 手续费比进场本金少这么多就撤退并卖币；0 = 不开 |
 
@@ -210,6 +211,7 @@ npm run exit -- --token 0x… --keep-tokens --via okx   # 不卖币 / 指定卖�
 - 链上地址在 `src/chains.ts`（EVM，取自各家官方 SDK 并在链上互相核对过）和上面的 Solana 一节。
 - **Robinhood**：UniversalRouter 是 2.1.1，请求 Trading API 不能带 `x-universal-router-version: 2.0`。发行平台直接调 PoolManager 建的带 hook 池 `poolKeys` 查不到，退到公共节点过滤 `Initialize` 事件；这类池 Gecko 常没收录，可拿 poolId 用 `--pool` 指定。整套流程 gas 通常不到 $1.5。
 - **BSC**：链太长扫不动仓位——PancakeSwap v3 的 NFT 可枚举，Infinity 和 Uniswap v4 没有 Alchemy 节点时只认 `positions.json` 里本工具建的仓位；公共节点也不给历史状态，流水 / 盈亏 / 日历需要 Alchemy。Infinity 活跃池几乎都带 hook（动态费率，链上 `lpFee` 为 0），能复用不能新建，换币前用 Quoter 真实模拟。
+- **Arc**：主网 2026-09-16 开放，地址来自 `@uniswap/sdk-core`（v4 PoolManager / StateView / Quoter 与 Robinhood 同地址，PositionManager 不同；v3 是原版 Uniswap，路由是 SwapRouter02），开放当天还读不到链、没在链上核对过。USDC 有两种形态：原生币（gas，18 位）和 ERC-20 接口 `0x3600…0000`（6 位，同一份余额）——本工具只做 ERC-20 形态的池，v4 池若用原生形态（currency0 = 0x0）会在进场页的池子列表里标出来、不能用。仓位发现同 BSC：没有 Alchemy Arc 节点时只认 `positions.json`。`RPC_URL` 类变量可以逗号分隔填多个（主 + 备用）。
 - **Solana**：租金部分不退，宽区间 DLMM 一次要几笔交易；SOL 计价时预算和租金从同一个余额出。
 
 ## 代码结构

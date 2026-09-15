@@ -3,7 +3,7 @@
 //   v4 / Infinity：代币在钱包和 PoolManager（Infinity 是 Vault）之间转，同一笔里多个仓位要按各自的 liquidityDelta 分摊
 //   v3：NPM 的 IncreaseLiquidity / DecreaseLiquidity / Collect 事件直接给出每个仓位的数量
 // 需要 RPC 是 Alchemy（alchemy_getAssetTransfers + 历史状态）；不是的话 refreshLedger 抛错，网页显示"—"
-import { parseEventLogs, type Hex } from 'viem'
+import { parseEventLogs, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
 import { abs, min, sleep, type Clients } from './common.ts'
 import type { Mod, Pool, RawPosition } from './lp.ts'
@@ -49,25 +49,27 @@ async function operationSlot(c:Clients,pool:Pool,block:bigint,logIndex:number) {
 const preLiquidity = (c: Clients, id: bigint, block: bigint) => cached(storeOf(c).preLiqCache, `${id}:${block}`, () => c.lp.liquidityAt(id, block - 1n))
 
 // 从 since 区块起钱包的全部 ERC20 转账 -> 交易哈希（两个方向）；同时拿到区块时间。
-// 不只看和 PoolManager 之间的：进出场的换币（UniversalRouter / 聚合器）、转账也要进现金账（tokenEpisodes），回执里再按事件区分
-async function transferTxs(c: Clients, since: bigint) {
+// 不只看和 PoolManager 之间的：进出场的换币（UniversalRouter / 聚合器）、转账也要进现金账（tokenEpisodes），回执里再按事件区分。
+// only 给了就只留对手方是它的（监控 / 撤退只算本金和手续费，不用把活跃钱包上千笔换币的回执逐个拉回来）
+async function transferTxs(c: Clients, since: bigint, only: Address | null) {
   const out = new Map<Hex, { block: bigint; time: number }>()
   for (const dir of [{ fromAddress: c.wallet }, { toAddress: c.wallet }]) {
     for (let pageKey: string | undefined; ; ) {
       const r: any = await c.pub.request({ method: 'alchemy_getAssetTransfers', params: [{ fromBlock: `0x${since.toString(16)}`, toBlock: 'latest', ...dir, category: ['erc20'], withMetadata: true, maxCount: '0x3e8', ...(pageKey ? { pageKey } : {}) }] } as any)
-      for (const t of r.transfers) out.set(t.hash, { block: BigInt(t.blockNum), time: Date.parse(t.metadata?.blockTimestamp ?? '') || 0 })
+      for (const t of r.transfers) if (!only || same(t.from ?? '', only) || same(t.to ?? '', only)) out.set(t.hash, { block: BigInt(t.blockNum), time: Date.parse(t.metadata?.blockTimestamp ?? '') || 0 })
       if (!(pageKey = r.pageKey)) break
     }
   }
   return out
 }
 
-// 拉 since 区块以来的新交易回执并解析（已解析过的不重复拉）；回执按 15 笔一批，避免撞节点的每秒额度
-export async function refreshLedger(c: Clients, since: bigint) {
+// 拉 since 区块以来的新交易回执并解析（已解析过的不重复拉）；回执按 15 笔一批，避免撞节点的每秒额度。
+// lpOnly：只拉钱包和 PoolManager 之间有转账的交易（v3 没有固定对手方，照旧全拉）；之后的全量刷新会把漏掉的补上，因为只按哈希去重
+export async function refreshLedger(c: Clients, since: bigint, lpOnly = false) {
   const S = storeOf(c)
   if (S.scannedFrom !== null && S.scannedFrom < since) since = S.scannedFrom // 已经扫过更早的，就继续从那里扫（新交易只会在后面出现）
-  const list = [...(await transferTxs(c, since))].filter(([h]) => !S.txs.has(h))
   const cp = c.lp.ledger.counterparty
+  const list = [...(await transferTxs(c, since, lpOnly ? cp : null))].filter(([h]) => !S.txs.has(h))
   for (let i = 0; i < list.length; i += 15) {
     if (i) await sleep(300)
     await Promise.all(list.slice(i, i + 15).map(async ([hash, meta]) => {
@@ -150,12 +152,18 @@ export async function positionLedger(c: Clients, p: Pick<RawPosition, 'id' | 'po
 // 一组仓位的资金流水合计（计价币，每笔按当时池价折算，和网页 uPNL 同一口径）：deposits 存入本金、withdrawn 已撤本金、fees 已领手续费。
 // 撤退日志里给"共收回"配参照，监控的止损用它算盈亏。需要 Alchemy。读不到时抛错并说清原因（公共节点、限流、极限价估值失败、
 // 转账索引还没跟上刚建的仓位），调用方决定是重试、报一行还是拒绝启动——以前这里静默返回 null，用户只看到日志少了半句，查不出为什么。
-// since = 最早的 mint 区块，不知道就从创世块扫（慢，几十秒）
+// since = 最早的 mint 区块；传 0 = 不知道（--position 指定仓位时没扫过 NFT 转账），这里先用 2 次 alchemy_getAssetTransfers 查这些 NFT 的铸造区块再扫，
+// 比从创世块起把钱包所有交易的回执拉一遍便宜两个数量级（活跃钱包上千笔回执，每次开监控 / 撤退都要重拉一遍）；查不到铸造记录（NFT 是别处转进来的）才从创世块扫
 export async function ledgerTotals(c: Clients, positions: Pick<RawPosition, 'id' | 'pool' | 'tickLower' | 'tickUpper'>[], tokenDecimals: number, since: bigint): Promise<{ deposits: number; withdrawn: number; fees: number }> {
   if (!c.rpcIsAlchemy) throw new Error('资金流水需要 Alchemy 节点')
   if (!positions.length) throw new Error('没有仓位')
   try {
-    await refreshLedger(c, since)
+    if (since === 0n) {
+      const { mints } = await c.lp.ownedIds()
+      const blocks = positions.map((p) => mints.get(p.id.toString())?.block)
+      if (blocks.every((b) => b !== undefined)) since = blocks.reduce((m, b) => (b! < m ? b! : m), blocks[0]!)
+    }
+    await refreshLedger(c, since, true)
     const t = { deposits: 0, withdrawn: 0, fees: 0 }
     for (const p of positions) {
       const quoteIs0 = same(p.pool.currency0, c.Q.address)

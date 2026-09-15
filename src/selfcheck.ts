@@ -76,9 +76,21 @@ const { CHAINS: chainConfigs, selectChain: chooseChain, protocolLabel: labelOf }
 const ethConfig = chainConfigs.ethereum
 assert.equal(chooseChain(['--chain=ethereum'], {}).cfg.id, 1)
 assert.equal(labelOf('ethereum', 'v3'), 'Uniswap v3')
-assert.equal(computePoolAddress(ethConfig.contracts.v3!.factory as `0x${string}`, ethConfig.quote.address, ethConfig.wnative, 500, UNI_POOL_INIT_CODE_HASH), '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640', 'Uniswap v3 USDC/WETH 0.05% CREATE2')
+assert.equal(computePoolAddress(ethConfig.contracts.v3!.factory as `0x${string}`, ethConfig.quote.address, ethConfig.wnative!, 500, UNI_POOL_INIT_CODE_HASH), '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640', 'Uniswap v3 USDC/WETH 0.05% CREATE2')
 assert.deepEqual(v3Tiers('ethereum').map((t) => [t.fee, t.spacing]), [[100, 1], [500, 10], [3000, 60], [10000, 200]])
 assert.equal(v3Tiers('bsc')[2].fee, 2500, 'Pancake v3 fee tier remains independent')
+// Arc：USDC 既是 gas 又是计价币（ERC-20 接口 0x3600…），v3 是 Uniswap 原版 + SwapRouter02。02 的 exactInputSingle 参数里没有 deadline（选择器 0x04e45aaf，
+// 原版 SwapRouter 带 deadline 的是 0x414bf389），限时靠 multicall(uint256 deadline, bytes[])（0x5ae401dc）包一层
+const { router02Calldata } = await import('./lp-v3.ts')
+const arcConfig = chainConfigs.arc
+assert.equal(arcConfig.quote.address, '0x3600000000000000000000000000000000000000')
+assert.equal(arcConfig.nativePrice, undefined, 'Arc: native USDC is the quote, gas priced at $1')
+assert.equal(labelOf('arc', 'v3'), 'Uniswap v3')
+assert.equal(v3Tiers('arc')[2].fee, 3000)
+const r02 = router02Calldata('0x0000000000000000000000000000000000000001', arcConfig.quote.address, '0x0000000000000000000000000000000000000002', 3000, { exactIn: 1n, minOut: 1n }, 123n)
+assert.equal(r02.slice(0, 10), '0x5ae401dc', 'SwapRouter02 multicall(deadline, data)')
+assert.ok(r02.includes('04e45aaf'), 'SwapRouter02 exactInputSingle (no deadline field)')
+assert.equal(router02Calldata('0x0000000000000000000000000000000000000001', arcConfig.quote.address, '0x0000000000000000000000000000000000000002', 3000, { exactOut: 1n, maxIn: 1n }, 123n).includes('5023b4df'), true, 'SwapRouter02 exactOutputSingle')
 const USDT = '0x55d398326f99059fF775485246999027B3197955', CAKE = '0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82'
 assert.equal(computePoolAddress('0x41ff9AA7e16B8B1a8a8dc4f0eFacd93D02d071c9', CAKE, USDT, 2500), '0x7f51c8AaA6B0599aBd16674e2b17FEc7a9f674A1', 'Pancake v3 CAKE/USDT 0.25% pool address')
 const { encodeAbiParameters } = await import('viem')

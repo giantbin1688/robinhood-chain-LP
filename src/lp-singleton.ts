@@ -163,20 +163,22 @@ export async function singletonLp(protocol: ProtocolName, d: LpDeps): Promise<Lp
     }
   }
 
-  // 逐个 NFT 的只读调用用 multicall 合成一个 eth_call：网页撤流动性不销毁 NFT，钱包里会攒下几十个空仓位，逐个查会撞节点的每秒额度
+  // 逐个 NFT 的只读调用用 multicall 合成一个 eth_call：网页撤流动性不销毁 NFT，钱包里会攒下几十个空仓位，逐个查会撞节点的每秒额度。
+  // 归属和仓位信息放同一批：已销毁的 ownerOf 会 revert（allowFailure 跳过它），另两个对不存在的 id 只是返回零值
   async function positions(ids: bigint[]): Promise<RawPosition[]> {
     if (!ids.length) return []
-    const owners = await pub.multicall({ allowFailure: true, batchSize: 0, contracts: ids.map((id) => ({ address: POSM, abi: posmAbi, functionName: 'ownerOf', args: [id] }) as const) })
-    const owned = ids.filter((_, i) => owners[i].status === 'success' && same(owners[i].result as string, wallet)) // 已销毁的 ownerOf 会 revert
-    if (!owned.length) return []
-    const infos = await pub.multicall({ allowFailure: false, batchSize: 0, contracts: owned.flatMap((id) => [
+    const r = await pub.multicall({ allowFailure: true, batchSize: 0, contracts: ids.flatMap((id) => [
+      { address: POSM, abi: posmAbi, functionName: 'ownerOf', args: [id] } as const,
       { address: POSM, abi: posmAbi, functionName: 'getPoolAndPositionInfo', args: [id] } as const,
       { address: POSM, abi: posmAbi, functionName: 'getPositionLiquidity', args: [id] } as const,
     ]) })
     const out: RawPosition[] = []
-    for (let i = 0; i < owned.length; i++) {
-      const [key, info] = infos[2 * i] as readonly [unknown, bigint]
-      out.push({ id: owned[i], pool: await withDynamic(fromKey(key)), liquidity: infos[2 * i + 1] as bigint, ...v4.decodePositionInfo(info) })
+    for (let i = 0; i < ids.length; i++) {
+      const [owner, info, liq] = r.slice(3 * i, 3 * i + 3)
+      if (owner.status !== 'success' || !same(owner.result as string, wallet)) continue
+      if (info.status !== 'success' || liq.status !== 'success') throw new Error(`仓位 ${ids[i]} 读取失败: ${String((info.error ?? liq.error)?.message).slice(0, 80)}`)
+      const [key, packed] = info.result as readonly [unknown, bigint]
+      out.push({ id: ids[i], pool: await withDynamic(fromKey(key)), liquidity: liq.result as bigint, ...v4.decodePositionInfo(packed) })
     }
     return out
   }

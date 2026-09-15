@@ -151,7 +151,7 @@ function ingestFill(chain: rht.FeedChain, f: rht.Fill, live: boolean) {
   if (kind === 'buy') void runSafety(sig, live)
   if (live && (kind === 'buy' || kind === 'sell')) alertSignal(sig)
 }
-export const rhtStatus = (chain: ChainName = 'robinhood') => chain === 'ethereum' ? null : feeds[chain].rhtStatus()
+export const rhtStatus = (chain: ChainName = 'robinhood') => (chain in feeds ? feeds[chain as rht.FeedChain].rhtStatus() : null) // Ethereum / Arc 没有数据源
 
 // 网页上手动点「重新检查」：绕过缓存
 export async function recheckToken(chain: ChainName, token: Address) {
@@ -246,7 +246,7 @@ async function checkTokenNow(c: Clients, token: Address): Promise<Safety> {
   const v4pool = live.find((p) => p.usable) ?? live.find((p) => p.dex.startsWith('uniswap-v4') && p.id.length === 66)
   if (v4pool) {
     const pool = await lp.poolById(v4pool.id).catch(() => null)
-    const qIn = pool && [pool.currency0, pool.currency1].find((a) => same(a, cfg.quote.address)) ? cfg.quote.address : pool && [pool.currency0, pool.currency1].find((a) => same(a, cfg.wnative)) ? cfg.wnative : null
+    const qIn = pool && [pool.currency0, pool.currency1].find((a) => same(a, cfg.quote.address)) ? cfg.quote.address : pool && cfg.wnative && [pool.currency0, pool.currency1].find((a) => same(a, cfg.wnative!)) ? cfg.wnative : null
     if (pool && qIn) {
       const quoteIs0 = same(pool.currency0, qIn)
       const amountIn = same(qIn, cfg.quote.address) ? parseUnits('100', cfg.quote.decimals) : parseUnits((100 / Math.max(1, await nativePriceUsd(c).catch(() => 2500))).toFixed(8), 18)

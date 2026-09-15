@@ -203,7 +203,7 @@ export async function withdraw(o: WithdrawOptions) {
   const usd = (wei: bigint) => (Number(formatEther(wei)) * ethPrice).toFixed(2)
   const fmtU = (x: bigint) => trim(x, Q.decimals), fmtT = (x: bigint) => trim(x, decimals)
   const symOf = (t: Address) => (same(t, Q.address) ? Q.symbol : symbol)
-  log(`${cfg.label} / ${lp.label} | 钱包 ${wallet} | ${fmtU(usdgStart)} ${Q.symbol}, ${fmtT(tokenStart)} ${symbol} | ${cfg.native.symbol} $${ethPrice.toFixed(2)}`)
+  log(`${cfg.label} / ${lp.label} | 钱包 ${wallet} | ${fmtU(usdgStart)} ${Q.symbol}, ${fmtT(tokenStart)} ${symbol}${cfg.nativePrice ? ` | ${cfg.native.symbol} $${ethPrice.toFixed(2)}` : ''}`)
   if (found.length === 0) die(o.positions ? `仓位 ${o.positions.join(',')} 不在钱包名下或已没有流动性` : `钱包名下没有 ${symbol}/${Q.symbol} 的有效仓位`)
   const pct = o.percent ?? 100, partial = pct < 100
   if (!(pct > 0 && pct <= 100)) die(`撤出比例必须在 (0, 100] 之间，当前 ${pct}`)

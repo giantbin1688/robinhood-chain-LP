@@ -8,7 +8,7 @@ import { num } from '../common.ts'
 
 export type WatchOptions = { token: string; positions?: string[]; clients: SolClients; interval: number; confirm: number; upperGrace: number; via: string; slippage: number; lpSlippage: number; dryRun: boolean; json?: boolean }
 export async function watchToken(o: WatchOptions) {
-  const { conn, lp } = o.clients
+  const { conn, pollLp: lp } = o.clients // 循环里的池子状态 / 仓位读取走轮询连接（公共节点优先，见 makeSolClients）；撤退时 withdraw 自己用 clients.lp
   const { symbol, decimals } = await tokenMeta(conn, o.token)
   const all = await findPositions(o.clients, o.token, o.positions)
   if (all.length === 0) { log(o.positions ? `仓位 ${o.positions.join(',')} 不在钱包名下或已没有流动性，不监控` : `钱包名下没有 ${symbol} 的有效仓位，不监控`); return }
@@ -49,8 +49,10 @@ export async function watchToken(o: WatchOptions) {
         await withdraw({ token: o.token, positions: o.positions, via: o.via, slippage: o.slippage, lpSlippage: o.lpSlippage, keepTokens: false, yes: true, dryRun: o.dryRun, clients: o.clients, json: o.json })
         return
       }
-      if (++polls % Math.max(1, Math.round(60 / o.interval)) === 0) { // 每分钟核对一次仓位还在不在
-        const alive = await lp.positions(main.map((p) => p.id)).catch(() => null)
+      if (++polls % Math.max(1, Math.round(60 / o.interval)) === 0) { // 每分钟核对一次仓位还在不在；公共节点可能落后，全没了就用自己的节点再确认一次再停
+        const ids = main.map((p) => p.id)
+        let alive = await lp.positions(ids).catch(() => null)
+        if (alive && lp !== o.clients.lp && !alive.some((p) => p.amountX > 0n || p.amountY > 0n)) alive = await o.clients.lp.positions(ids).catch(() => null)
         if (alive) {
           const ok = new Set(alive.filter((p) => p.amountX > 0n || p.amountY > 0n).map((p) => p.id))
           main = main.filter((p) => ok.has(p.id))

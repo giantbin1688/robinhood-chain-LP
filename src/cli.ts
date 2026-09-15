@@ -110,7 +110,7 @@ async function bestBuy(amount: bigint, what: string, external = false) {
   if (!external && offers.length > 1) log(`${what}报价: ${offers.map((x) => x.text).join('；')}`)
   return o
 }
-log(`${cfg.label} / ${lp.label} | 钱包 ${wallet} | ${fmtU(usdgStart)} ${Q.symbol}, ${trim(ethBal, 18)} ${cfg.native.symbol} | ${cfg.native.symbol} $${ethPrice.toFixed(2)}`)
+log(`${cfg.label} / ${lp.label} | 钱包 ${wallet} | ${fmtU(usdgStart)} ${Q.symbol}${cfg.nativePrice ? `, ${trim(ethBal, 18)} ${cfg.native.symbol} | ${cfg.native.symbol} $${ethPrice.toFixed(2)}` : '（gas 也从这里扣）'}`)
 log(`代币 ${symbol} (${name}) 精度=${decimals} 地址 ${token}`)
 // 本次已花掉的计价币（卖币收回则为负）和手里的代币。钱包里原有的代币（比如上次换完币没组成 LP）一并计入，
 // 按市场价折成计价币从预算里扣掉（见下方"计划"处），重跑时就不会再换一遍
@@ -321,8 +321,10 @@ if (tokenStart > 0n) {
     log(`钱包已有 ${fmtT(tokenStart)} ${symbol}（≈${fmtU(heldValue)} ${Q.symbol}），计入本次 LP，剩余 ${Q.symbol} 预算 ${fmtU(usdgSpend)}`)
   }
 }
-if (usdgStart < usdgSpend) {
-  const msg = `需要 ${fmtU(usdgSpend)} ${Q.symbol}，钱包只有 ${fmtU(usdgStart)}`
+// 原生币就是计价币的链（Arc）gas 从同一份 USDC 里扣：预算之外至少留 0.1（整套流程约 0.05），否则最后一笔会因付不起 gas 失败
+const gasReserve = cfg.nativePrice ? 0n : QU / 10n
+if (usdgStart < usdgSpend + gasReserve) {
+  const msg = `需要 ${fmtU(usdgSpend)} ${Q.symbol}${gasReserve ? `（另留 ${fmtU(gasReserve)} 付 gas）` : ''}，钱包只有 ${fmtU(usdgStart)}`
   dryRun ? log(`警告: ${msg}`) : die(msg)
 }
 const correction = initialized ? await planCorrection(marketTick, marketPrice) : null

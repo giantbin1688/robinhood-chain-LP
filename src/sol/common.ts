@@ -38,20 +38,20 @@ export const quoteSide = (p: SolPool): { quote: SolToken; tokenIsX: boolean } | 
   return null
 }
 
-// ---- 节点：自己的（Alchemy）优先；getProgramAccounts 免费档直接 429（每次都超它的每秒算力额度），固定走公共节点；其它方法 429 / 5xx 也退到公共节点重试一次 ----
-function routedFetch(primary: string, fallback: string, quiet: boolean) {
+// ---- 节点：自己的（Alchemy）优先；getProgramAccounts 免费档直接 429（每次都超它的每秒算力额度），固定走公共节点（heavyTo）；其它方法 429 / 5xx 也退到备用节点重试一次 ----
+function routedFetch(primary: string, fallback: string, quiet: boolean, heavyTo = fallback) {
   let warned = false
   return async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const body = typeof init?.body === 'string' ? init.body : ''
     const heavy = /"method":"getProgramAccounts"/.test(body)
-    const target = String(url) === primary && heavy ? fallback : String(url)
+    const target = String(url) === primary && heavy ? heavyTo : String(url)
     let r = await fetch(target, init)
     for (let i = 0; target === primary && (r.status === 429 || r.status >= 500) && i < 3; i++) { // 自己的节点限流：等一下再试，越等越久
       await sleep(400 * (i + 1))
       r = await fetch(primary, init)
     }
     if (target === primary && (r.status === 429 || r.status >= 500)) {
-      if (!warned && !quiet) { warned = true; log(`节点 ${r.status}，这次请求改走公共节点`) }
+      if (!warned && !quiet) { warned = true; log(`节点 ${r.status}，这次请求改走备用节点`) }
       r = await fetch(fallback, init)
     }
     return r
@@ -97,7 +97,11 @@ export async function makeSolClients(o: SolClientsOptions = {}) {
   const cfg = SOL_CHAIN
   const base = { conn, wallet, keypair, cfg, protocol, rpcIsOwn: own, log }
   const lp = await makeSolLp(protocol, base)
-  return { ...base, lp }
+  // 监控每几秒读一次池子状态（每轮好几个账户请求），一个月几十万次会吃光 Alchemy 免费额度：轮询走公共节点、自己的节点只做备用（限流 / 出错时）。
+  // 发交易和一次性的读取仍然自己的节点优先
+  const pollConn = own ? new Connection(SOL_CHAIN.publicRpc, { commitment: 'confirmed', disableRetryOnRateLimit: true, fetch: routedFetch(SOL_CHAIN.publicRpc, rpc, o.quiet ?? false, SOL_CHAIN.publicRpc) as any }) : conn
+  const pollLp = own ? await makeSolLp(protocol, { ...base, conn: pollConn }) : lp
+  return { ...base, lp, pollLp }
 }
 export type SolClients = Awaited<ReturnType<typeof makeSolClients>>
 

@@ -1,26 +1,29 @@
 // 链与协议的静态配置：地址、计价币、公共节点、区块浏览器。选哪条链 / 哪个协议由命令行 --chain / --protocol 或环境变量 CHAIN / PROTOCOL 决定
 // 地址来源：Robinhood 的是本工具一直在用的；BSC 的取自 @pancakeswap/infinity-sdk、v3-sdk、universal-router-sdk、permit2-sdk，
-// 并在链上核对过（CLPositionManager.clPoolManager()/vault()/permit2()、NPM/SwapRouter/QuoterV2 的 factory() 都互相指向）
+// 并在链上核对过（CLPositionManager.clPoolManager()/vault()/permit2()、NPM/SwapRouter/QuoterV2 的 factory() 都互相指向）；
+// Arc 的取自 @uniswap/sdk-core 的 ARC_ADDRESSES 和 universal-router-sdk（2026-09-16 主网开放当天还没法读链核对，见 arc 条目的注释）
 import { getAddress, type Address } from 'viem'
 
-export type ChainName = 'robinhood' | 'bsc' | 'ethereum'
+export type ChainName = 'robinhood' | 'bsc' | 'ethereum' | 'arc'
 export type ProtocolName = 'v4' | 'infinity' | 'v3'
 
 export type Token = { address: Address; symbol: string; decimals: number }
 export type ChainConfig = {
   name: ChainName; id: number; label: string
-  native: { symbol: string; decimals: number }; wnative: Address
-  quote: Token                       // LP 的计价币（Ethereum: USDC；Robinhood: USDG；BSC: USDT）
-  publicRpc: string; rpcEnv: string  // 自己的节点从这个环境变量读
+  native: { symbol: string; decimals: number }
+  wnative?: Address                  // 包装原生币（WETH / WBNB）；Arc 没有：原生币就是 USDC，它的 ERC-20 形态就是计价币本身
+  quote: Token                       // LP 的计价币（Ethereum: USDC；Robinhood: USDG；BSC: USDT；Arc: USDC 的 ERC-20 形态）
+  publicRpc: string; rpcEnv: string  // 自己的节点从这个环境变量读（可以填多个，逗号分隔：第一个为主、其余备用）
   explorer: string; gecko: string    // GeckoTerminal 的 network id
   okxChainIndex: number
   protocols: ProtocolName[]          // 这条链上支持的协议，第一个是默认
   multicall3: Address
-  // 原生币的美元价：从一个稳定的 计价币/包装原生币 池读 tick（v4 用 poolId，v3 用池地址）
-  nativePrice: { protocol: ProtocolName; fee: number; spacing: number }
+  // 原生币的美元价：从一个稳定的 计价币/包装原生币 池读 tick（v4 用 poolId，v3 用池地址）。不填 = 原生币就是计价币（Arc 用 USDC 付 gas），按 1 美元算
+  nativePrice?: { protocol: ProtocolName; fee: number; spacing: number }
   // 每个协议自己的合约；permit2 按协议而不是按链（BSC 上 Uniswap 用 0x22D4…，PancakeSwap 用自己部署的 0x31c2…）
-  // urMinHop：UniversalRouter 2.1.1 的 v4 swap 参数多一个 minHopPriceX36 字段（Robinhood 只有 2.1.1）；2.0 及 PancakeSwap 的没有
-  contracts: Partial<Record<ProtocolName, { permit2: Address; urMinHop?: boolean } & Record<string, Address | boolean | undefined>>>
+  // urMinHop：UniversalRouter 2.1.1 的 v4 swap 参数多一个 minHopPriceX36 字段（Robinhood / Arc 只有 2.1.1）；2.0 及 PancakeSwap 的没有
+  // v3 的 pancake：PancakeSwap v3（费率档 / init code hash 不同）；router02：SwapRouter02（参数里没有 deadline，靠 multicall(deadline, …) 包一层）
+  contracts: Partial<Record<ProtocolName, { permit2: Address; urMinHop?: boolean; pancake?: boolean; router02?: boolean } & Record<string, Address | boolean | undefined>>>
 }
 
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11' as Address
@@ -98,17 +101,46 @@ export const CHAINS: Record<ChainName, ChainConfig> = {
         universalRouter: '0x8B844f885672f333Bc0042cB669255f93a4C1E6b', // UniversalRouter 2.1.1（BSC 也有 2.0 的 0x1906…，2.1.1 才带 minHopPriceX36）
       },
       v3: {
-        permit2: PCS_PERMIT2,
+        permit2: PCS_PERMIT2, pancake: true,
         factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865', deployer: '0x41ff9AA7e16B8B1a8a8dc4f0eFacd93D02d071c9',
         positionManager: '0x46A15B0b27311cedF172AB29E4f4766fbE7F4364', swapRouter: '0x1b81D678ffb9C0263b24A97847620C99d213eB14',
         quoter: '0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997',
       },
     },
   },
+  // Circle 的 Arc（主网 2026-09-16 开放，chainId 5042；测试网 5042002 上没有 Uniswap）。USDC 就是 gas：原生币按 18 位精度记账，
+  // 0x3600…0000 是同一份余额的 ERC-20 接口（6 位精度，测试网实测 symbol/name = USDC）——本工具只做这种 ERC-20 形态的 USDC 池；
+  // Uniswap 前端 / launchpad 建的 v4 池若用原生形态（currency 0x0、18 位），这里看不见（pools.ts 会标出来），要用得另做一条原生币的路。
+  // 没有 WETH / wrapped USDC。基础费恒定 20 gwei（USDC-wei），优先费 0，出块 0.5 秒。
+  // 公共节点 rpc.mainnet.arc.io 开放当天还挡在 Cloudflare 后面，浏览器地址也未公布（按测试网 testnet.arcscan.app 的规律猜 arcscan.app）；自己的节点在设置页填。
+  // v4 的 PoolManager / StateView / Quoter 和 Robinhood 同地址（同一套确定性部署），PositionManager 不同（构造参数里的 WETH9 不一样）；
+  // v3 是 Uniswap 原版，路由只有 SwapRouter02。Uniswap Trading API 和 OKX 聚合器 2026-09-16 都还不支持这条链，换币只能池内直换
+  arc: {
+    name: 'arc', id: 5042, label: 'Arc',
+    native: { symbol: 'USDC', decimals: 18 },
+    quote: { address: '0x3600000000000000000000000000000000000000', symbol: 'USDC', decimals: 6 },
+    publicRpc: 'https://rpc.mainnet.arc.io', rpcEnv: 'ARC_RPC_URL',
+    explorer: 'https://arcscan.app', gecko: 'arc', okxChainIndex: 5042,
+    protocols: ['v4', 'v3'], multicall3: MULTICALL3,
+    contracts: {
+      v4: {
+        permit2: UNI_PERMIT2, urMinHop: true,
+        poolManager: '0x8366a39cc670b4001a1121b8f6a443a643e40951', positionManager: getAddress('0x6049c9a0e26405c0985f9e3685c87d0ae917f82b'),
+        stateView: '0xf3334192d15450cdd385c8b70e03f9a6bd9e673b', quoter: '0x8dc178efb8111bb0973dd9d722ebeff267c98f94',
+        universalRouter: getAddress('0x4fca4a51ab4f23a7447b3284fbd7d73289a89fb1'), // UniversalRouter 2.1.1
+      },
+      v3: {
+        permit2: UNI_PERMIT2, router02: true,
+        factory: getAddress('0xf0db7b58379503491d857db50ac9ece64c653918'), deployer: getAddress('0xf0db7b58379503491d857db50ac9ece64c653918'), // Uniswap 的池由工厂自己部署
+        positionManager: getAddress('0x39654a85a4c05127f5fd6ed22caec077a0fb1377'), swapRouter: getAddress('0x53bf6b0684ec7ef91e1387da3d1a1769bc5a6f77'), // SwapRouter02
+        quoter: getAddress('0x7dfd4f31be6814d2906bde155c3e1b146eac1468'), // QuoterV2
+      },
+    },
+  },
 }
 
-export const PROTOCOL_LABEL: Record<ProtocolName, string> = { v4: 'Uniswap v4', infinity: 'PancakeSwap Infinity', v3: 'PancakeSwap v3' }
-export const protocolLabel = (chain: ChainName, protocol: ProtocolName) => chain === 'ethereum' && protocol === 'v3' ? 'Uniswap v3' : PROTOCOL_LABEL[protocol]
+export const PROTOCOL_LABEL: Record<ProtocolName, string> = { v4: 'Uniswap v4', infinity: 'PancakeSwap Infinity', v3: 'Uniswap v3' }
+export const protocolLabel = (chain: ChainName, protocol: ProtocolName) => protocol === 'v3' && CHAINS[chain].contracts.v3?.pancake ? 'PancakeSwap v3' : PROTOCOL_LABEL[protocol]
 
 // 命令行 --chain=x / --chain x（或环境变量 CHAIN），协议同理；不合法就报错退出
 export function selectChain(argv = process.argv, env = process.env): { cfg: ChainConfig; protocol: ProtocolName } {

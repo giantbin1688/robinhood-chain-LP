@@ -7,7 +7,7 @@ import {
   type Address, type Hex, type PublicClient, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { rpcUrl as settingsRpcUrl, uniswapApiUrl } from './settings.ts'
+import { rpcUrls as settingsRpcUrls, uniswapApiUrl } from './settings.ts'
 import * as v4 from './v4.ts'
 const transferEvent = parseAbiItem('event Transfer(address indexed from,address indexed to,uint256 value)')
 import { CHAINS, selectChain, type ChainConfig, type ChainName, type ProtocolName } from './chains.ts'
@@ -53,9 +53,12 @@ export const viemChain = (cfg: ChainConfig, rpc: string) => defineChain({
   rpcUrls: { default: { http: [rpc] } },
   contracts: { multicall3: { address: cfg.multicall3 } }, // 标准 Multicall3，pub.multicall 把成批只读调用合成一个 eth_call
 })
-// batch: 同一时刻发出的多个请求合并成一个 HTTP 请求；pollingInterval: 等收据时的轮询间隔
-// 配了自己的节点时公共节点作备用：Alchemy 免费档每秒 500 计算单元，一批几十个 eth_call 就会被 429（JSON-RPC 里的 429 viem 不重试），
+// http batch: 同一时刻发出的多个请求合并成一个 HTTP 请求（Alchemy 仍按请求数计费，只省连接不省额度）；pollingInterval: 等收据时的轮询间隔
+// batch.multicall: 同一时刻发出的多个 readContract 由 viem 合成一个 Multicall3.aggregate3 的 eth_call——Alchemy 免费档每月 3000 万计算单元、每个 eth_call 26 个，
+// 仓位页一次刷新原来是 (池数 + 2 × 仓位数) 个 eth_call，合并后固定 3 个。batchSize 是一批 calldata 的字节上限，几百个调用够装；带 blockNumber 的各自成批
+// 配了自己的节点时公共节点作备用：Alchemy 每秒 500 计算单元，一批几十个 eth_call 就会被 429（JSON-RPC 里的 429 viem 不重试），
 // 出错的请求自动改走公共节点；合约 revert 不会回落（fallback 对 execution reverted 直接抛出），报价/滑点那些靠 revert 数据的逻辑不受影响
+const MULTICALL = { multicall: { batchSize: 64 * 1024 } }
 export type ClientsOptions = { from?: string; needKey?: boolean; chain?: ChainName; protocol?: ProtocolName }
 export async function makeClients(o: ClientsOptions = {}) {
   const needKey = o.needKey ?? true
@@ -64,23 +67,28 @@ export async function makeClients(o: ClientsOptions = {}) {
   const account = process.env.PRIVATE_KEY ? privateKeyToAccount(process.env.PRIVATE_KEY as Hex) : undefined
   const wallet: Address = account?.address ?? (o.from ? getAddress(o.from) : die('请在 .env 里设置 PRIVATE_KEY（或 --dry-run 配合 --from <地址>）'))
   if (!account && needKey) die('非 --dry-run 模式必须提供 PRIVATE_KEY')
-  const rpc = settingsRpcUrl(cfg.name, cfg.rpcEnv) || undefined // 设置页优先，其次 .env
-  const own = !!rpc && rpc !== cfg.publicRpc
-  const chain = viemChain(cfg, rpc ?? cfg.publicRpc)
-  const transport = own
-    ? fallback([http(rpc, { batch: true }), http(cfg.publicRpc, { batch: true, methods: { exclude: ['alchemy_getAssetTransfers'] } })])
-    : http(cfg.publicRpc, { batch: true })
-  const pub = createPublicClient({ chain, transport, pollingInterval: 500 })
+  // 自己的节点：设置页优先，其次 .env；可以是多个（第一个为主、其余备用，最后才是公共节点）。第一个是不是 Alchemy 决定资金流水那套（alchemy_getAssetTransfers + 归档）可不可用
+  const rpcs = settingsRpcUrls(cfg.name, cfg.rpcEnv).filter((u) => u !== cfg.publicRpc)
+  const own = rpcs.length > 0
+  const chain = viemChain(cfg, rpcs[0] ?? cfg.publicRpc)
+  const publicHttp = (o: { timeout?: number } = {}) => http(cfg.publicRpc, { batch: true, methods: { exclude: ['alchemy_getAssetTransfers'] }, ...o })
+  const ownHttp = (o: { retryCount?: number; retryDelay?: number } = {}) => rpcs.map((u) => http(u, { batch: true, ...o }))
+  const transport = own ? fallback([...ownHttp(), publicHttp()]) : http(cfg.publicRpc, { batch: true })
+  const pub = createPublicClient({ chain, transport, pollingInterval: 500, batch: MULTICALL })
   const wc = account ? createWalletClient({ account, chain, transport }) : undefined
-  const rpcIsAlchemy = own && /alchemy\.com/.test(rpc!)
+  const rpcIsAlchemy = own && /alchemy\.com/.test(rpcs[0])
   // 历史区块的读取（流水估值用的 slot0At / liquidityAt）只能问自己的归档节点：公共节点没有历史状态，对带 blockNumber 的 eth_call
   // 一律回 "Missing or invalid parameters"。让它们走 fallback 的话，Alchemy 一限流就会落到公共节点、拿一个误导人的错误回来（不会再回 Alchemy 重试）。
-  // 所以单独给一个不带备用的客户端，限流靠 http 传输层自己的退避重试（默认 3 次，429 会重试）
-  const archive = own ? createPublicClient({ chain, transport: http(rpc, { batch: true, retryCount: 5, retryDelay: 400 }), pollingInterval: 500 }) : pub
+  // 所以单独给一个不带公共备用的客户端，限流靠 http 传输层自己的退避重试（默认 3 次，429 会重试）
+  const archive = own ? createPublicClient({ chain, transport: fallback(ownHttp({ retryCount: 5, retryDelay: 400 })), pollingInterval: 500 }) : pub
   const deps = { pub, archive, wallet, cfg, rpcIsAlchemy, log }
   const lp = await makeLp(protocol, deps)
-  const priceLp = cfg.nativePrice.protocol === protocol ? lp : await makeLp(cfg.nativePrice.protocol, deps)
-  return { account, wallet, pub, wc, cfg, protocol, chain, lp, priceLp, Q: cfg.quote, rpcIsAlchemy }
+  const priceLp = cfg.nativePrice && cfg.nativePrice.protocol !== protocol ? await makeLp(cfg.nativePrice.protocol, deps) : lp
+  // 监控每几秒读一次池价 / 手续费，一个月就是几十万次 eth_call：这类轮询走公共节点、自己的节点只做备用（一个 5 秒一读的区间监控一个月要吃掉 Alchemy 免费额度的近一半，开了止损每轮还读手续费，翻三倍）。
+  // 公共节点（Cloudflare 后面）多数 0.3 秒、偶尔 3 秒多、连发会 429：超时给 5 秒，慢了 / 429 就落到自己的节点。
+  // 发交易那条路上的读取（nonce、估 gas、余额）仍然自己的节点优先：公共节点常落后几秒，按旧状态估 gas 会把该发的交易当成失败跳过
+  const pollLp = own ? await makeLp(protocol, { ...deps, pub: createPublicClient({ chain, transport: fallback([publicHttp({ timeout: 5_000 }), ...ownHttp()]), batch: MULTICALL }) }) : lp
+  return { account, wallet, pub, wc, cfg, protocol, chain, lp, priceLp, pollLp, Q: cfg.quote, rpcIsAlchemy }
 }
 export type Clients = Awaited<ReturnType<typeof makeClients>>
 
@@ -92,9 +100,11 @@ export async function tokenMeta(pub: PublicClient, token: Address) {
   ])
   return { symbol, name, decimals }
 }
-// 原生币（ETH / BNB）的美元价：读一个稳定的 包装原生币/计价币 池的 tick（Robinhood: v4 WETH/USDG 0.05%；BSC: v3 WBNB/USDT 0.05%）
+// 原生币（ETH / BNB）的美元价：读一个稳定的 包装原生币/计价币 池的 tick（Robinhood: v4 WETH/USDG 0.05%；BSC: v3 WBNB/USDT 0.05%）。
+// 原生币就是计价币的链（Arc 用 USDC 付 gas）按 1 美元算：gas 换算 = wei / 1e18
 export async function nativePriceUsd(c: Clients) {
   const { cfg } = c
+  if (!cfg.nativePrice || !cfg.wnative) return 1
   const pool = await c.priceLp.pool(cfg.wnative, cfg.nativePrice.fee, cfg.nativePrice.spacing)
   const { tick } = await c.priceLp.slot0(pool)
   const raw = v4.priceAtTick(tick) // currency1 基础单位 / currency0 基础单位
@@ -274,6 +284,7 @@ export function swapDepsFor(c: Clients, slippage: number, via: string, fmtOut: (
   if (via === 'uniswap' && !d.uni) die('--via uniswap 需要在 .env 里配置 UNISWAP_API_KEY')
   if (!d.uni && !d.okx) log('提示: 没配置聚合器（UNISWAP_API_KEY / OKX_API_KEY），换币只能在 LP 的池里直换，市场价也按池价算')
   else if (c.cfg.name === 'bsc' && !d.okx && via !== 'uniswap') log('提示: BSC 上 Uniswap API 只看 Uniswap 自家的池，PancakeSwap 的深度要配 OKX_API_KEY 才能用到')
+  else if (c.cfg.name === 'arc' && via !== 'pool') log('提示: Uniswap Trading API 和 OKX 聚合器（2026-09-16 时）都还不支持 Arc，它们的报价会失败、换币实际只在 LP 的池里直换，市场价也按池价算；--via pool 可以省掉这些报错')
   return d
 }
 // external = 只问聚合器（探测市场价用：拿要做 LP 的池自己当市场价，就查不出它偏离市场）；聚合器都报不出才退回池价

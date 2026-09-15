@@ -20,7 +20,7 @@ import type { Pool } from '../lp.ts'
 import { readTickDetail } from '../tick-detail.ts'
 import { listTokenPools } from '../pools.ts'
 import * as sig from '../signals.ts'
-import { gmgnApiKey, masked, rpcUrl as effectiveRpc, saveSettings, secretValues, settings, solanaCfg } from '../settings.ts'
+import { gmgnApiKey, masked, rpcUrl as effectiveRpc, saveSettings, secretValues, settings, solanaCfg, splitUrls } from '../settings.ts'
 import { snapshot as gmgnSnapshot } from '../gmgn.ts'
 import { SQUEEZE_FIELDS, squeezeParamSources } from '../strategy.ts'
 import { scanSqueeze } from '../squeeze-scan.ts'
@@ -42,7 +42,7 @@ const SECRET_ENVS: [string, string][] = [
   // 代理只在带账号密码时才算秘密，否则 127.0.0.1:7897 这种被抹掉反而看不懂日志
   ...['HTTPS_PROXY', 'HTTP_PROXY'].filter((k) => (process.env[k] ?? '').includes('@')).map((k) => [k, '<代理>'] as [string, string]),
 ]
-const SECRETS = SECRET_ENVS.map(([k, tag]) => [process.env[k] ?? '', tag] as const).filter(([v]) => v.length >= 8)
+const SECRETS = SECRET_ENVS.flatMap(([k, tag]) => splitUrls(process.env[k] ?? '').map((v) => [v, tag] as const)).filter(([v]) => v.length >= 8) // RPC 变量可以是逗号分隔的多个地址
 export const redact = (s: string) => {
   for (const [v, tag] of SECRETS) if (s.includes(v)) s = s.split(v).join(tag)
   for (const v of secretValues()) if (s.includes(v)) s = s.split(v).join('<token>')
@@ -66,6 +66,7 @@ type Job = {
   startedAt: number; endedAt?: number; exitCode?: number | null; lines: string[]; partial: string; plan?: unknown; proc?: ChildProcess
 }
 const jobs = new Map<number, Job>()
+const lastTxAt = new Map<ChainKind, number>() // 每条链最近一次真实任务建仓 / 结束的时间：资金流水只在这之后的几分钟里才按分钟重拉（ensureLedger）
 let seq = 0
 const streams = new Set<ServerResponse>()
 const emit = (ev: object) => { const s = `data: ${JSON.stringify(ev)}\n\n`; for (const r of streams) r.write(s) }
@@ -75,7 +76,7 @@ const sendingTx = (chain: ChainKind) => [...jobs.values()].find((j) => isRunning
 
 function startJob(sel: Sel, kind: Job['kind'], label: string, script: string, args: string[], meta: { dryRun: boolean; token?: string; positions?: string[] }) {
   if (!meta.dryRun && kind !== 'watch') { const busy = sendingTx(sel.chain); if (busy) throw new Error(`「${busy.label}」正在发交易，等它完成再开始（避免两个进程的 nonce 互相冲突）`) }
-  const job: Job = { id: ++seq, kind, label: `[${{ ethereum: 'ETH', bsc: 'BSC', robinhood: 'RHC', solana: 'SOL' }[sel.chain]}] ${label}`, dryRun: meta.dryRun, phase: 'run', chain: sel.chain, protocol: sel.protocol, token: meta.token, positions: meta.positions ?? [], startedAt: Date.now(), lines: [], partial: '' }
+  const job: Job = { id: ++seq, kind, label: `[${{ ethereum: 'ETH', bsc: 'BSC', robinhood: 'RHC', arc: 'ARC', solana: 'SOL' }[sel.chain]}] ${label}`, dryRun: meta.dryRun, phase: 'run', chain: sel.chain, protocol: sel.protocol, token: meta.token, positions: meta.positions ?? [], startedAt: Date.now(), lines: [], partial: '' }
   jobs.set(job.id, job)
   // 只留最近 50 个已结束的任务
   const done = [...jobs.values()].filter((j) => !isRunning(j)).sort((a, b) => a.id - b.id)
@@ -91,6 +92,7 @@ function startJob(sel: Sel, kind: Job['kind'], label: string, script: string, ar
     if (text.startsWith('@@positions ')) { // 进场组完 LP：记下仓位；带 --watch 的接下来进入监控阶段
       try { job.positions = JSON.parse(text.slice(12)) } catch {}
       if (args.includes('--watch')) job.phase = 'watch'
+      if (!meta.dryRun) lastTxAt.set(sel.chain, Date.now())
       emit({ type: 'status', job: summary(job) }); return
     }
     job.lines.push(text)
@@ -111,6 +113,7 @@ function startJob(sel: Sel, kind: Job['kind'], label: string, script: string, ar
   proc.on('close', (code) => {
     if (job.partial) { line(job.partial); job.partial = '' }
     job.exitCode = code; job.endedAt = Date.now()
+    if (!meta.dryRun) lastTxAt.set(sel.chain, Date.now()) // 监控结束也算：多半是触发撤退发了交易
     log(`任务 #${job.id} 结束，退出码 ${code}`)
     emit({ type: 'status', job: summary(job) })
   })
@@ -169,7 +172,9 @@ const priceFn = (x: Ctx, tokenIs1: boolean, decimals: number) => { const qd = x.
 const uncollectedFees = (x: Ctx, p: Position): Promise<[bigint, bigint]> => positionFees(x.c, p).catch((e) => { log(`仓位 ${p.id} 手续费读取失败: ${String(e?.message).slice(0, 120)}`); return [0n, 0n] })
 
 // ---- 资金流水（history.ts）：每个仓位的 存入 / 已领手续费 / 已撤本金，每笔按当时池价折算 ----
-// 盈亏 = 现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入。流水从当前仓位里最早的 mint 区块起扫，全量刷新或距上次超过 1 分钟才重新拉
+// 盈亏 = 现值 + 未领手续费 + 已领手续费 + 已撤本金 − 存入。流水从当前仓位里最早的 mint 区块起扫。
+// 流水只有发生交易才会变，而本工具的交易都是任务：全量刷新、或这条链上 3 分钟内有真实任务结束过（Alchemy 的转账索引会滞后几秒，任务刚结束那阵每分钟重拉）才按 1 分钟刷，
+// 平时 10 分钟一次兜底（在别处手动操作的靠它）。原来固定每分钟拉两遍 alchemy_getAssetTransfers（各 120 计算单元、按页数翻倍），一天就吃掉免费额度的三分之一
 async function refresh(x: Ctx, since: bigint) {
   try { await refreshLedger(x.c, since); x.ledgerOk = true; x.ledgerAt = Date.now(); x.ledgerError = '' }
   catch (e: any) { x.ledgerOk = false; x.ledgerError = `资金流水读取失败（需要 Alchemy 节点）: ${String(e?.shortMessage ?? e?.message).slice(0, 120)}`; throw new Error(x.ledgerError) }
@@ -178,7 +183,8 @@ async function ensureLedger(x: Ctx, full: boolean) {
   if (!x.c.rpcIsAlchemy) { x.ledgerError = `资金流水需要 Alchemy 节点（.env 里的 ${x.c.cfg.rpcEnv}）`; return }
   const minted = x.known.filter((p) => p.mint)
   const since = minted.length ? minted.reduce((m, p) => (p.mint!.block < m ? p.mint!.block : m), minted[0].mint!.block) : 0n
-  if (!x.known.length || (!full && x.ledgerOk && Date.now() - x.ledgerAt < 60_000)) return
+  const recentTx = Date.now() - (lastTxAt.get(x.sel.chain) ?? 0) < 180_000
+  if (!x.known.length || (!full && x.ledgerOk && Date.now() - x.ledgerAt < (recentTx ? 60_000 : 600_000))) return
   await refresh(x, since).catch((e) => log(e.message))
 }
 const usdAt = (qd: number, tokenIs1: boolean, decimals: number, priceAt: (t: number) => number) => (a0: bigint, a1: bigint, tick: number) => { const [u, t] = tokenIs1 ? [a0, a1] : [a1, a0]; return Number(u) / 10 ** qd + (Number(t) / 10 ** decimals) * priceAt(tick) }
@@ -346,7 +352,7 @@ async function closedList(x: Ctx) {
   const poolToken = async (pid: Hex) => { const pool = await poolOf(pid); if (!pool || ![pool.currency0, pool.currency1].some((a) => same(a, c.Q.address))) return null; return same(pool.currency0, c.Q.address) ? pool.currency1 : pool.currency0 }
   const u = (v: bigint) => cents(Number(v) / 10 ** c.Q.decimals)
   const episodes = []
-  const eps = await tokenEpisodes(c, poolToken, [c.cfg.wnative])
+  const eps = await tokenEpisodes(c, poolToken, c.cfg.wnative ? [c.cfg.wnative] : [])
   for (const e of eps.episodes) {
     if (e.open) continue
     const m = await metaOf(x, e.token as Address).catch(() => ({ symbol: e.token.slice(0, 8), decimals: 18 }))
@@ -392,7 +398,8 @@ async function state(sel: Sel) {
   const [usdg, eth, ethPrice] = await Promise.all([
     pub.readContract({ address: Q.address, abi: erc20Abi, functionName: 'balanceOf', args: [wallet!] }), pub.getBalance({ address: wallet! }), nativePriceUsd(x.c),
   ])
-  return { ...base, usdg: trim(usdg, Q.decimals), eth: trim(eth, 18), ethUsd: (Number(formatEther(eth)) * ethPrice).toFixed(2), ethPrice: ethPrice.toFixed(2), alchemy: x.c.rpcIsAlchemy, tiers: x.c.lp.tiers.map((t) => t.fee / 10000) }
+  // stableGas：原生币就是计价币（Arc），余额只有一份、也没有"原生币价格"可显示
+  return { ...base, usdg: trim(usdg, Q.decimals), eth: trim(eth, 18), ethUsd: (Number(formatEther(eth)) * ethPrice).toFixed(2), ethPrice: ethPrice.toFixed(2), stableGas: !cfg.nativePrice, alchemy: x.c.rpcIsAlchemy, tiers: x.c.lp.tiers.map((t) => t.fee / 10000) }
 }
 
 // ---- 表单 -> 命令行参数。数值原样透传，合法性由命令本身检查（出错会打印"错误: …"并退出）；一律 --key=value，负数才不会被当成另一个选项 ----
@@ -543,6 +550,7 @@ const server = createServer(async (req, res) => {
           robinhood: { set: masked(st.rpc.robinhood), env: !!process.env.RPC_URL },
           bsc: { set: masked(st.rpc.bsc), env: !!process.env.BSC_RPC_URL },
           ethereum: { set: masked(st.rpc.ethereum), env: !!process.env.ETH_RPC_URL },
+          arc: { set: masked(st.rpc.arc), env: !!process.env.ARC_RPC_URL },
           solana: { set: masked(st.rpc.solana), env: !!process.env.SOL_RPC_URL },
           uniswapUrl: st.api.uniswapUrl,
         },
@@ -557,8 +565,8 @@ const server = createServer(async (req, res) => {
       // 密码类字段（RPC / key）：空 = 保持原值（不然改一项会把其它项清掉），填 "-" = 清除（回退 .env / 公共节点 / 默认）
       const keep = (v: string, old: string) => (v === '-' ? '' : v || old)
       if (b.section === 'rpc') { // 保存后丢掉缓存的链上下文，网页数据立即用新节点；新任务子进程自己读 settings.json
-        const u = (k: string, old: string) => { const v = keep(str(b[k]), old); if (v && !/^https?:\/\//.test(v)) throw new Error(`${k} 要是 http(s):// 开头的节点地址`); return v }
-        st.rpc = { ethereum: u('ethereum', st.rpc.ethereum), robinhood: u('robinhood', st.rpc.robinhood), bsc: u('bsc', st.rpc.bsc), solana: u('solana', st.rpc.solana) }
+        const u = (k: string, old: string) => { const v = keep(str(b[k]), old); if (splitUrls(v).some((x) => !/^https?:\/\//.test(x))) throw new Error(`${k} 要是 http(s):// 开头的节点地址（多个用逗号分隔）`); return splitUrls(v).join(',') }
+        st.rpc = { ethereum: u('ethereum', st.rpc.ethereum), robinhood: u('robinhood', st.rpc.robinhood), bsc: u('bsc', st.rpc.bsc), arc: u('arc', st.rpc.arc), solana: u('solana', st.rpc.solana) }
         st.api.uniswapUrl = u('uniswapUrl', '') // 明文框，值就在输入框里：空 = 清除
         saveSettings(); ctxs.clear(); solCtxs.clear()
         return json(res, 200, { ok: true })

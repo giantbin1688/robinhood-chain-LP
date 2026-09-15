@@ -7,7 +7,7 @@ import { parseArgs } from 'node:util'
 import { getAddress, type Address, type Hex } from 'viem'
 import * as v4 from './v4.ts'
 import { die, env, failFast, log, makeClients, num, p6, pct, sleep, tokenMeta, type Clients } from './common.ts'
-import { findPositions, positionFees, same, withdraw, type Position } from './exit.ts'
+import { findPositions, same, withdraw, type Position } from './exit.ts'
 import { ledgerTotals } from './history.ts'
 import { tokenInfo as gmgnTokenInfo, type GmgnChain } from './gmgn.ts'
 import { squeezeParamsFromEnv } from './strategy.ts'
@@ -17,7 +17,7 @@ import { squeezeParamsFromEnv } from './strategy.ts'
 // 开了止损就只看这一个条件，"跳出区间"整个不看：bidask / curve 贴着现价的那一段价格稍动就进出区间，按区间规则会在亏 1% 时就把整组撤了，止损形同虚设。存入本金优先用 entry（启动时手填 / 进场时的预算），没给才从链上流水读（要 Alchemy），两个都没有则拒绝启动，不能默默变成没止损
 export type WatchOptions = { token: Address; positions?: bigint[]; clients: Clients; interval: number; confirm: number; upperGrace: number; stopLoss?: number; entry?: number; via: string; slippage: number; lpSlippage: number; dryRun: boolean; json?: boolean; squeeze?: { chain: GmgnChain } }
 export async function watchToken(o: WatchOptions) {
-  const { pub, lp, Q } = o.clients
+  const { pub, pollLp: lp, Q } = o.clients // 循环里的池价 / 手续费 / 仓位读取走轮询客户端（公共节点优先，见 makeClients）；撤退时 withdraw 自己用 clients.lp
   const { symbol, decimals } = await tokenMeta(pub, o.token)
   const all = await findPositions(o.clients, o.token, o.positions)
   if (all.length === 0) { log(o.positions ? `仓位 ${o.positions.join(',')} 不在钱包名下或已没有流动性，不监控` : `钱包名下没有 ${symbol}/${Q.symbol} 的有效仓位，不监控`); return }
@@ -61,7 +61,7 @@ export async function watchToken(o: WatchOptions) {
       // 止损：按最新池价重算每个仓位的现值，加未领手续费（每轮读链；手续费读失败按 0 算，只会让估值偏低、更早触发，不会漏）
       let loss: { value: number; pnl: number } | null = null
       if (base) {
-        const fees = await Promise.all(main.map((p) => positionFees(o.clients, p).catch(() => [0n, 0n] as [bigint, bigint])))
+        const fees = await Promise.all(main.map((p) => lp.fees(p).catch(() => [0n, 0n] as [bigint, bigint])))
         let value = base.fees + base.withdrawn
         main.forEach((p, i) => {
           const s = slots.get(p.pool.id)!
@@ -113,9 +113,11 @@ export async function watchToken(o: WatchOptions) {
         await withdraw({ token: o.token, positions: o.positions, via: o.via, slippage: o.slippage, lpSlippage: o.lpSlippage, keepTokens: false, yes: true, dryRun: o.dryRun, clients: o.clients, json: o.json })
         return
       }
-      // 每分钟核对一次仓位还在不在（手动撤了就停止监控）
+      // 每分钟核对一次仓位还在不在（手动撤了就停止监控）。公共节点可能落后几秒到几分钟：刚建的仓位它还没看到，会把整组报成"没了"——全没了就用自己的节点再确认一次再停
       if (++polls % Math.max(1, Math.round(60 / o.interval)) === 0) {
-        const alive = await lp.positions(main.map((p) => p.id)).catch(() => null)
+        const ids = main.map((p) => p.id)
+        let alive = await lp.positions(ids).catch(() => null)
+        if (alive && lp !== o.clients.lp && !alive.some((p) => p.liquidity > 0n)) alive = await o.clients.lp.positions(ids).catch(() => null)
         if (alive) {
           const liq = new Map(alive.map((p) => [p.id, p.liquidity]))
           for (const p of main) p.liquidity = liq.get(p.id) ?? 0n // 你中途手动撤了一部分，止损估值要按剩下的算

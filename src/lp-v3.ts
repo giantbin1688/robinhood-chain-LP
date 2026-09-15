@@ -1,15 +1,16 @@
-// Uniswap v3（Ethereum）/ PancakeSwap v3（BSC）。每个池是独立合约（CREATE2），仓位 NFT 由 NonfungiblePositionManager 管理。
-// 直接 ERC20 授权给 NPM / SwapRouter；费率和 init code hash 按链选择。协议费从 LP 费里分、不改变总费率。
+// Uniswap v3（Ethereum / Arc）/ PancakeSwap v3（BSC）。每个池是独立合约（CREATE2），仓位 NFT 由 NonfungiblePositionManager 管理。
+// 直接 ERC20 授权给 NPM / SwapRouter；费率和 init code hash 按 contracts.v3.pancake 选择。协议费从 LP 费里分、不改变总费率。
 import { encodeAbiParameters, encodeFunctionData, getAddress, keccak256, maxUint128, parseAbi, parseAbiItem, parseEventLogs, type Address, type Hex, type Log } from 'viem'
 import * as v4 from './v4.ts'
-import { protocolLabel, type ChainName } from './chains.ts'
+import { CHAINS, protocolLabel, type ChainName } from './chains.ts'
 import type { DirectEvent, Lp, LpDeps, Mod, Pool, RawPosition, Slot0 } from './lp.ts'
 
 const ZERO = v4.ZERO_ADDRESS
 const POOL_INIT_CODE_HASH = '0x6ce8eb472fa82df5469c6ab6d485f17c3ad13c8cd7af59b3d4a8026c5ce0f7e2'
 export const UNI_POOL_INIT_CODE_HASH = '0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54'
 const TIERS = [{ fee: 100, spacing: 1 }, { fee: 500, spacing: 10 }, { fee: 2500, spacing: 50 }, { fee: 10000, spacing: 200 }]
-export const v3Tiers = (chain: ChainName) => chain === 'ethereum' ? [{ fee: 100, spacing: 1 }, { fee: 500, spacing: 10 }, { fee: 3000, spacing: 60 }, { fee: 10000, spacing: 200 }] : TIERS
+const isPancake = (chain: ChainName) => CHAINS[chain].contracts.v3?.pancake === true
+export const v3Tiers = (chain: ChainName) => isPancake(chain) ? TIERS : [{ fee: 100, spacing: 1 }, { fee: 500, spacing: 10 }, { fee: 3000, spacing: 60 }, { fee: 10000, spacing: 200 }]
 
 const factoryAbi = parseAbi(['function getPool(address, address, uint24) view returns (address)'])
 const poolAbi = parseAbi([
@@ -52,6 +53,20 @@ const routerAbi = parseAbi([
   'function exactInputSingle(ExactInputSingleParams params) payable returns (uint256 amountOut)',
   'function exactOutputSingle(ExactOutputSingleParams params) payable returns (uint256 amountIn)',
 ])
+// SwapRouter02（Arc 上只部署了这个）：参数结构里没有 deadline，用 multicall(deadline, [...]) 包一层来限时
+export const router02Abi = parseAbi([
+  'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
+  'struct ExactOutputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountOut; uint256 amountInMaximum; uint160 sqrtPriceLimitX96; }',
+  'function exactInputSingle(ExactInputSingleParams params) payable returns (uint256 amountOut)',
+  'function exactOutputSingle(ExactOutputSingleParams params) payable returns (uint256 amountIn)',
+  'function multicall(uint256 deadline, bytes[] data) payable returns (bytes[])',
+])
+export function router02Calldata(wallet: Address, tokenIn: Address, tokenOut: Address, fee: number, amount: { exactIn: bigint; minOut: bigint } | { exactOut: bigint; maxIn: bigint }, deadline: bigint): Hex {
+  const inner = 'exactIn' in amount
+    ? encodeFunctionData({ abi: router02Abi, functionName: 'exactInputSingle', args: [{ tokenIn, tokenOut, fee, recipient: wallet, amountIn: amount.exactIn, amountOutMinimum: amount.minOut, sqrtPriceLimitX96: 0n }] })
+    : encodeFunctionData({ abi: router02Abi, functionName: 'exactOutputSingle', args: [{ tokenIn, tokenOut, fee, recipient: wallet, amountOut: amount.exactOut, amountInMaximum: amount.maxIn, sqrtPriceLimitX96: 0n }] })
+  return encodeFunctionData({ abi: router02Abi, functionName: 'multicall', args: [deadline, [inner]] })
+}
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 600)
 
@@ -78,7 +93,7 @@ export async function v3Lp(d: LpDeps): Promise<Lp> {
     const spacing = spacingFor(fee)
     if (spacing === null) throw new Error(`${label} 支持 ${tiers.map((t) => t.fee / 10000 + '%').join(' / ')}，没有 ${fee / 10000}%`)
     const onchain = await pub.readContract({ address: FACTORY, abi: factoryAbi, functionName: 'getPool', args: [token0, token1, fee] })
-    const address = same(onchain, ZERO) ? computePoolAddress(A.deployer, token0, token1, fee, cfg.name === 'ethereum' ? UNI_POOL_INIT_CODE_HASH : POOL_INIT_CODE_HASH) : onchain
+    const address = same(onchain, ZERO) ? computePoolAddress(A.deployer, token0, token1, fee, isPancake(cfg.name) ? POOL_INIT_CODE_HASH : UNI_POOL_INIT_CODE_HASH) : onchain
     p = { id: address, key: { token0, token1, fee }, currency0: token0, currency1: token1, fee, spacing, hooks: ZERO }
     poolCache.set(k, p)
     return p
@@ -192,6 +207,7 @@ export async function v3Lp(d: LpDeps): Promise<Lp> {
       const [tokenIn, tokenOut] = zeroForOne ? [p.currency0, p.currency1] : [p.currency1, p.currency0]
       const maxIn = 'exactIn' in amount ? amount.exactIn : amount.maxIn
       await kit.ensureErc20Approval(tokenIn, maxIn, ROUTER, 'SwapRouter')
+      if (cfg.contracts.v3?.router02) return { to: ROUTER, data: router02Calldata(wallet, tokenIn, tokenOut, p.fee, amount, dl) }
       const data = 'exactIn' in amount
         ? encodeFunctionData({ abi: routerAbi, functionName: 'exactInputSingle', args: [{ tokenIn, tokenOut, fee: p.fee, recipient: wallet, deadline: dl, amountIn: amount.exactIn, amountOutMinimum: amount.minOut, sqrtPriceLimitX96: 0n }] })
         : encodeFunctionData({ abi: routerAbi, functionName: 'exactOutputSingle', args: [{ tokenIn, tokenOut, fee: p.fee, recipient: wallet, deadline: dl, amountOut: amount.exactOut, amountInMaximum: amount.maxIn, sqrtPriceLimitX96: 0n }] })

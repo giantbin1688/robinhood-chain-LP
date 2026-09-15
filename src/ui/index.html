@@ -493,7 +493,7 @@
     <button class="btn" id="btn-rescan">重新扫描链上仓位</button>
     <button class="btn" id="btn-refresh">刷新价格</button>
     <button class="btn" id="btn-collect-all" title="一次领取所有仓位的未领手续费（≥ $0.01 的），本金不动；确认框里可勾选顺便把领到的各种币都卖成计价币">领取全部手续费</button>
-    <label>自动刷新 <select id="p-auto"><option value="0">关</option><option value="5">5 秒</option><option value="15" selected>15 秒</option><option value="60">60 秒</option></select></label>
+    <label title="每次刷新都要读链（自己的 Alchemy 节点有月度额度）；标签页切到后台时暂停，切回来立刻刷一次">自动刷新 <select id="p-auto"><option value="0">关</option><option value="5">5 秒</option><option value="15">15 秒</option><option value="60" selected>60 秒</option></select></label>
     <span class="sp"></span>
     <label>卖币走 <select id="p-via"><option value="best">best（聚合器 / 池内 取高者）</option><option value="uniswap">uniswap</option><option value="okx">okx</option><option value="jupiter">jupiter</option><option value="pool">pool（仓位所在的池直换）</option></select></label>
     <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="p-keep"> 只撤仓位，不卖币</label>
@@ -570,10 +570,11 @@
   </div>
   <div class="card">
     <h4>节点 RPC</h4>
-    <p class="lead">各链的节点地址（Alchemy 等，URL 里含 key，只回显末 4 位）。留空 = 用 .env 里的对应项，再没有就走公共节点。保存立即生效：网页数据换新节点，之后启动的任务也用新节点。留空 = 保持不变，填一个减号 <b>-</b> = 清除（回退 .env / 公共节点）。</p>
+    <p class="lead">各链的节点地址（Alchemy 等，URL 里含 key，只回显末 4 位）。留空 = 用 .env 里的对应项，再没有就走公共节点。保存立即生效：网页数据换新节点，之后启动的任务也用新节点。留空 = 保持不变，填一个减号 <b>-</b> = 清除（回退 .env / 公共节点）。EVM 链可以填多个（英文逗号分隔）：第一个为主节点、其余备用，公共节点排最后；资金流水 / 盈亏要主节点是 Alchemy。</p>
     <div class="row"><label>Robinhood</label><input type="password" id="st-rpc-rhc" placeholder="https://robinhood-mainnet.g.alchemy.com/v2/…" spellcheck="false"></div>
     <div class="row"><label>Ethereum</label><input type="password" id="st-rpc-eth" placeholder="https://eth-mainnet.g.alchemy.com/v2/…" spellcheck="false"></div>
     <div class="row"><label>BSC</label><input type="password" id="st-rpc-bsc" placeholder="https://bnb-mainnet.g.alchemy.com/v2/…" spellcheck="false"></div>
+    <div class="row"><label>Arc</label><input type="password" id="st-rpc-arc" placeholder="主节点, 备用节点（OKX 钱包 / Alchemy 给的 Arc 主网 RPC）" spellcheck="false"><div class="hint">Arc 主网 chainId 5042，USDC 付 gas。官方公共节点 rpc.mainnet.arc.io 开放当天还挡在 Cloudflare 后面，这里不填就没有可用节点</div></div>
     <div class="row"><label>Solana</label><input type="password" id="st-rpc-sol" placeholder="https://solana-mainnet.g.alchemy.com/v2/…" spellcheck="false"></div>
     <div class="row"><label>Uniswap API 地址</label><input type="text" id="st-api-uni" placeholder="https://trade-api.gateway.uniswap.org/v1" spellcheck="false"><div class="hint">Uniswap Trading API 的网关地址，一般不用改</div></div>
     <div class="actions" style="margin-top:4px"><button class="btn primary" id="st-rpc-save">保存</button></div>
@@ -628,7 +629,7 @@ let STATE = {}
 var QS = 'USDG', NS = 'ETH' // 计价币 / 原生币符号，随链变（var：表格事件里要按行覆盖时用 window.QS 取全局的）
 const SEL = { chain: localStorage.getItem('chain') || 'robinhood', protocol: '', quote: localStorage.getItem('quote:solana') || 'SOL' } // 协议按链各自记忆（protocol:<chain>），空 = 服务端给该链的默认；quote 只有 Solana 用
 SEL.protocol = localStorage.getItem('protocol:' + SEL.chain) || ''
-const CHAIN_LABEL = { ethereum: 'Ethereum', robinhood: 'Robinhood', bsc: 'BSC', solana: 'Solana' }
+const CHAIN_LABEL = { ethereum: 'Ethereum', robinhood: 'Robinhood', bsc: 'BSC', arc: 'Arc', solana: 'Solana' }
 const PROTOCOL_HINT = { infinity: 'PancakeSwap 的 v4（singleton + hook）；成交最活跃的池多是带 hook 的动态费率池，可复用', v3: 'BSC 成交量最大的协议；费率固定四档', v4: 'Uniswap 在 BSC 的 v4 部署，流动性很薄', dlmm: 'Meteora 的 bin 流动性（DLMM）：spot / curve / bidask 是它原生的策略，费率动态（基础费 + 波动费）；仓位是账户不是 NFT，关闭退租金', clmm: 'Raydium 的集中流动性（Uniswap v3 式 tick）：费率固定档，仓位是 NFT' }
 // 地址：EVM 是 0x + 40 位十六进制，Solana 是 32~44 位 base58
 const isAddr = (s) => (SEL.chain === 'solana' ? /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s) : /^0x[0-9a-fA-F]{40}$/.test(s))
@@ -783,8 +784,13 @@ function showPage(p) {
 }
 
 // ---- 钱包 / 默认值 ----
+let stateSeq = 0 // 同 loadPositions：慢回来的旧状态不覆盖新的（切链时尤其要紧）
 async function loadState(fillForm) {
-  try { STATE = await api('/api/state') } catch (e) { $('#chipWallet').textContent = '服务不可用: ' + e.message; setLight('rpc', 'bad', '服务不可用: ' + e.message); return }
+  const seq = ++stateSeq
+  let got
+  try { got = await api('/api/state') } catch (e) { if (seq === stateSeq) { $('#chipWallet').textContent = '服务不可用: ' + e.message; setLight('rpc', 'bad', '服务不可用: ' + e.message) } return }
+  if (seq !== stateSeq) return
+  STATE = got
   const w = STATE.wallet
   $('#launch-ticks').style.display = STATE.chain === 'robinhood' && STATE.protocol === 'v4' ? '' : 'none';
   $('#tick-mode-option').disabled = !(STATE.chain === 'robinhood' && STATE.protocol === 'v4');
@@ -813,9 +819,9 @@ async function loadState(fillForm) {
   if (rpcNote && !rpcNote.rpc && fillForm) toast(sol ? '没配 SOL_RPC_URL，Solana 走公共节点（慢、限流）；可以在设置页填 Alchemy 节点' : `没配 ${rpcNote.rpcEnv}，${rpcNote.label} 走公共节点：没有资金流水 / 盈亏，Infinity 仓位只认 positions.json 记录的；可以在设置页填`)
   $('#chipWallet').textContent = w ? `${w.slice(0, 6)}…${w.slice(-4)}` : `无私钥（只能看，.env 里填 ${sol ? 'SOL_PRIVATE_KEY' : 'PRIVATE_KEY'}）`
   $('#chipBal').innerHTML = w ? (QS === NS ? `${STATE.eth} <small>${NS}</small>` : `${STATE.usdg} <small>${QS}</small> &nbsp;${STATE.eth} <small>${NS}</small>`) : '—'
-  $('#chipEthK').textContent = `${NS} 价格`; $('#chipEth').textContent = `$${STATE.ethPrice}`
+  $('#chipEthK').textContent = `${NS} 价格`; $('#chipEth').textContent = `$${STATE.ethPrice}`; $('#chipEth').parentElement.style.display = STATE.stableGas ? 'none' : '' // Arc：gas 就是 USDC，没有"原生币价格"
   $('#navFoot').textContent = `${CHAIN_LABEL[STATE.chain] || chainInfo.label} Chain · ${STATE.protocolLabel}`
-  setLight('rpc', chainInfo.rpc ? 'ok' : 'warn', chainInfo.rpc ? `${chainInfo.label} 走设置页 / .env 的 ${chainInfo.rpcEnv}（Alchemy${sol ? '；getProgramAccounts 免费档不给，自动走公共节点' : ''}）` : `设置页和 .env 都没有 ${chainInfo.rpcEnv}，走公共节点${sol ? '' : '：没有资金流水 / 盈亏'}；可以在设置页填`)
+  setLight('rpc', chainInfo.rpc ? 'ok' : 'warn', chainInfo.rpc ? `${chainInfo.label} 走设置页 / .env 的 ${chainInfo.rpcEnv}（${sol || STATE.alchemy ? 'Alchemy' : '非 Alchemy 节点：没有资金流水 / 盈亏'}${sol ? '；getProgramAccounts 免费档不给，自动走公共节点' : ''}）` : `设置页和 .env 都没有 ${chainInfo.rpcEnv}，走公共节点${sol ? '' : '：没有资金流水 / 盈亏'}；可以在设置页填`)
   setLight('key', w ? 'ok' : 'bad', w ? `钱包 ${w}` : `.env 里没有 ${sol ? 'SOL_PRIVATE_KEY' : 'PRIVATE_KEY'}，只能看不能操作`)
   if (sol) setLight('uniswap', 'ok', STATE.jupiterKey ? 'Jupiter 聚合器（api.jup.ag，JUPITER_API_KEY 已配置）' : 'Jupiter 聚合器（lite-api.jup.ag，免 key）')
   else setLight('uniswap', STATE.uniswapKey ? 'ok' : '', STATE.uniswapKey ? 'UNISWAP_API_KEY 已配置' : '没有 UNISWAP_API_KEY')
@@ -1194,11 +1200,15 @@ function renderStats() {
     tile('DPR 日收益率', dollarDays > 0 ? pct((pnl / dollarDays) * 100) : '—', !led.length ? noLedger : dollarDays > 0 ? `加权持仓 ${fmtHold((dollarDays / invested) * 864e5)} · 其中手续费 ${pct(((collected + tot('feesUsd', led)) / dollarDays) * 100)}/天` : '仓位刚建立', dollarDays > 0 ? pnlCol(pnl) : ''),
   ].join('') : ''
 }
+let posSeq = 0 // 定时刷新、切回前台、手动刷新可能同时在飞：只认最后发出的那次的结果，慢回来的旧快照不覆盖新的
 async function loadPositions(full) {
-  const QSg = QS
+  const QSg = QS, seq = ++posSeq
   const sum = $('#pos-summary')
   if (full) sum.textContent = '扫描链上仓位中（首次几秒）…'
-  try { POS = (await api('/api/positions' + (full ? '?full=1' : ''))).positions } catch (e) { sum.textContent = '加载失败: ' + e.message; return }
+  let got
+  try { got = (await api('/api/positions' + (full ? '?full=1' : ''))).positions } catch (e) { if (seq === posSeq) sum.textContent = '加载失败: ' + e.message; return }
+  if (seq !== posSeq) return
+  POS = got
   renderStats()
   $('#posCount').textContent = POS.length; $('#posCount').style.display = POS.length ? '' : 'none'
   const noLedger = POS.filter((p) => p.pnlUsd === null).length
@@ -1401,7 +1411,9 @@ $('#btn-collect-all').onclick = async () => {
     job(r.job.id).meta = r.job; panes.pos.show(r.job.id); setTimeout(() => loadPositions(false), 800)
   } catch (err) { toast(err.message) }
 }
-function setAuto() { clearInterval(posTimer); const s = Number($('#p-auto').value); if (s > 0) posTimer = setInterval(() => { if ($('#page-positions').classList.contains('on')) loadPositions(false) }, s * 1000) }
+// 自动刷新只在标签页可见且停在仓位页时读链；间隔记在 localStorage
+function setAuto() { clearInterval(posTimer); const s = Number($('#p-auto').value); localStorage.setItem('p-auto', s); if (s > 0) posTimer = setInterval(() => { if (!document.hidden && $('#page-positions').classList.contains('on')) loadPositions(false) }, s * 1000) }
+$('#p-auto').value = localStorage.getItem('p-auto') ?? '60'
 $('#p-auto').onchange = setAuto
 
 // ---- 盈亏日历：每格 = 当天结束的各代币买卖段里钱包 USDG 的实际净变化（现金口径，和余额对得上）；LP 口径（按池价估的存入 / 撤出 / 手续费）作为参照；点格子看当天明细 ----
@@ -1652,10 +1664,11 @@ async function loadSettings() {
   ph($('#st-rpc-rhc'), r.rpc.robinhood, '.env 里已配（RPC_URL）', 'https://robinhood-mainnet.g.alchemy.com/v2/…')
   ph($('#st-rpc-eth'), r.rpc.ethereum, '.env 里已配（ETH_RPC_URL）', 'https://eth-mainnet.g.alchemy.com/v2/…')
   ph($('#st-rpc-bsc'), r.rpc.bsc, '.env 里已配（BSC_RPC_URL）', 'https://bnb-mainnet.g.alchemy.com/v2/…')
+  ph($('#st-rpc-arc'), r.rpc.arc, '.env 里已配（ARC_RPC_URL）', '主节点, 备用节点（OKX 钱包 / Alchemy 给的 Arc 主网 RPC）')
   ph($('#st-rpc-sol'), r.rpc.solana, '.env 里已配（SOL_RPC_URL）', 'https://solana-mainnet.g.alchemy.com/v2/…')
   $('#st-api-uni').value = r.rpc.uniswapUrl || ''
   const rpcState = (v) => v.set ? '设置页' : v.env ? '.env' : '公共节点'
-  $('#st-rpc-status').textContent = `当前生效：Ethereum ${rpcState(r.rpc.ethereum)} · Robinhood ${rpcState(r.rpc.robinhood)} · BSC ${rpcState(r.rpc.bsc)} · Solana ${rpcState(r.rpc.solana)}`
+  $('#st-rpc-status').textContent = `当前生效：Ethereum ${rpcState(r.rpc.ethereum)} · Robinhood ${rpcState(r.rpc.robinhood)} · BSC ${rpcState(r.rpc.bsc)} · Arc ${rpcState(r.rpc.arc)} · Solana ${rpcState(r.rpc.solana)}`
   ph($('#st-sol-jup'), r.solana.jupiterApiKey, '.env 里已配（JUPITER_API_KEY）', '可选：不填用免 key 的 lite-api.jup.ag')
   $('#st-sol-fee').value = r.solana.priorityFee || ''; $('#st-sol-hist').value = r.solana.historyTxs || ''
   $('#st-sol-status').textContent = r.solana.jupiterApiKey.set || r.solana.jupiterApiKey.env ? 'Jupiter key 已配置' : 'Jupiter 用免 key 接口'
@@ -1674,7 +1687,7 @@ const stBusy = async (btn, fn) => { btn.disabled = true; try { await fn() } catc
 $('#st-tg-save').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings', { section: 'telegram', botToken: $('#st-tg-token').value, chatId: $('#st-tg-chat').value }); $('#st-tg-token').value = ''; toast('已保存'); loadSettings(); loadState(false) })
 $('#st-tg-test').onclick = (e) => stBusy(e.target, async () => { await api('/api/settings/test', { section: 'telegram' }); toast('测试消息已发出，看 Telegram') })
 $('#st-rpc-save').onclick = (e) => stBusy(e.target, async () => {
-  await api('/api/settings', { section: 'rpc', ethereum: $('#st-rpc-eth').value.trim(), robinhood: $('#st-rpc-rhc').value.trim(), bsc: $('#st-rpc-bsc').value.trim(), solana: $('#st-rpc-sol').value.trim(), uniswapUrl: $('#st-api-uni').value.trim() })
+  await api('/api/settings', { section: 'rpc', ethereum: $('#st-rpc-eth').value.trim(), robinhood: $('#st-rpc-rhc').value.trim(), bsc: $('#st-rpc-bsc').value.trim(), arc: $('#st-rpc-arc').value.trim(), solana: $('#st-rpc-sol').value.trim(), uniswapUrl: $('#st-api-uni').value.trim() })
   toast('已保存，节点立即生效'); loadSettings(); loadState(false)
 })
 $('#st-sol-save').onclick = (e) => stBusy(e.target, async () => {
@@ -1722,7 +1735,9 @@ async function switchTo(c, p) {
 $('#sel-chain').onchange = () => { const c = $('#sel-chain').value; switchTo(c, localStorage.getItem('protocol:' + c) || '') }
 $('#sel-protocol').onchange = () => { const p = $('#sel-protocol').value; localStorage.setItem('protocol:' + SEL.chain, p); switchTo(SEL.chain, p) }
 $('#f-quote').onchange = () => { SEL.quote = $('#f-quote').value; localStorage.setItem('quote:solana', SEL.quote); switchTo(SEL.chain, SEL.protocol) }
-loadState(true).then(() => { connectEvents(); setAuto(); setInterval(() => loadState(false), 30000) })
+loadState(true).then(() => { connectEvents(); setAuto(); setInterval(() => { if (!document.hidden) loadState(false) }, 60000) })
+// 标签页切回前台：后台期间没读链，立刻补一次
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadState(false); if ($('#page-positions').classList.contains('on')) loadPositions(false) } })
 </script>
 </body>
 </html>

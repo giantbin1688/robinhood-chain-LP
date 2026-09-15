@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "One-command concentrated LP on Robinhood Chain / BNB Chain / Solana: swap, create or reuse a pool, LP around spot, monitor, exit",
+  "description": "One-command concentrated LP on Robinhood Chain / BNB Chain / Ethereum / Arc / Solana: swap, create or reuse a pool, LP around spot, monitor, exit",
   "scripts": {
     "launch": "node --env-file=.env --env-file=params.env --import tsx src/run.ts launch",
     "exit": "node --env-file=.env --env-file=params.env --import tsx src/run.ts exit",
